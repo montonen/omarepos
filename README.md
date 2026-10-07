@@ -90,7 +90,7 @@ omarepos [options]
 | `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Ctrl+A` | Select every repo shown; again to deselect |
-| `Esc` | Back out: what you are typing, then the selection, then the filter |
+| `Esc` | Back out: what you are typing, then the page, then the selection, then the filter |
 | `Ctrl+G` | Contributions for the selected repos, or all of them |
 | `Ctrl+Shift+A` | Clear the selection |
 | `lang:rust` in the filter | Narrow by language |

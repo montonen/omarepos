@@ -1198,7 +1198,11 @@ impl Ui {
     }
 
     /// Escape backs out of whatever is in the way, nearest first: the text you
-    /// are typing, then the selection, then a filter left in the box.
+    /// are typing, then the page you are on, then the selection, then a filter
+    /// left in the box.
+    ///
+    /// Binding Escape on the window shadows the navigation view's own, so
+    /// going back has to be handled here or it stops working at all.
     fn on_escape(self: &Rc<Self>) {
         if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
@@ -1207,6 +1211,11 @@ impl Ui {
                     return;
                 }
             }
+        }
+
+        if self.nav.navigation_stack().n_items() > 1 {
+            self.nav.pop();
+            return;
         }
 
         if !self.selected.borrow().is_empty() {
