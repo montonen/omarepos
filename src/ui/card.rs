@@ -10,19 +10,28 @@ use crate::git::RepoInfo;
 use crate::theme::Palette;
 use crate::ui::{Action, relative_time};
 
+/// Everything about a card that does not come from the repository itself.
+pub struct Context<'a> {
+    pub tags: &'a [String],
+    pub selected: bool,
+    /// Whether the background refresh is set to fast-forward. Only then is it
+    /// true to say a repository is being held back rather than merely behind.
+    pub auto_update: bool,
+    /// What the last refresh pass said, when it had something to complain
+    /// about. Otherwise the failure only reaches stderr, which under a desktop
+    /// launcher nobody reads.
+    pub fetch_error: Option<&'a str>,
+}
+
 /// Build the card widget. `on_action` is invoked with the repo the user acted
 /// on; `on_select` with the new state of the card's selection checkbox.
 pub fn build(
     info: &RepoInfo,
-    tags: &[String],
-    selected: bool,
-    // `auto_update`: whether the background refresh is set to fast-forward.
-    // Only then is it true to say a repository is being held back rather than
-    // merely behind.
-    auto_update: bool,
+    ctx: &Context<'_>,
     on_action: Rc<dyn Fn(Action, &RepoInfo)>,
     on_select: Rc<dyn Fn(&RepoInfo, bool)>,
 ) -> gtk::Widget {
+    let Context { tags, selected, auto_update, fetch_error } = *ctx;
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(7)
@@ -80,13 +89,18 @@ pub fn build(
         .max_width_chars(34)
         .build();
     path.add_css_class("om-path");
-    path.set_tooltip_text(Some(&format!(
-        "{}\n\nClick the card for its commit graph.",
-        info.path.display()
-    )));
+    let mut where_tip = info.path.display().to_string();
+    if let Some(identity) = &info.identity {
+        where_tip.push_str(&format!("\n\nCommits as {identity}"));
+    }
+    if let Some(credentials) = &info.credentials {
+        where_tip.push_str(&format!("\nFetches with {credentials}"));
+    }
+    where_tip.push_str("\n\nClick the card for its commit graph.");
+    path.set_tooltip_text(Some(&where_tip));
     card.append(&path);
 
-    card.append(&pills(info, auto_update));
+    card.append(&pills(info, auto_update, fetch_error));
 
     if !tags.is_empty() {
         card.append(&tag_row(tags));
@@ -164,7 +178,7 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-fn pills(info: &RepoInfo, auto_update: bool) -> gtk::Box {
+fn pills(info: &RepoInfo, auto_update: bool, fetch_error: Option<&str>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
 
     if let Some(err) = &info.error {
@@ -252,6 +266,16 @@ fn pills(info: &RepoInfo, auto_update: bool) -> gtk::Box {
             }
         }
     }
+    // A fetch that failed leaves a repository looking merely out of date, and
+    // the reason only in a log nobody opens.
+    if let Some(error) = fetch_error {
+        let p = pill("fetch failed", "danger");
+        p.set_tooltip_text(Some(&format!(
+            "The last refresh could not fetch this repository:\n{error}"
+        )));
+        row.append(&p);
+    }
+
     if info.stashes > 0 {
         let p = pill(&format!("⌸{}", info.stashes), "");
         p.set_tooltip_text(Some("stash entries"));

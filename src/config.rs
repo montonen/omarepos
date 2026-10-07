@@ -185,6 +185,39 @@ pub fn last_refresh() -> Option<i64> {
         .and_then(|text| text.trim().parse().ok())
 }
 
+/// Repositories the last pass could not fetch. Kept with the refresh time, in
+/// the state directory: the failure outlives the session that discovered it,
+/// and a card that cannot say why it is stuck is the thing this exists to fix.
+pub fn fetch_errors_path() -> PathBuf {
+    last_refresh_path().with_file_name("fetch-errors.toml")
+}
+
+pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(fetch_errors_path())
+        .ok()
+        .and_then(|text| toml::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, String>) {
+    let path = fetch_errors_path();
+    if errors.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match toml::to_string_pretty(errors) {
+        Ok(body) => {
+            if let Err(err) = std::fs::write(&path, body) {
+                eprintln!("omarepos: could not record fetch failures: {err}");
+            }
+        }
+        Err(err) => eprintln!("omarepos: could not encode fetch failures: {err}"),
+    }
+}
+
 pub fn record_refresh(at: i64) {
     let path = last_refresh_path();
     if let Some(parent) = path.parent() {

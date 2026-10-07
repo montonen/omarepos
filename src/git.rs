@@ -64,6 +64,13 @@ pub struct RepoInfo {
     pub tracked_files: usize,
     pub langs: Vec<LangShare>,
     pub last_commit: Option<Commit>,
+    /// Who commits here — `includeIf gitdir:` makes this differ per repository,
+    /// and a misconfigured rule is otherwise silent until something is pushed
+    /// under the wrong name.
+    pub identity: Option<String>,
+    /// The credential helper that will be used for the remote's host, which is
+    /// what decides *which account* a fetch authenticates as.
+    pub credentials: Option<String>,
     /// Set when libgit2 could not read the repository at all.
     pub error: Option<String>,
 }
@@ -308,6 +315,8 @@ pub fn inspect(path: &Path) -> RepoInfo {
         tracked_files: 0,
         langs: Vec::new(),
         last_commit: None,
+        identity: None,
+        credentials: None,
         error: None,
     };
 
@@ -401,6 +410,37 @@ pub fn inspect(path: &Path) -> RepoInfo {
                     .and_then(|r| r.url().ok().map(prettify_remote))
             })
         });
+
+    // libgit2 evaluates conditional includes, so this is the same answer
+    // `git config` gives in that directory — no subprocess needed.
+    if let Ok(config) = repo.config().and_then(|mut c| c.snapshot()) {
+        let name = config.get_str("user.name").ok().map(str::to_string);
+        let email = config.get_str("user.email").ok().map(str::to_string);
+        info.identity = match (name, email) {
+            (Some(name), Some(email)) => Some(format!("{name} <{email}>")),
+            (Some(name), None) => Some(name),
+            (None, Some(email)) => Some(email),
+            (None, None) => None,
+        };
+
+        let host = info
+            .remote
+            .as_deref()
+            .and_then(|r| r.split('/').next())
+            .unwrap_or("github.com");
+        for key in [
+            format!("credential.https://{host}.helper"),
+            "credential.helper".to_string(),
+        ] {
+            if let Ok(helper) = config.get_str(&key) {
+                let helper = helper.trim().trim_start_matches('!').trim();
+                if !helper.is_empty() {
+                    info.credentials = Some(helper.to_string());
+                    break;
+                }
+            }
+        }
+    }
 
     if !info.bare {
         let mut opts = StatusOptions::new();

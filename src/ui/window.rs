@@ -1,7 +1,7 @@
 //! The main window: a searchable, sortable grid of repository cards.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -103,6 +103,9 @@ struct Ui {
     refresh_armed: Cell<u64>,
     /// Whether the "is a refresh overdue" question has been asked this run.
     checked_overdue: Cell<bool>,
+    /// Repositories the last refresh could not fetch, and why. Keyed by the
+    /// path as a string so it can be written out and read back.
+    fetch_errors: RefCell<BTreeMap<String, String>>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -301,6 +304,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         refresh_source: RefCell::new(None),
         refresh_armed: Cell::new(0),
         checked_overdue: Cell::new(false),
+        fetch_errors: RefCell::new(crate::config::load_fetch_errors()),
         refreshing: Cell::new(false),
         refresh_progress: Cell::new((0, 0)),
         last_refresh: Cell::new(crate::config::last_refresh()),
@@ -742,13 +746,19 @@ impl Ui {
             cfg.refresh.enabled() && cfg.refresh.fast_forward
         };
         for info in &repos {
-            let selected = self.selected.borrow().contains(&info.path);
             let tags = self.meta.borrow().tags_for(&info.path).to_vec();
+            let errors = self.fetch_errors.borrow();
+            let ctx = card::Context {
+                tags: &tags,
+                selected: self.selected.borrow().contains(&info.path),
+                auto_update,
+                fetch_error: errors
+                    .get(&info.path.display().to_string())
+                    .map(String::as_str),
+            };
             self.flow.append(&card::build(
                 info,
-                &tags,
-                selected,
-                auto_update,
+                &ctx,
                 Rc::clone(&on_action),
                 Rc::clone(&on_select),
             ));
@@ -970,6 +980,9 @@ impl Ui {
                         summary.add(&report.outcome);
                         match &report.outcome {
                             refresh::Outcome::Failed(err) => {
+                                ui.fetch_errors
+                                    .borrow_mut()
+                                    .insert(report.path.display().to_string(), err.clone());
                                 eprintln!(
                                     "omarepos: {} failed: {err} ({})",
                                     report.name,
@@ -993,6 +1006,11 @@ impl Ui {
                             }
                             _ => {}
                         }
+                        if !matches!(report.outcome, refresh::Outcome::Failed(_)) {
+                            ui.fetch_errors
+                                .borrow_mut()
+                                .remove(&report.path.display().to_string());
+                        }
                         ui.update_status();
                     }
                     refresh::Event::Done => break,
@@ -1005,6 +1023,7 @@ impl Ui {
             let finished = now_seconds();
             ui.last_refresh.set(Some(finished));
             crate::config::record_refresh(finished);
+            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
             if manual || summary.updated > 0 || summary.failed > 0 {
                 ui.toasts.add_toast(adw::Toast::new(&summary.line()));
             }
