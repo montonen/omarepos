@@ -61,7 +61,10 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
-    let status = gtk::Label::builder().xalign(0.0).build();
+    let status = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
     status.add_css_class("om-statusbar");
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);

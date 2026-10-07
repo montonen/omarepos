@@ -5,6 +5,7 @@ mod git;
 mod graph;
 mod lang;
 mod meta;
+mod refresh;
 mod scan;
 mod stats;
 mod theme;

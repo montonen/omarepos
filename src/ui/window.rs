@@ -12,6 +12,7 @@ use adw::prelude::*;
 
 use crate::config::Config;
 use crate::meta::Meta;
+use crate::refresh::{self, Summary};
 use crate::git::RepoInfo;
 use crate::scan::{self, Event};
 use crate::theme::Palette;
@@ -57,6 +58,7 @@ struct Ui {
     sort: gtk::DropDown,
     dirty_only: gtk::ToggleButton,
     tags_content: adw::ButtonContent,
+    scroller: gtk::ScrolledWindow,
     /// Lower-cased tags the grid is narrowed to; empty means no tag filter.
     tag_filter: RefCell<BTreeSet<String>>,
     /// Show only repositories with no tags at all.
@@ -75,6 +77,12 @@ struct Ui {
     contrib_content: adw::ButtonContent,
     generation: Cell<u64>,
     expected: Cell<usize>,
+    /// Handle of the periodic refresh timer, so it can be rescheduled.
+    refresh_source: RefCell<Option<glib::SourceId>>,
+    refreshing: Cell<bool>,
+    refresh_progress: Cell<(usize, usize)>,
+    /// Unix seconds of the last completed fetch pass.
+    last_refresh: Cell<Option<i64>>,
     monitors: RefCell<Vec<gio::FileMonitor>>,
 }
 
@@ -93,7 +101,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let title = gtk::Label::new(Some("OMAREPOS"));
     title.add_css_class("om-title");
-    let subtitle = gtk::Label::new(None);
+    let subtitle = gtk::Label::builder()
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .max_width_chars(44)
+        .build();
     subtitle.add_css_class("om-subtitle");
     title_box.append(&title);
     title_box.append(&subtitle);
@@ -101,7 +112,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     let refresh = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
-        .tooltip_text("Rescan (Ctrl+R)")
+        .tooltip_text("Rescan (Ctrl+R)  ·  fetch now (Ctrl+Shift+R)")
         .has_frame(false)
         .build();
     header.pack_start(&refresh);
@@ -192,7 +203,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
-    let status = gtk::Label::builder().xalign(0.0).build();
+    // A label's minimum width is its whole text unless it may ellipsize, and
+    // this one gets long enough to force the window wider than the screen.
+    let status = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
     status.add_css_class("om-statusbar");
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -226,6 +242,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         sort: sort.clone(),
         dirty_only: dirty_only.clone(),
         tags_content,
+        scroller: scroller.clone(),
         tag_filter: RefCell::new(BTreeSet::new()),
         untagged_only: Cell::new(false),
         spinner,
@@ -239,6 +256,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         contrib_content,
         generation: Cell::new(0),
         expected: Cell::new(0),
+        refresh_source: RefCell::new(None),
+        refreshing: Cell::new(false),
+        refresh_progress: Cell::new((0, 0)),
+        last_refresh: Cell::new(None),
         monitors: RefCell::new(Vec::new()),
     });
 
@@ -343,6 +364,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_refresh);
 
+    let act_fetch = gio::SimpleAction::new("fetch", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_fetch.connect_activate(move |_, _| ui.run_refresh(true));
+    }
+    window.add_action(&act_fetch);
+
     let act_contrib = gio::SimpleAction::new("contributions", None);
     {
         let ui = Rc::clone(&ui);
@@ -383,6 +411,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.search", &["<Ctrl>f", "slash"]);
     app.set_accels_for_action("win.contributions", &["<Ctrl>g"]);
     app.set_accels_for_action("win.settings", &["<Ctrl>comma"]);
+    app.set_accels_for_action("win.fetch", &["<Ctrl><Shift>r"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
@@ -398,6 +427,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     ui.apply_theme();
     ui.watch_theme();
+    ui.schedule_refresh();
     ui.start_scan();
     window.present();
 }
@@ -580,6 +610,12 @@ impl Ui {
     }
 
     fn rebuild(self: &Rc<Self>) {
+        // A background refresh rebuilds the grid under the user's hands, so
+        // the scroll position has to survive it. Restoring on the next frame
+        // rather than immediately gives the flow box time to allocate, without
+        // which the adjustment clamps the value back to zero.
+        let offset = self.scroller.vadjustment().value();
+
         while let Some(child) = self.flow.first_child() {
             self.flow.remove(&child);
         }
@@ -621,6 +657,13 @@ impl Ui {
         let page = if repos.is_empty() && !scanning { "empty" } else { "grid" };
         self.stack.set_visible_child_name(page);
         self.update_status();
+
+        if offset > 0.0 {
+            let adjustment = self.scroller.vadjustment();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+                adjustment.set_value(offset);
+            });
+        }
     }
 
     fn update_status(&self) {
@@ -632,7 +675,10 @@ impl Ui {
         let broken = repos.iter().filter(|r| r.error.is_some()).count();
 
         let mut parts = vec![format!("{total} repos")];
-        if self.spinner.is_visible() {
+        if self.refreshing.get() {
+            let (done, of) = self.refresh_progress.get();
+            parts = vec![format!("fetching {done}/{of}")];
+        } else if self.spinner.is_visible() {
             let expected = self.expected.get();
             if expected > 0 {
                 parts = vec![format!("scanning {total}/{expected}")];
@@ -652,6 +698,20 @@ impl Ui {
         if selected > 0 {
             parts.push(format!("{selected} selected"));
         }
+        if let Some(when) = self.last_refresh.get() {
+            parts.push(format!("fetched {}", ui::relative_time(when)));
+        }
+        let settings = &self.cfg.borrow().refresh;
+        if settings.enabled() {
+            let what = if settings.fast_forward {
+                "fast-forward"
+            } else if settings.fetch {
+                "fetch"
+            } else {
+                "rescan"
+            };
+            parts.push(format!("auto {what} every {}m", settings.every_minutes));
+        }
         let tag_filter = self.tag_filter.borrow();
         if !tag_filter.is_empty() {
             parts.push(format!(
@@ -662,6 +722,151 @@ impl Ui {
             parts.push("untagged only".to_string());
         }
         self.status.set_label(&parts.join("  ·  "));
+    }
+
+    /// (Re)arm the periodic refresh from the current settings. Called at
+    /// startup and after every settings change.
+    fn schedule_refresh(self: &Rc<Self>) {
+        if let Some(source) = self.refresh_source.borrow_mut().take() {
+            source.remove();
+        }
+        let settings = self.cfg.borrow().refresh.clone();
+        if !settings.enabled() {
+            self.update_status();
+            return;
+        }
+        let ui = Rc::clone(self);
+        let source = glib::timeout_add_local(settings.interval(), move || {
+            ui.run_refresh(false);
+            glib::ControlFlow::Continue
+        });
+        *self.refresh_source.borrow_mut() = Some(source);
+        self.update_status();
+    }
+
+    /// Which repositories a refresh covers: everything found, narrowed to the
+    /// configured tags when there are any. Deliberately not the *filtered*
+    /// grid — what you are looking at should not change what gets fetched.
+    fn refresh_scope(&self) -> Vec<PathBuf> {
+        let wanted: Vec<String> = self
+            .cfg
+            .borrow()
+            .refresh
+            .only_tags
+            .iter()
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let meta = self.meta.borrow();
+        self.repos
+            .borrow()
+            .iter()
+            .filter(|repo| repo.error.is_none())
+            .filter(|repo| {
+                wanted.is_empty()
+                    || meta
+                        .tags_for(&repo.path)
+                        .iter()
+                        .any(|tag| wanted.contains(&tag.to_lowercase()))
+            })
+            .map(|repo| repo.path.clone())
+            .collect()
+    }
+
+    /// Run a refresh pass. `manual` means the user asked, which fetches even
+    /// when the background setting is off and reports when nothing was done.
+    fn run_refresh(self: &Rc<Self>, manual: bool) {
+        if self.refreshing.get() || self.spinner.is_visible() {
+            if manual {
+                self.toasts
+                    .add_toast(adw::Toast::new("Already busy — try again in a moment"));
+            }
+            return;
+        }
+
+        let settings = self.cfg.borrow().refresh.clone();
+        if !manual && !settings.will_fetch() {
+            // Local-only refresh: just re-read what is on disk.
+            self.start_scan();
+            return;
+        }
+
+        let repos = self.refresh_scope();
+        if repos.is_empty() {
+            if manual {
+                self.toasts
+                    .add_toast(adw::Toast::new("Nothing in scope to fetch"));
+            }
+            return;
+        }
+
+        let total = repos.len();
+        self.refreshing.set(true);
+        self.refresh_progress.set((0, total));
+        self.spinner.set_visible(true);
+        self.spinner.start();
+        self.update_status();
+
+        let rx = refresh::spawn(
+            repos,
+            refresh::Options {
+                fast_forward: settings.fast_forward,
+                max_parallel: settings.max_parallel,
+                timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
+            },
+        );
+
+        let ui = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let mut summary = Summary::default();
+            let mut done = 0usize;
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    refresh::Event::Repo(report) => {
+                        done += 1;
+                        ui.refresh_progress.set((done, total));
+                        summary.add(&report.outcome);
+                        match &report.outcome {
+                            refresh::Outcome::Failed(err) => {
+                                eprintln!(
+                                    "omarepos: {} failed: {err} ({})",
+                                    report.name,
+                                    report.path.display()
+                                );
+                            }
+                            refresh::Outcome::FastForwarded(n) => {
+                                eprintln!(
+                                    "omarepos: {} fast-forwarded {n} commits ({})",
+                                    report.name,
+                                    report.path.display()
+                                );
+                            }
+                            refresh::Outcome::Skipped(skip) => {
+                                eprintln!(
+                                    "omarepos: {} left alone: {} ({})",
+                                    report.name,
+                                    skip.reason(),
+                                    report.path.display()
+                                );
+                            }
+                            _ => {}
+                        }
+                        ui.update_status();
+                    }
+                    refresh::Event::Done => break,
+                }
+            }
+
+            ui.refreshing.set(false);
+            ui.spinner.stop();
+            ui.spinner.set_visible(false);
+            ui.last_refresh.set(Some(now_seconds()));
+            if manual || summary.updated > 0 || summary.failed > 0 {
+                ui.toasts.add_toast(adw::Toast::new(&summary.line()));
+            }
+            // Re-read local state so the cards show what the fetch changed.
+            ui.start_scan();
+        });
     }
 
     fn update_tag_label(&self) {
@@ -782,7 +987,10 @@ impl Ui {
     fn open_settings(self: &Rc<Self>) {
         let rescan = {
             let ui = Rc::clone(self);
-            Rc::new(move || ui.start_scan()) as Rc<dyn Fn()>
+            Rc::new(move || {
+                ui.schedule_refresh();
+                ui.start_scan();
+            }) as Rc<dyn Fn()>
         };
         let restyle = {
             let ui = Rc::clone(self);
@@ -907,4 +1115,11 @@ fn find_check(widget: &gtk::Widget) -> Option<gtk::CheckButton> {
         child = current.next_sibling();
     }
     None
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

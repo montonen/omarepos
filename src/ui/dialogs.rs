@@ -40,11 +40,16 @@ pub fn settings(
         .title("Tools")
         .description("Used by the open actions on each card.")
         .build();
+    let refresh_group = adw::PreferencesGroup::builder()
+        .title("Background refresh")
+        .description("Keeps the grid current, and optionally the code with it.")
+        .build();
     let look_group = adw::PreferencesGroup::builder().title("Appearance").build();
     page.add(&roots_group);
     page.add(&repos_group);
     page.add(&depth_group);
     page.add(&tools_group);
+    page.add(&refresh_group);
     page.add(&look_group);
 
     // Both lists are rebuilt wholesale after each edit; they are short, and it
@@ -184,6 +189,88 @@ pub fn settings(
                 }
             }
             persist(&cfg);
+        });
+    }
+
+    // --- background refresh ------------------------------------------------
+    let every = adw::SpinRow::with_range(0.0, 1440.0, 5.0);
+    every.set_title("Refresh every");
+    every.set_subtitle("Minutes. Zero turns it off.");
+    every.set_value(cfg.borrow().refresh.every_minutes as f64);
+    refresh_group.add(&every);
+
+    let fetch = adw::SwitchRow::builder()
+        .title("Fetch from the remote")
+        .subtitle("Updates what the remote has. Never touches your files.")
+        .active(cfg.borrow().refresh.fetch)
+        .build();
+    refresh_group.add(&fetch);
+
+    let fast_forward = adw::SwitchRow::builder()
+        .title("Update the code when it is safe")
+        .subtitle("Fast-forward only, and only a clean tree with no commits of its own")
+        .active(cfg.borrow().refresh.fast_forward)
+        .sensitive(cfg.borrow().refresh.fetch)
+        .build();
+    refresh_group.add(&fast_forward);
+
+    let scope = adw::EntryRow::builder()
+        .title("Only repos tagged")
+        .show_apply_button(true)
+        .build();
+    scope.set_text(&cfg.borrow().refresh.only_tags.join(", "));
+    scope.set_tooltip_text(Some("Comma separated. Blank means every repository."));
+    refresh_group.add(&scope);
+
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        every.connect_value_notify(move |row| {
+            let value = row.value().round().max(0.0) as u64;
+            if cfg.borrow().refresh.every_minutes == value {
+                return;
+            }
+            cfg.borrow_mut().refresh.every_minutes = value;
+            persist(&cfg);
+            on_change();
+        });
+    }
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        let fast_forward = fast_forward.clone();
+        fetch.connect_active_notify(move |switch| {
+            let on = switch.is_active();
+            cfg.borrow_mut().refresh.fetch = on;
+            // Fast-forwarding without fetching could only ever act on a stale
+            // remote ref, so the two travel together.
+            if !on {
+                cfg.borrow_mut().refresh.fast_forward = false;
+                fast_forward.set_active(false);
+            }
+            fast_forward.set_sensitive(on);
+            persist(&cfg);
+            on_change();
+        });
+    }
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        fast_forward.connect_active_notify(move |switch| {
+            cfg.borrow_mut().refresh.fast_forward = switch.is_active();
+            persist(&cfg);
+            on_change();
+        });
+    }
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        scope.connect_apply(move |entry| {
+            let tags = crate::meta::parse_list(&entry.text());
+            entry.set_text(&tags.join(", "));
+            cfg.borrow_mut().refresh.only_tags = tags;
+            persist(&cfg);
+            on_change();
         });
     }
 

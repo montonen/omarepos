@@ -84,7 +84,8 @@ omarepos [options]
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+R` / `F5` | Rescan |
+| `Ctrl+R` / `F5` | Rescan (local only) |
+| `Ctrl+Shift+R` | Fetch now |
 | `Ctrl+F` / `/` | Focus the filter box |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Esc` | Clear the filter |
@@ -183,6 +184,71 @@ live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
 - Tag colours are derived from the tag's own name, so a tag keeps its colour
   across repos and across runs.
 
+## Background refresh
+
+Off by default. Turn it on in settings, or in the config file:
+
+```toml
+[refresh]
+every_minutes = 15     # 0 turns it off
+fetch = true           # run `git fetch`; touches the network, not your files
+fast_forward = true    # update the code where that is unambiguously safe
+only_tags = ["work"]   # blank means every repository
+max_parallel = 4
+timeout_seconds = 60
+```
+
+With `fetch` off it only re-reads local state. With `fetch` on, ahead/behind
+stops going stale. With `fast_forward` on it also moves the checked-out branch.
+
+`Ctrl+Shift+R` runs a pass immediately, whatever the schedule says.
+
+### What it will and will not do
+
+The only write it ever performs is a fast-forward of the checked-out branch. A
+repository is left alone, with the reason reported, when any of these hold:
+
+| Condition | Why |
+| --- | --- |
+| Uncommitted changes | Updating under your edits is not the app's call |
+| Commits of its own | A fast-forward would not be one |
+| Detached HEAD | No branch to move |
+| No upstream | Nothing to move it to |
+| Merge or rebase in progress | You are in the middle of something |
+| Bare, or no commits yet | Nothing to do |
+
+Cleanliness is checked twice — once before the fetch and again immediately
+before the fast-forward — because the fetch takes time and you may have started
+editing during it. The update then runs `git merge --ff-only`, which refuses
+anything that is not a fast-forward even if those checks were wrong. It never
+merges, rebases, stashes, resets, forces, or touches submodules, and it only
+moves the branch you have checked out.
+
+Untracked files do not block an update: a fast-forward cannot silently
+overwrite one, because git refuses rather than clobbering it.
+
+### Why it shells out to `git`
+
+Authentication lives in credential helpers, SSH agents, `insteadOf` rewrites and
+`includeIf` identities — none of which libgit2 reads. Driving the same `git` you
+drive means your setup applies unchanged, including per-directory identities. A
+repository you cannot fetch by hand is one omarepos does not pretend it can
+fetch either; it reports the failure and moves on.
+
+Prompts are disabled (`GIT_TERMINAL_PROMPT=0`, and SSH in batch mode), so a
+repository whose credentials have expired fails quickly instead of parking a
+worker on a prompt nobody can answer. Each invocation has a timeout as a
+backstop.
+
+### Worth knowing
+
+- It does not pause on battery or a metered connection.
+- Fetching on a schedule is still traffic to your remotes, and on a work
+  machine that traffic is visible to whoever runs them.
+- Scope is the whole grid, or the tags in `only_tags` — deliberately not what
+  the filter box is showing, so what you are looking at never changes what gets
+  fetched.
+
 ## Commit graph
 
 Click any card for its history. Lanes are assigned the usual way: a commit takes
@@ -253,10 +319,13 @@ follow_omarchy_theme = true
 
 ## How it reads your repos
 
-Everything comes from libgit2 against the on-disk repository — omarepos never
-runs `git`, never writes to a repository, and never talks to a remote. Ahead/
-behind counts compare your local branch to the *last fetched* state of its
-upstream, exactly like `git status` does; they go stale until you fetch.
+Everything shown comes from libgit2 against the on-disk repository. Reading
+never runs `git`, never writes to a repository and never talks to a remote.
+Ahead/behind counts compare your local branch to the *last fetched* state of its
+upstream, exactly like `git status` does; they go stale until something fetches.
+
+The one exception is the background refresh below, which is off until you turn
+it on.
 
 Discovery skips `node_modules`, `vendor`, `target` and dotted directories, and
 the language mix is computed from the git index, so untracked build output never
@@ -274,6 +343,7 @@ counts.
 | `src/meta.rs` | Tag store (`repos.toml`) |
 | `src/stats.rs` | Contribution aggregation over a day window |
 | `src/scan.rs` | Worker threads streaming results to the main loop |
+| `src/refresh.rs` | Background fetch and fast-forward, with the safety rules |
 | `src/lang.rs` | Extension → language + colour table |
 | `src/ui/window.rs` | Header, filter, sort, grid, selection, status bar, theme watcher |
 | `src/ui/card.rs` | One repository card |

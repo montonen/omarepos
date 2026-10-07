@@ -133,6 +133,58 @@ pub struct Root {
     pub include_self: bool,
 }
 
+
+/// Background refresh. Off unless `every_minutes` is set, and even then it
+/// only re-reads local state until `fetch` is turned on as well.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Refresh {
+    /// Minutes between refreshes. Zero means never.
+    pub every_minutes: u64,
+    /// Run `git fetch` in each repository, updating what the remote has.
+    /// Touches the network but never the working tree.
+    pub fetch: bool,
+    /// Fast-forward the checked-out branch when it is clean and strictly
+    /// behind its upstream. Never merges, never rebases, never stashes.
+    pub fast_forward: bool,
+    /// Limit the refresh to repositories carrying one of these tags. Empty
+    /// means every repository in the grid.
+    pub only_tags: Vec<String>,
+    /// How many repositories to work on at once.
+    pub max_parallel: usize,
+    /// Seconds before a git invocation is given up on.
+    pub timeout_seconds: u64,
+}
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self {
+            every_minutes: 0,
+            fetch: false,
+            fast_forward: false,
+            only_tags: Vec::new(),
+            max_parallel: 4,
+            timeout_seconds: 60,
+        }
+    }
+}
+
+impl Refresh {
+    pub fn enabled(&self) -> bool {
+        self.every_minutes > 0
+    }
+
+    /// Fast-forwarding without fetching would only ever act on a stale remote
+    /// ref, so it implies a fetch.
+    pub fn will_fetch(&self) -> bool {
+        self.fetch || self.fast_forward
+    }
+
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.every_minutes.clamp(1, 24 * 60) * 60)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -148,6 +200,8 @@ pub struct Config {
     pub editor: Option<String>,
     /// Follow the active Omarchy theme and restyle when it changes.
     pub follow_omarchy_theme: bool,
+    /// Background refresh settings.
+    pub refresh: Refresh,
 }
 
 impl Default for Config {
@@ -159,6 +213,7 @@ impl Default for Config {
             terminal: None,
             editor: None,
             follow_omarchy_theme: true,
+            refresh: Refresh::default(),
         }
     }
 }
@@ -293,6 +348,18 @@ impl Config {
             "\nfollow_omarchy_theme = {}\n",
             self.follow_omarchy_theme
         ));
+
+        // A table has to come after every bare key, so this stays last.
+        let refresh = &self.refresh;
+        out.push_str("\n# Background refresh. `every_minutes = 0` turns it off.\n");
+        out.push_str("[refresh]\n");
+        out.push_str(&format!("every_minutes = {}\n", refresh.every_minutes));
+        out.push_str(&format!("fetch = {}\n", refresh.fetch));
+        out.push_str(&format!("fast_forward = {}\n", refresh.fast_forward));
+        out.push_str(&format!("only_tags = [{}]\n", list(&refresh.only_tags)));
+        out.push_str(&format!("max_parallel = {}\n", refresh.max_parallel));
+        out.push_str(&format!("timeout_seconds = {}\n", refresh.timeout_seconds));
+
         std::fs::write(&path, out)
     }
 
