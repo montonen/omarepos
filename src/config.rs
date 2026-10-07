@@ -169,6 +169,32 @@ impl Default for Refresh {
     }
 }
 
+/// Where the last refresh time is kept. Not in the config file: it is state,
+/// not configuration, and rewriting a file the user edits by hand every half
+/// hour is a good way to lose their comments.
+pub fn last_refresh_path() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/state"))
+        .join("omarepos/last-refresh")
+}
+
+pub fn last_refresh() -> Option<i64> {
+    std::fs::read_to_string(last_refresh_path())
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+}
+
+pub fn record_refresh(at: i64) {
+    let path = last_refresh_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(err) = std::fs::write(&path, at.to_string()) {
+        eprintln!("omarepos: could not record the refresh time: {err}");
+    }
+}
+
 impl Refresh {
     pub fn enabled(&self) -> bool {
         self.every_minutes > 0

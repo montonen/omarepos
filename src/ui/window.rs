@@ -101,6 +101,8 @@ struct Ui {
     /// Interval the live timer was armed with, so an unrelated settings change
     /// does not restart the countdown.
     refresh_armed: Cell<u64>,
+    /// Whether the "is a refresh overdue" question has been asked this run.
+    checked_overdue: Cell<bool>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -298,9 +300,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         expected: Cell::new(0),
         refresh_source: RefCell::new(None),
         refresh_armed: Cell::new(0),
+        checked_overdue: Cell::new(false),
         refreshing: Cell::new(false),
         refresh_progress: Cell::new((0, 0)),
-        last_refresh: Cell::new(None),
+        last_refresh: Cell::new(crate::config::last_refresh()),
         monitors: RefCell::new(Vec::new()),
     });
 
@@ -617,6 +620,7 @@ impl Ui {
                         // Arrow keys should work the moment the grid has
                         // something in it, without hunting for it with Tab.
                         ui.focus_grid(false);
+                        ui.refresh_if_overdue();
                         break;
                     }
                 }
@@ -892,6 +896,27 @@ impl Ui {
 
     /// Run a refresh pass. `manual` means the user asked, which fetches even
     /// when the background setting is off and reports when nothing was done.
+    /// A timer only runs while the window is open, and it first fires a whole
+    /// interval after launch. An app opened for five minutes at a time would
+    /// therefore never refresh at all — which is what happened. The last
+    /// refresh is remembered across runs, and one that is due runs now.
+    fn refresh_if_overdue(self: &Rc<Self>) {
+        if self.checked_overdue.replace(true) {
+            return;
+        }
+        let settings = self.cfg.borrow().refresh.clone();
+        if !settings.enabled() || !settings.will_fetch() {
+            return;
+        }
+        let due = match self.last_refresh.get() {
+            Some(last) => now_seconds() - last >= settings.interval().as_secs() as i64,
+            None => true,
+        };
+        if due {
+            self.run_refresh(false);
+        }
+    }
+
     fn run_refresh(self: &Rc<Self>, manual: bool) {
         if self.refreshing.get() || self.spinner.is_visible() {
             if manual {
@@ -977,7 +1002,9 @@ impl Ui {
             ui.refreshing.set(false);
             ui.spinner.stop();
             ui.spinner.set_visible(false);
-            ui.last_refresh.set(Some(now_seconds()));
+            let finished = now_seconds();
+            ui.last_refresh.set(Some(finished));
+            crate::config::record_refresh(finished);
             if manual || summary.updated > 0 || summary.failed > 0 {
                 ui.toasts.add_toast(adw::Toast::new(&summary.line()));
             }
