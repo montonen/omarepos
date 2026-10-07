@@ -671,6 +671,7 @@ dependencies = [
  "git2",
  "gtk4",
  "libadwaita",
+ "libc",
  "serde",
  "syntect",
  "toml 0.9.12+spec-1.1.0",

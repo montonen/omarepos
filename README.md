@@ -281,8 +281,15 @@ fetch either; it reports the failure and moves on.
 
 Prompts are disabled (`GIT_TERMINAL_PROMPT=0`, and SSH in batch mode), so a
 repository whose credentials have expired fails quickly instead of parking a
-worker on a prompt nobody can answer. Each invocation has a timeout as a
+worker on a prompt nobody can answer. The fetch has `timeout_seconds` as a
 backstop.
+
+The fast-forward does not share that timeout. It is a local write to your
+working tree, and a checkout stopped half-way is worse than one waited for, so
+it gets half an hour. When any git command is given up on, git is asked to stop
+before it is made to — a `SIGTERM` to its whole process group, hooks and filters
+included — because git removes its lock files when asked and leaves an
+`index.lock` behind when killed.
 
 ### Worth knowing
 

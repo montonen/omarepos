@@ -152,6 +152,15 @@ impl Pass {
 /// `merge.autoStash=false`: a user who has turned autostash on would otherwise
 /// have this stash and re-apply their work around the update, and this module
 /// promises never to stash.
+/// How long a fast-forward may take. Not `Options::timeout`: that one is tuned
+/// to give up on a dead network within a minute, and this is a local write to
+/// the working tree, which is worse stopped half-way than waited for. A
+/// checkout cut short leaves some files at the new commit, the branch at the
+/// old one, and a repository nobody touched looking as if somebody had edited
+/// it. Half an hour is a backstop against a filter that never returns, not an
+/// expectation.
+const FAST_FORWARD_PATIENCE: Duration = Duration::from_secs(30 * 60);
+
 const FAST_FORWARD: [&str; 7] = [
     "-c",
     "merge.autoStash=false",
@@ -251,7 +260,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     }
 
     let merge = options.pass.git(&FAST_FORWARD);
-    match crate::gitcmd::run(path, &merge, options.timeout) {
+    match crate::gitcmd::run(path, &merge, FAST_FORWARD_PATIENCE) {
         Ok(_) => report(Outcome::FastForwarded(behind)),
         Err(err) => report(Outcome::Refused(err)),
     }
@@ -589,6 +598,38 @@ mod tests {
         let got = fleet_pass(&f);
         assert!(matches!(got, Outcome::FastForwarded(2)), "{got:?}");
         assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
+    }
+
+    // ---- a fast-forward is not stopped half-way ---------------------------
+
+    /// Upstream adds files that pass through a slow filter on checkout: the
+    /// stand-in for git-lfs fetching objects, or a cold disk. The pass's
+    /// timeout is shorter than the checkout takes.
+    #[test]
+    fn a_slow_checkout_is_waited_for_not_cut_off_by_the_fetch_timeout() {
+        let _guard = isolate();
+        let f = fleet("refresh-slow-checkout");
+        f.remote_commits("binaries", |seed| {
+            write(&seed.join(".gitattributes"), "*.bin filter=slow\n");
+            for i in 0..3 {
+                write(&seed.join(format!("big-{i}.bin")), "payload\n");
+            }
+        });
+        git(&f.work, &["config", "filter.slow.smudge", "sh -c 'sleep 1; cat'"]);
+        git(&f.work, &["config", "filter.slow.clean", "cat"]);
+
+        let hurried = Options {
+            fast_forward: true,
+            max_parallel: 1,
+            timeout: Duration::from_secs(1),
+            pass: Pass::Fleet,
+        };
+        let got = refresh_one(&f.work, &hurried).outcome;
+
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+        assert!(!f.work.join(".git/index.lock").exists());
+        assert_eq!(git(&f.work, &["status", "--porcelain"]), "", "a half-updated tree");
     }
 
     // ---- nothing a repository carries runs on a pass nobody is watching ---

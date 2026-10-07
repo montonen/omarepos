@@ -13,6 +13,9 @@ git2 = { version = "0.21", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 async-channel = "2"
+# Only for kill(2) on a process group: giving up on a git command has to reach
+# the hooks and filters it started, and std can signal one process, not a group.
+libc = "0.2"
 # Syntax highlighting for the diff view. Pure Rust (no oniguruma), so the app
 # keeps installing with nothing but a C toolchain, and bundles its own syntax
 # definitions rather than depending on a system library being present.
