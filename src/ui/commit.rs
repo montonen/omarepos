@@ -795,6 +795,16 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
                     let at = buffer.end_iter().offset();
                     let mut end = buffer.end_iter();
                     buffer.insert(&mut end, piece);
+                    // The dark theme paints `invalid.illegal` in its own
+                    // background colour, on a red background that this view
+                    // does not draw. And a highlighter restarted at every hunk
+                    // calls a good deal of valid code invalid. So the token
+                    // was dark on dark: closing braces, C# method signatures
+                    // and the colons in JSON were simply not there. Untagged,
+                    // it takes the view's own text colour.
+                    if theme.and_then(|theme| theme.settings.background) == Some(style.foreground) {
+                        continue;
+                    }
                     let tag = colour_tag(buffer, style.foreground);
                     buffer.apply_tag(
                         &tag,
