@@ -50,16 +50,7 @@ pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, Strin
                 if status.success() {
                     return Ok(stdout);
                 }
-                // A hook's complaint is on stderr and is the whole reason the
-                // user is being told anything.
-                let message = stderr
-                    .lines()
-                    .chain(stdout.lines())
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("git failed")
-                    .trim()
-                    .to_string();
-                return Err(message);
+                return Err(explain(&stderr, &stdout));
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -71,5 +62,33 @@ pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, Strin
             }
             Err(err) => return Err(format!("git: {err}")),
         }
+    }
+}
+
+/// Pick the line worth showing out of git's output.
+///
+/// The first line is not it. A rejected push opens with `To <url>`, which says
+/// nothing; the reason is further down in `! [rejected]` or `error:`. Prefer a
+/// line that carries a complaint, and fall back to the first only when none
+/// does.
+fn explain(stderr: &str, stdout: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    let complaint = lines.iter().find(|line| {
+        let lower = line.to_lowercase();
+        lower.starts_with("! ")
+            || lower.starts_with("error:")
+            || lower.starts_with("fatal:")
+            || lower.contains("rejected")
+    });
+
+    match complaint.or_else(|| lines.first()) {
+        Some(line) => line.trim_start_matches("! ").trim().to_string(),
+        None => "git failed".to_string(),
     }
 }

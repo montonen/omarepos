@@ -62,6 +62,14 @@ pub struct Graph {
     /// How many uncommitted entries the working tree has, untracked included.
     /// Zero means there is nothing for a "Local changes" row to show.
     pub working_changes: usize,
+    /// Where the checked-out branch stands against its upstream, and what that
+    /// upstream is. `None` when there is no branch or no upstream.
+    pub ahead: usize,
+    pub behind: usize,
+    pub upstream: Option<String>,
+    /// The one remote, when there is exactly one — enough to publish a branch
+    /// that has never been pushed, and not enough to guess between several.
+    pub only_remote: Option<String>,
 }
 
 /// How far the walk will go past `limit` to reach a commit it was asked for.
@@ -118,6 +126,10 @@ pub fn build(
                 target: None,
                 target_missed: target.is_some(),
                 working_changes: working_changes(&repo),
+                ahead: 0,
+                behind: 0,
+                upstream: None,
+                only_remote: only_remote(&repo),
             });
         }
     }
@@ -233,6 +245,8 @@ pub fn build(
         }
     }
 
+    let (ahead, behind, upstream) = divergence(&repo);
+
     let lanes = rows
         .iter()
         .map(|r| r.incoming.len().max(r.outgoing.len()).max(r.lane + 1))
@@ -247,7 +261,41 @@ pub fn build(
         target: found_at,
         target_missed: target.is_some() && found_at.is_none(),
         working_changes: working_changes(&repo),
+        ahead,
+        behind,
+        upstream,
+        only_remote: only_remote(&repo),
     })
+}
+
+/// The name of the only remote, when there is exactly one.
+fn only_remote(repo: &Repository) -> Option<String> {
+    let remotes = repo.remotes().ok()?;
+    if remotes.len() != 1 {
+        return None;
+    }
+    remotes.iter().next()?.ok().flatten().map(str::to_string)
+}
+
+/// How far the checked-out branch is from its upstream.
+fn divergence(repo: &Repository) -> (usize, usize, Option<String>) {
+    let Ok(head) = repo.head() else { return (0, 0, None) };
+    if repo.head_detached().unwrap_or(false) {
+        return (0, 0, None);
+    }
+    let Ok(name) = head.shorthand() else { return (0, 0, None) };
+    let Ok(branch) = repo.find_branch(name, git2::BranchType::Local) else {
+        return (0, 0, None);
+    };
+    let Ok(upstream) = branch.upstream() else { return (0, 0, None) };
+    let label = upstream.name().ok().flatten().map(str::to_string);
+    let (Some(local), Some(remote)) = (branch.get().target(), upstream.get().target()) else {
+        return (0, 0, label);
+    };
+    match repo.graph_ahead_behind(local, remote) {
+        Ok((ahead, behind)) => (ahead, behind, label),
+        Err(_) => (0, 0, label),
+    }
 }
 
 /// Count the working tree off the main thread. The window asks for this every

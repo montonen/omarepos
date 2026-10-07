@@ -545,6 +545,66 @@ fn append_patch(diff: &Diff<'_>, out: &mut FileDiff) {
     }
 }
 
+/// Why a push cannot go ahead, as a sentence. Checked before invoking git so
+/// the user gets an explanation rather than a rejection from the far end.
+pub fn why_not_push(
+    ahead: usize,
+    behind: usize,
+    upstream: Option<&str>,
+    only_remote: Option<&str>,
+) -> Option<String> {
+    if upstream.is_none() {
+        return match only_remote {
+            // Publishing a branch is a different act from pushing one, and it
+            // is named differently in the UI.
+            Some(_) => None,
+            None => Some(
+                "This branch has no upstream, and there is no single remote to publish it to."
+                    .into(),
+            ),
+        };
+    }
+    if behind > 0 {
+        return Some(format!(
+            "{behind} commits are waiting on the upstream. Fast-forward first — a push would be rejected."
+        ));
+    }
+    if ahead == 0 {
+        return Some("Nothing to push.".into());
+    }
+    None
+}
+
+/// Push the checked-out branch to its upstream. Never forced, never `--all`,
+/// never tags. `publish` names the remote for a branch that has never been
+/// pushed, which is the only time an upstream is set.
+pub fn spawn_push(
+    repo: PathBuf,
+    branch: String,
+    publish: Option<String>,
+) -> async_channel::Receiver<Result<String, String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let mut args: Vec<String> = vec!["push".into()];
+        if let Some(remote) = publish {
+            args.push("--set-upstream".into());
+            args.push(remote);
+            args.push(branch);
+        }
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        // A pre-push hook can be a test suite, so the same patience as a commit.
+        let result = crate::gitcmd::run(&repo, &borrowed, WRITE_TIMEOUT).map(|out| {
+            out.lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("Pushed")
+                .trim()
+                .to_string()
+        });
+        let _ = tx.send_blocking(result);
+    });
+    rx
+}
+
 /// A node in the tree the pane draws.
 pub enum Node {
     /// A directory, with the path segment(s) it stands for. Single-child chains

@@ -217,7 +217,8 @@ timeout_seconds = 60
 With `fetch` off it only re-reads local state. With `fetch` on, ahead/behind
 stops going stale. With `fast_forward` on it also moves the checked-out branch.
 
-`Ctrl+Shift+R` runs a pass immediately, whatever the schedule says.
+`Ctrl+Shift+R` runs a pass immediately, whatever the schedule says. The pass
+never pushes.
 
 ### What it will and will not do
 
@@ -312,6 +313,18 @@ they actually did.
 
 Every branch is walked, not just the one checked out, so a commit that only exists
 on a side branch still appears.
+
+### Pushing
+
+The header carries a **Push N** button, enabled when the branch is ahead of its
+upstream and nothing is in the way. A branch that has never been pushed says
+**Publish** instead, and only when the repository has exactly one remote —
+guessing which remote to publish to is not a guess worth making.
+
+Never forced, never `--all`, never tags, never another branch, and never from
+the grid across a selection. It is refused, with the reason, when the branch is
+behind (fast-forward first), has nothing ahead, or has no upstream and no single
+remote. A `pre-push` hook's refusal is quoted back as git wrote it.
 
 ### What is uncommitted
 
@@ -440,9 +453,14 @@ Everything shown comes from libgit2 against the on-disk repository. Reading
 never runs `git`, never writes to a repository and never talks to a remote.
 
 Writing is narrow and deliberate. omarepos can stage a file, unstage a file,
-commit what is staged, and fast-forward a clean branch. It cannot discard an
-edit: there is no checkout, no reset, no clean, no amend. Everything it does is
-recoverable.
+commit what is staged, push the branch, and fast-forward a clean branch. It
+cannot discard an edit: there is no checkout, no reset, no clean, no amend.
+Everything it does is recoverable.
+
+Pushing happens on a button press and never on the timer. Fetching is inward —
+a mistake costs you your own time. Publishing is outward, cannot be taken back
+without a force push, and on a work remote is visible to everyone. A timer must
+not decide that something is ready to be seen.
 Ahead/behind counts compare your local branch to the *last fetched* state of its
 upstream, exactly like `git status` does; they go stale until something fetches.
 When a branch is behind, the card also gives the age of the upstream tip — the

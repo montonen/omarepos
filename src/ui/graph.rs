@@ -55,6 +55,19 @@ pub fn page(
     }
     header.pack_end(&contributions);
 
+    // Publishing is a deliberate act, so it lives on a button a person presses
+    // — never on the timer that fetches. See ADR-0005.
+    let push_content = adw::ButtonContent::builder()
+        .icon_name("send-to-symbolic")
+        .label("Push")
+        .build();
+    let push = gtk::Button::builder()
+        .child(&push_content)
+        .has_frame(false)
+        .sensitive(false)
+        .build();
+    header.pack_end(&push);
+
     let detail_toggle = gtk::ToggleButton::builder()
         .icon_name("view-paged-symbolic")
         .tooltip_text("Show what each commit changed (Ctrl+D)")
@@ -114,7 +127,7 @@ pub fn page(
             }
         })
     };
-    let (detail, load_detail) = crate::ui::commit::pane(on_changed);
+    let (detail, load_detail, focus_files) = crate::ui::commit::pane(on_changed);
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
         .start_child(&scroller)
@@ -146,6 +159,21 @@ pub fn page(
                 }
             });
         });
+    }
+
+    {
+        // Without this, Tab steps through the commits one row at a time and the
+        // pane below can never be reached from the keyboard at all.
+        let focus_files = Rc::clone(&focus_files);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if key != gtk::gdk::Key::Tab || state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            focus_files();
+            glib::Propagation::Stop
+        });
+        rows_box.add_controller(keys);
     }
 
     let stack = gtk::Stack::new();
@@ -206,12 +234,20 @@ pub fn page(
     // One handler slot for the focus watcher: reloading must replace it rather
     // than stack another one on the window.
     let focus_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+    // Likewise for the push button: populate runs again after every push, and a
+    // second handler would send the same commits twice on the next click.
+    let push_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
 
     // Populating is separate from loading, so a commit can ask for it again.
     let populate: Rc<dyn Fn(Result<Graph, String>)> = {
         let rows_box = rows_box.clone();
         let stack = stack.clone();
         let status = status.clone();
+        let push = push.clone();
+        let push_content = push_content.clone();
+        let toasts_for_push = toasts.clone();
+        let reload_for_push = Rc::clone(&reload_page);
+        let push_handler = Rc::clone(&push_handler);
         let empty = empty.clone();
         let toasts_for_rows = toasts.clone();
         let load_detail = Rc::clone(&load_detail);
@@ -341,6 +377,16 @@ pub fn page(
                     Rc::clone(&focus_handler),
                 );
 
+                arm_push(
+                    &push,
+                    &push_content,
+                    &graph,
+                    &load_path_for_detail,
+                    &toasts_for_push,
+                    Rc::clone(&reload_for_push),
+                    Rc::clone(&push_handler),
+                );
+
                 stack.set_visible_child_name("graph");
                 status.set_label(&summary(&graph, from, to));
             }
@@ -405,6 +451,74 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
 
 /// The row that stands for everything uncommitted, drawn where the next commit
 /// would go so the graph reads as continuing into the working tree.
+/// Set the push button up for what this repository can actually do, and say in
+/// the tooltip why when it can do nothing.
+fn arm_push(
+    push: &gtk::Button,
+    content: &adw::ButtonContent,
+    graph: &Graph,
+    repo: &Path,
+    toasts: &adw::ToastOverlay,
+    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+) {
+    if let Some(previous) = handler.borrow_mut().take() {
+        push.disconnect(previous);
+    }
+    let publish = graph.upstream.is_none().then(|| graph.only_remote.clone()).flatten();
+    let refusal = crate::commit::why_not_push(
+        graph.ahead,
+        graph.behind,
+        graph.upstream.as_deref(),
+        graph.only_remote.as_deref(),
+    );
+
+    content.set_label(&match (&publish, graph.ahead) {
+        // A branch that has never been pushed is published, not pushed — the
+        // word matters, because it is the act that makes it visible.
+        (Some(_), _) => "Publish".to_string(),
+        (None, 0) => "Push".to_string(),
+        (None, n) => format!("Push {n}"),
+    });
+    push.set_sensitive(refusal.is_none());
+    push.set_tooltip_text(Some(&match (&refusal, &publish, &graph.upstream) {
+        (Some(reason), _, _) => reason.clone(),
+        (None, Some(remote), _) => format!("Publish this branch to {remote}"),
+        (None, None, Some(upstream)) => {
+            format!("Send {} commits to {upstream}", graph.ahead)
+        }
+        _ => "Push".to_string(),
+    }));
+
+    let Some(branch) = graph.head.clone() else { return };
+    let repo = repo.to_path_buf();
+    let toasts = toasts.clone();
+    let id = push.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let rx = crate::commit::spawn_push(repo.clone(), branch.clone(), publish.clone());
+        let button = button.clone();
+        let toasts = toasts.clone();
+        let reload = Rc::clone(&reload);
+        glib::spawn_future_local(async move {
+            match rx.recv().await {
+                Ok(Ok(line)) => {
+                    toasts.add_toast(adw::Toast::new(&line));
+                    if let Some(reload) = reload.borrow().clone() {
+                        reload();
+                    }
+                }
+                // A pre-push hook's refusal is quoted, not paraphrased.
+                Ok(Err(err)) => {
+                    button.set_sensitive(true);
+                    toasts.add_toast(adw::Toast::new(&err));
+                }
+                Err(_) => button.set_sensitive(true),
+            }
+        });
+    });
+    *handler.borrow_mut() = Some(id);
+}
+
 /// Re-read the working tree whenever the window regains focus. It changes
 /// outside the app — that is rather the point of it — and nothing else would
 /// notice. The handler lives only while this page is on screen; left connected

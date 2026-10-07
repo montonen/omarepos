@@ -19,7 +19,12 @@ const SETTLE_MS: u64 = 120;
 /// again abandons whatever was still loading.
 /// `on_changed` fires after a write: `true` when a commit was made, which means
 /// the history the caller is showing is now out of date.
-pub fn pane(on_changed: Rc<dyn Fn(bool)>) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
+/// Returns the pane, a loader, and a way to put the keyboard into it — a
+/// two-pane layout where Tab walks five hundred commit rows instead of moving
+/// to the next region is not navigable.
+pub fn pane(
+    on_changed: Rc<dyn Fn(bool)>,
+) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
     let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
     header.set_margin_top(10);
     header.set_margin_start(14);
@@ -54,6 +59,7 @@ pub fn pane(on_changed: Rc<dyn Fn(bool)>) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Ta
     header.append(&body);
 
     let files = gtk::ListBox::new();
+    let files_for_focus = files.clone();
     files.set_selection_mode(gtk::SelectionMode::Browse);
     files.add_css_class("om-results");
     files.set_margin_top(10);
@@ -426,7 +432,25 @@ pub fn pane(on_changed: Rc<dyn Fn(bool)>) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Ta
         }));
     }
 
-    (root.upcast(), load)
+    // No Tab handler on the file list: the natural order already runs row,
+    // stage button, next row, and on to the message box. Intercepting Tab here
+    // jumped straight to the message and made the stage buttons unreachable
+    // from the keyboard entirely.
+
+    let focus_files: Rc<dyn Fn()> = {
+        let files = files_for_focus;
+        Rc::new(move || {
+            // Browse selection keeps a row current, so focusing the list lands
+            // on the file already being shown.
+            if let Some(row) = files.selected_row() {
+                row.grab_focus();
+            } else {
+                files.grab_focus();
+            }
+        })
+    };
+
+    (root.upcast(), load, focus_files)
 }
 
 /// A heading above each kind of change. Untracked is marked as not blocking an
