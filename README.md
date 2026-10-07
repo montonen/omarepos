@@ -61,12 +61,15 @@ keybinding both fail to find the binary even though your shell can run it.
 In `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + R", "Git repos (omarepos)", { launch = "omarepos" })
+o.bind("SUPER + SHIFT + R", "Git repos (omarepos)", { launch = "omarepos" })
 ```
 
-`launch` wraps the command in `uwsm-app`, which puts it in its own systemd
-scope. Check the key is free first with `omarchy menu keybindings --print`, and
-validate with `hyprctl reload && hyprctl configerrors`.
+`SUPER+SHIFT` is Omarchy's tier for applications — plain `SUPER` is window
+management, `SUPER+CTRL` is system settings, and a second or third app on the
+same letter goes to `SUPER+SHIFT+ALT` and `SUPER+SHIFT+CTRL`. `launch` wraps the
+command in `uwsm-app`, which puts it in its own systemd scope. Check the key is
+free first with `omarchy menu keybindings --print`, and validate with
+`hyprctl reload && hyprctl configerrors`.
 
 ## Usage
 
