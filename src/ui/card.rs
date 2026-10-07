@@ -277,25 +277,32 @@ fn lang_legend(info: &RepoInfo) -> gtk::Box {
     row
 }
 
-fn tag_row(tags: &[String]) -> gtk::FlowBox {
-    let row = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(5)
-        .column_spacing(5)
-        .row_spacing(4)
-        .build();
-    for tag in tags {
+/// Tag chips, in a plain box so they hug their text — a flow box would
+/// stretch each chip to fill its cell.
+fn tag_row(tags: &[String]) -> gtk::Box {
+    const SHOWN: usize = 4;
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    row.set_halign(gtk::Align::Start);
+    for tag in tags.iter().take(SHOWN) {
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         chip.add_css_class("om-tag");
         chip.append(&dot(crate::ui::key_color(&tag.to_lowercase())));
         let label = gtk::Label::builder()
             .label(tag)
             .ellipsize(pango::EllipsizeMode::End)
-            .max_width_chars(18)
+            .max_width_chars(14)
             .build();
         chip.append(&label);
         row.append(&chip);
     }
+    if tags.len() > SHOWN {
+        let more = gtk::Label::new(Some(&format!("+{}", tags.len() - SHOWN)));
+        more.add_css_class("om-tag");
+        more.set_tooltip_text(Some(&tags[SHOWN..].join(", ")));
+        row.append(&more);
+    }
+    row.set_tooltip_text(Some(&tags.join(", ")));
     row
 }
 
