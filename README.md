@@ -324,6 +324,9 @@ fills the same pane with everything uncommitted, grouped:
 | Staged, Not staged, Conflicted | yes |
 | **Untracked** | **no** |
 
+Each group folds. Untracked starts folded past ten files, where it stops being
+information and starts being noise.
+
 That split is the point. Untracked files never stop a fast-forward — git refuses
 rather than overwriting one — so they are shown stepped back and labelled,
 rather than padding the same list as the changes that really are holding a

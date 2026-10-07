@@ -229,6 +229,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
                         meta.set_label(&describe(&detail));
                         body.set_visible(!detail.body.is_empty());
                         body.set_label(&detail.body);
+                        let mut position = 0i32;
                         for group in [
                             Group::Committed,
                             Group::Conflicted,
@@ -245,12 +246,25 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
                             if in_group.is_empty() {
                                 continue;
                             }
-                            if group != Group::Committed {
-                                files.append(&group_heading(group, in_group.len()));
-                            }
+                            let mut members = Vec::new();
                             for node in commit::tree(&in_group) {
-                                files.append(&row(&node));
+                                let row = row(&node);
+                                members.push(row.clone());
+                                files.append(&row);
                             }
+                            // Count the rows that actually went in, not the
+                            // files: the tree emits a row per directory too,
+                            // and counting files put every heading in the
+                            // wrong place.
+                            let mut added = members.len() as i32;
+                            if group != Group::Committed {
+                                // Inserted above its rows once they exist, so
+                                // the heading has something to hide.
+                                let heading = group_heading(group, in_group.len(), members);
+                                files.insert(&heading, position);
+                                added += 1;
+                            }
+                            position += added;
                         }
                         // Browse mode will not pick a starting row on its own
                         // when the first one is not selectable, so the first
@@ -297,9 +311,21 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
 /// A heading above each kind of change. Untracked is marked as not blocking an
 /// update, because the question people bring to this view is usually "what do I
 /// have to clean up", and untracked files are not the answer.
-fn group_heading(group: Group, count: usize) -> gtk::ListBoxRow {
+/// A heading above each kind of change, which folds its files away. Untracked
+/// files are often the bulk of a list and the least of anyone's concerns, so
+/// past a handful the group starts folded.
+const FOLD_UNTRACKED_PAST: usize = 10;
+
+fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    line.set_margin_top(10);
+
+    let open = group.blocks_update() || count <= FOLD_UNTRACKED_PAST;
+    let chevron = gtk::Image::from_icon_name(if open {
+        "pan-down-symbolic"
+    } else {
+        "pan-end-symbolic"
+    });
+    line.append(&chevron);
 
     let title = gtk::Label::builder()
         .label(format!("{}  ({count})", group.heading()))
@@ -315,7 +341,37 @@ fn group_heading(group: Group, count: usize) -> gtk::ListBoxRow {
         line.append(&note);
     }
 
-    let row = gtk::ListBoxRow::builder().child(&line).build();
+    for member in &members {
+        member.set_visible(open);
+    }
+
+    // A button, so the group folds from the keyboard as well as the pointer.
+    let toggle = gtk::Button::builder().child(&line).build();
+    toggle.add_css_class("om-stat-head");
+    toggle.set_tooltip_text(Some(if group.blocks_update() {
+        "These changes stop the background refresh from updating this repository"
+    } else {
+        "Untracked files never block an update — git refuses rather than overwriting one"
+    }));
+    let shown = std::cell::Cell::new(open);
+    toggle.connect_clicked(move |_| {
+        let now = !shown.get();
+        shown.set(now);
+        chevron.set_icon_name(Some(if now {
+            "pan-down-symbolic"
+        } else {
+            "pan-end-symbolic"
+        }));
+        for member in &members {
+            member.set_visible(now);
+        }
+    });
+
+    let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    holder.set_margin_top(10);
+    holder.append(&toggle);
+
+    let row = gtk::ListBoxRow::builder().child(&holder).build();
     row.set_selectable(false);
     row.set_activatable(false);
     if !group.blocks_update() {
