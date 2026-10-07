@@ -243,6 +243,55 @@ fn pills(info: &RepoInfo, auto_update: bool, trouble: Option<&Trouble>) -> gtk::
         )));
         row.append(&p);
     }
+    // `ahead` is measured against the upstream, and says nothing when there is
+    // none. This is the rest of it: work on HEAD that is on no remote at all.
+    if info.unpushed > info.ahead {
+        let count = if info.unpushed >= crate::git::UNPUSHED_CAP {
+            format!("{}+", crate::git::UNPUSHED_CAP)
+        } else {
+            info.unpushed.to_string()
+        };
+        let (label, why) = if info.remote.is_none() {
+            (
+                "no remote".to_string(),
+                "This repository has no remote. None of its commits exist anywhere else."
+                    .to_string(),
+            )
+        } else if info.detached {
+            (
+                format!("{count} unpublished"),
+                format!("HEAD is detached, and {count} commits behind it are on no remote."),
+            )
+        } else {
+            (
+                format!("{count} unpublished"),
+                format!(
+                    "{count} commits on {} are on no remote: the branch was never pushed, \
+                     or its upstream is gone.",
+                    info.head
+                ),
+            )
+        };
+        let p = pill(&label, "ahead");
+        p.set_tooltip_text(Some(&why));
+        row.append(&p);
+    }
+    if info.stray_branches > 0 {
+        let p = pill(
+            &format!(
+                "+{} {}",
+                info.stray_branches,
+                if info.stray_branches == 1 { "branch" } else { "branches" }
+            ),
+            "",
+        );
+        p.set_tooltip_text(Some(&format!(
+            "{} other local {} commits that are on no remote.",
+            info.stray_branches,
+            if info.stray_branches == 1 { "branch holds" } else { "branches hold" }
+        )));
+        row.append(&p);
+    }
     if info.behind > 0 {
         let p = pill(&format!("{} behind", info.behind), "behind");
         p.set_tooltip_text(Some(&format!(

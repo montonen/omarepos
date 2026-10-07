@@ -775,6 +775,7 @@ impl Ui {
         info.error.is_some()
             || !info.tree.is_clean()
             || info.ahead > 0
+            || info.unpushed > 0
             || info.behind > 0
             || info.tree.conflicted > 0
     }
@@ -832,7 +833,9 @@ impl Ui {
                     .then_with(|| b.activity().cmp(&a.activity()))
             }),
             Sort::Unpushed => repos.sort_by(|a, b| {
-                let key = |r: &RepoInfo| (r.ahead + r.behind, r.ahead);
+                // Work that is nowhere else comes first, then what is merely
+                // out of step with its upstream.
+                let key = |r: &RepoInfo| (r.unpushed.max(r.ahead), r.ahead + r.behind);
                 key(b)
                     .cmp(&key(a))
                     .then_with(|| b.activity().cmp(&a.activity()))
@@ -928,7 +931,7 @@ impl Ui {
         let repos = self.repos.borrow();
         let total = repos.len();
         let dirty = repos.iter().filter(|r| !r.tree.is_clean()).count();
-        let ahead = repos.iter().filter(|r| r.ahead > 0).count();
+        let ahead = repos.iter().filter(|r| r.ahead > 0 || r.unpushed > 0).count();
         let behind = repos.iter().filter(|r| r.behind > 0).count();
         let broken = repos.iter().filter(|r| r.error.is_some()).count();
 

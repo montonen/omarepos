@@ -53,6 +53,15 @@ pub struct RepoInfo {
     pub tree: WorkTree,
     pub ahead: usize,
     pub behind: usize,
+    /// Commits reachable from HEAD that are on no remote at all, counted up to
+    /// [`UNPUSHED_CAP`]. Not the same as `ahead`, which measures against one
+    /// upstream and is zero when there is none: a branch that was never
+    /// published, an upstream since deleted, a detached HEAD and a repository
+    /// with no remote all hold work that exists nowhere else, and every one of
+    /// them used to read "clean" with nothing to push.
+    pub unpushed: usize,
+    /// Other local branches that hold commits on no remote.
+    pub stray_branches: usize,
     pub upstream: Option<String>,
     /// When the upstream tip was committed. Without it a card can only say how
     /// old the local commit is, which reads as "nothing has happened here"
@@ -149,6 +158,23 @@ pub struct Found {
     pub path: PathBuf,
     /// Absent for an individually listed repository, which belongs to no root.
     pub seed: Option<Seed>,
+}
+
+/// Past this the count stops: the card says "1000+", and a repository with no
+/// remote does not have its whole history walked on every scan.
+pub const UNPUSHED_CAP: usize = 1000;
+
+/// How many commits reachable from `from` are on no remote, counted up to
+/// `cap`. This is `git rev-list --count <from> --not --remotes`.
+fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> usize {
+    let Ok(mut walk) = repo.revwalk() else { return 0 };
+    if walk.push(from).is_err() {
+        return 0;
+    }
+    // No remote-tracking refs at all is not an error: then nothing is hidden,
+    // and everything counts.
+    let _ = walk.hide_glob("refs/remotes/*");
+    walk.take(cap).count()
 }
 
 /// Walk `roots` looking for repositories, at most `max_depth` levels down.
@@ -307,6 +333,8 @@ pub fn inspect(path: &Path) -> RepoInfo {
         tree: WorkTree::default(),
         ahead: 0,
         behind: 0,
+        unpushed: 0,
+        stray_branches: 0,
         upstream: None,
         upstream_when: None,
         remote: None,
@@ -394,6 +422,21 @@ pub fn inspect(path: &Path) -> RepoInfo {
 
     if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
         info.local_branches = branches.count();
+    }
+
+    if !info.bare && !info.unborn {
+        let head = repo.head().ok().and_then(|head| head.target());
+        if let Some(head) = head {
+            info.unpushed = on_no_remote(&repo, head, UNPUSHED_CAP);
+        }
+        if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
+            info.stray_branches = branches
+                .flatten()
+                .filter_map(|(branch, _)| branch.get().target())
+                .filter(|tip| Some(*tip) != head)
+                .filter(|tip| on_no_remote(&repo, *tip, 1) > 0)
+                .count();
+        }
     }
 
     info.remote = repo
@@ -536,4 +579,64 @@ fn prettify_remote(url: &str) -> String {
         return format!("{host}/{path}");
     }
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    /// (ahead of the upstream, on no remote, other branches with work on none)
+    fn standing(path: &Path) -> (usize, usize, usize) {
+        let info = inspect(path);
+        assert_eq!(info.error, None);
+        (info.ahead, info.unpushed, info.stray_branches)
+    }
+
+    #[test]
+    fn work_that_is_on_no_remote_is_counted_with_or_without_an_upstream() {
+        let _guard = isolate();
+
+        let f = fleet("git-unpushed-level");
+        assert_eq!(standing(&f.work), (0, 0, 0), "level with its upstream");
+        commit_file(&f.work, "a.txt", "a\n", "one");
+        assert_eq!(standing(&f.work), (1, 1, 0), "ahead already says this one");
+
+        // The ordinary state of work in progress, and it used to read "clean".
+        let f = fleet("git-unpushed-new-branch");
+        git(&f.work, &["checkout", "-q", "-b", "feature"]);
+        for i in 0..3 {
+            commit_file(&f.work, &format!("f{i}.txt"), "x\n", &format!("feature {i}"));
+        }
+        assert_eq!(inspect(&f.work).upstream, None);
+        assert_eq!(standing(&f.work), (0, 3, 0), "a branch that was never published");
+
+        let f = fleet("git-unpushed-side-branch");
+        git(&f.work, &["checkout", "-q", "-b", "wip"]);
+        commit_file(&f.work, "w.txt", "x\n", "wip");
+        git(&f.work, &["checkout", "-q", "main"]);
+        assert_eq!(standing(&f.work), (0, 0, 1), "work parked on another branch");
+
+        let f = fleet("git-unpushed-upstream-gone");
+        git(&f.work, &["checkout", "-q", "-b", "topic"]);
+        commit_file(&f.work, "t.txt", "x\n", "published once");
+        git(&f.work, &["push", "-q", "-u", "origin", "topic"]);
+        commit_file(&f.work, "u.txt", "x\n", "never published");
+        git(&f.remote, &["update-ref", "-d", "refs/heads/topic"]);
+        git(&f.work, &["fetch", "-q", "--prune"]);
+        assert_eq!(standing(&f.work), (0, 2, 0), "the upstream was deleted");
+
+        let f = fleet("git-unpushed-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        commit_file(&f.work, "d.txt", "x\n", "on no branch");
+        assert_eq!(standing(&f.work), (0, 1, 0), "a detached HEAD");
+
+        let dir = scratch("git-unpushed-no-remote");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", "a\n", "one");
+        commit_file(&dir, "b.txt", "b\n", "two");
+        let info = inspect(&dir);
+        assert_eq!(info.remote, None);
+        assert_eq!((info.ahead, info.unpushed), (0, 2), "no remote at all");
+    }
 }

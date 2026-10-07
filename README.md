@@ -115,8 +115,15 @@ omarepos [options]
 | `c` in the changed files | Write a commit message |
 
 The filter matches repo name, path, branch, remote and language. The warning
-toggle in the header narrows the grid to repos that are dirty, ahead, behind, or
-unreadable. Each card's checkbox adds it to the contributions scope — once
+toggle in the header narrows the grid to repos that are dirty, ahead, behind,
+unreadable, or holding commits that are on no remote.
+
+"Ahead" is measured against the branch's upstream, and says nothing when there
+is none. So a card also says when HEAD has commits that exist on no remote at
+all — `3 unpublished` for a branch that was never pushed or whose upstream is
+gone, `no remote` for a repository that has nowhere to push — and `+2 branches`
+when other local branches hold such commits. Those are the cases that used to
+read "clean". Each card's checkbox adds it to the contributions scope — once
 anything is ticked the rest of the grid dims, so the selection stays visible
 while you scroll. The `⋮` menu holds the terminal, editor and clipboard actions. **Open in terminal**
 starts lazygit in the repository when it is installed, and leaves you in a shell
