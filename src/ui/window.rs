@@ -2,7 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -348,8 +348,28 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // without reaching for the mouse.
         let keys = gtk::EventControllerKey::new();
         let nav = Rc::clone(&ui);
-        keys.connect_key_pressed(move |controller, key, _, _| {
+        keys.connect_key_pressed(move |controller, key, _, state| {
             nav.enter_keyboard_nav();
+
+            // `l` for lazygit, on the card the keyboard is on. The controller
+            // is on the grid rather than the window, so a bare letter cannot
+            // fire while the filter box has the focus.
+            if key == gdk::Key::l && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo() {
+                    ui::open_terminal(&nav.cfg.borrow(), &path);
+                }
+                return glib::Propagation::Stop;
+            }
+
+            // `p` as lazygit means it. Fetch and fast-forward, with every
+            // refusal the background pass already knows how to make.
+            if key == gdk::Key::p && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo() {
+                    nav.pull_one(path);
+                }
+                return glib::Propagation::Stop;
+            }
+
             if key != gdk::Key::space {
                 return glib::Propagation::Proceed;
             }
@@ -623,7 +643,17 @@ impl Ui {
                         ui.rebuild();
                         // Arrow keys should work the moment the grid has
                         // something in it, without hunting for it with Tab.
-                        ui.focus_grid(false);
+                        // On a short scan this runs before the window is
+                        // mapped, where grab_focus does nothing and GTK then
+                        // hands focus to the header instead. A beat later the
+                        // grid is real and can take it.
+                        {
+                            let ui = Rc::clone(&ui);
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(120),
+                                move || ui.focus_grid(false),
+                            );
+                        }
                         ui.refresh_if_overdue();
                         break;
                     }
@@ -1328,10 +1358,11 @@ impl Ui {
     /// when nothing else holds the focus, so a scan finishing mid-sentence
     /// does not swallow what is being typed.
     fn focus_grid(&self, force: bool) {
+        let current = gtk::prelude::GtkWindowExt::focus(&self.window);
         if self.nav.navigation_stack().n_items() > 1 {
             return;
         }
-        if !force && gtk::prelude::GtkWindowExt::focus(&self.window).is_some() {
+        if !force && current.is_some() {
             return;
         }
         if let Some(child) = self.flow.child_at_index(0) {
@@ -1476,6 +1507,7 @@ impl Ui {
             None,
             open,
             remember,
+            self.terminal_opener(&info.path),
             on_contributions,
         ));
     }
@@ -1490,8 +1522,10 @@ impl Ui {
         }
         let nav = self.nav.clone();
         let (open, remember) = self.detail_prefs();
+        let ui_for_terminal = Rc::clone(self);
         let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
             Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
+                let open_terminal_there = ui_for_terminal.terminal_opener(&path);
             let nav_inner = nav.clone();
             let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
                 let name = path
@@ -1506,10 +1540,79 @@ impl Ui {
                     commit,
                     open,
                     Rc::clone(&remember),
+                    Rc::clone(&open_terminal_there),
                     on_contributions,
                 ));
             });
         self.nav.push(&ui::search::page(repos, scope, on_open));
+    }
+
+    /// Fetch and fast-forward one repository, reporting what happened — the
+    /// same pass the timer runs, narrowed to the repository in hand, so a
+    /// dirty tree or a diverged branch is refused for the same reasons and
+    /// says so.
+    fn pull_one(self: &Rc<Self>, path: PathBuf) {
+        if self.refreshing.get() || self.spinner.is_visible() {
+            self.toasts.add_toast(adw::Toast::new("Already busy"));
+            return;
+        }
+        let settings = self.cfg.borrow().refresh.clone();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+
+        self.refreshing.set(true);
+        self.refresh_progress.set((0, 1));
+        self.spinner.set_visible(true);
+        self.spinner.start();
+        self.update_status();
+
+        let rx = refresh::spawn(
+            vec![path],
+            refresh::Options {
+                fast_forward: true,
+                max_parallel: 1,
+                timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
+            },
+        );
+        let ui = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let mut said = format!("{name}: nothing to do");
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    refresh::Event::Repo(report) => {
+                        said = match &report.outcome {
+                            refresh::Outcome::FastForwarded(n) => {
+                                format!("{name}: {n} commits pulled")
+                            }
+                            refresh::Outcome::UpToDate => format!("{name} is up to date"),
+                            refresh::Outcome::Behind(n) => {
+                                format!("{name}: {n} behind, not fast-forwarded")
+                            }
+                            refresh::Outcome::Skipped(skip) => {
+                                format!("{name} left alone: {}", skip.reason())
+                            }
+                            refresh::Outcome::Failed(err) => format!("{name}: {err}"),
+                        };
+                    }
+                    refresh::Event::Done => break,
+                }
+            }
+            ui.refreshing.set(false);
+            ui.spinner.stop();
+            ui.spinner.set_visible(false);
+            ui.toasts.add_toast(adw::Toast::new(&said));
+            ui.start_scan();
+        });
+    }
+
+    /// Opening a terminal needs the configured terminal and runner, which the
+    /// graph page has no business knowing about.
+    fn terminal_opener(self: &Rc<Self>, path: &Path) -> Rc<dyn Fn()> {
+        let ui = Rc::clone(self);
+        let path = path.to_path_buf();
+        Rc::new(move || ui::open_terminal(&ui.cfg.borrow(), &path))
     }
 
     fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {

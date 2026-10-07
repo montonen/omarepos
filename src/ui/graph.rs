@@ -38,6 +38,7 @@ pub fn page(
     target: Option<String>,
     detail_open: bool,
     on_detail_toggled: Rc<dyn Fn(bool)>,
+    on_terminal: Rc<dyn Fn()>,
     on_contributions: Rc<dyn Fn(PathBuf)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new(name, &tildify(path));
@@ -166,7 +167,14 @@ pub fn page(
         // pane below can never be reached from the keyboard at all.
         let focus_files = Rc::clone(&focus_files);
         let keys = gtk::EventControllerKey::new();
+        let on_terminal = Rc::clone(&on_terminal);
         keys.connect_key_pressed(move |_, key, _, state| {
+            // Same letter as the grid: you are inside a repository here, so it
+            // means the same thing.
+            if key == gtk::gdk::Key::l && crate::ui::unmodified(state) {
+                on_terminal();
+                return glib::Propagation::Stop;
+            }
             if key != gtk::gdk::Key::Tab || state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
                 return glib::Propagation::Proceed;
             }
@@ -194,6 +202,23 @@ pub fn page(
 
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&body));
+
+    {
+        // Separate controller only because the toast overlay does not exist
+        // yet where the other one is attached.
+        let repo = path.to_path_buf();
+        let toasts = toasts.clone();
+        let reload = Rc::clone(&reload_page);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if key == gtk::gdk::Key::p && crate::ui::unmodified(state) {
+                pull(&repo, &toasts, Rc::clone(&reload));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        rows_box.add_controller(keys);
+    }
 
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
@@ -451,6 +476,56 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
 
 /// The row that stands for everything uncommitted, drawn where the next commit
 /// would go so the graph reads as continuing into the working tree.
+/// Fetch and fast-forward this repository, saying what happened. The same pass
+/// the timer runs, so a dirty tree or a diverged branch is refused for the same
+/// reasons rather than a second set.
+fn pull(
+    repo: &Path,
+    toasts: &adw::ToastOverlay,
+    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+) {
+    let rx = crate::refresh::spawn(
+        vec![repo.to_path_buf()],
+        crate::refresh::Options {
+            fast_forward: true,
+            max_parallel: 1,
+            timeout: std::time::Duration::from_secs(120),
+        },
+    );
+    let toasts = toasts.clone();
+    glib::spawn_future_local(async move {
+        let mut said = "Nothing to do".to_string();
+        let mut moved = false;
+        while let Ok(event) = rx.recv().await {
+            match event {
+                crate::refresh::Event::Repo(report) => {
+                    said = match &report.outcome {
+                        crate::refresh::Outcome::FastForwarded(n) => {
+                            moved = true;
+                            format!("{n} commits pulled")
+                        }
+                        crate::refresh::Outcome::UpToDate => "Up to date".into(),
+                        crate::refresh::Outcome::Behind(n) => {
+                            format!("{n} behind, not fast-forwarded")
+                        }
+                        crate::refresh::Outcome::Skipped(skip) => {
+                            format!("Left alone: {}", skip.reason())
+                        }
+                        crate::refresh::Outcome::Failed(err) => err.clone(),
+                    };
+                }
+                crate::refresh::Event::Done => break,
+            }
+        }
+        toasts.add_toast(adw::Toast::new(&said));
+        if moved {
+            if let Some(reload) = reload.borrow().clone() {
+                reload();
+            }
+        }
+    });
+}
+
 /// Set the push button up for what this repository can actually do, and say in
 /// the tooltip why when it can do nothing.
 fn arm_push(

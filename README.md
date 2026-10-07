@@ -106,6 +106,8 @@ omarepos [options]
 | `Enter` on a commit-graph row | Copy its sha |
 | `Down` from the commit-search box | Move into the results |
 | `Space` on a focused card | Tick it for the contributions scope |
+| `l` on a focused card, or in a graph | Open a terminal there — lazygit |
+| `p` on a focused card, or in a graph | Fetch and fast-forward that repo |
 
 The filter matches repo name, path, branch, remote and language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind, or

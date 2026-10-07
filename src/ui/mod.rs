@@ -152,6 +152,21 @@ pub fn color_dot(color: &str) -> gtk::DrawingArea {
     area
 }
 
+
+/// Is this an unmodified keypress?
+///
+/// Not `state.is_empty()`: GDK reports lock bits — NumLock, CapsLock, ScrollLock
+/// — in the same field, so a plain letter looks modified to anyone with NumLock
+/// on. Only the modifiers that change what a key means are consulted.
+pub fn unmodified(state: gtk::gdk::ModifierType) -> bool {
+    !state.intersects(
+        gtk::gdk::ModifierType::CONTROL_MASK
+            | gtk::gdk::ModifierType::ALT_MASK
+            | gtk::gdk::ModifierType::SUPER_MASK
+            | gtk::gdk::ModifierType::SHIFT_MASK,
+    )
+}
+
 /// A fixed accent ramp for graph lanes and author colours. Deliberately not
 /// taken from the Omarchy palette: these have to stay distinguishable from each
 /// other in every theme, which a theme's own handful of hues cannot promise.
