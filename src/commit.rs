@@ -351,7 +351,7 @@ pub fn spawn_patch(
 /// the index. Two diffs rather than one because the two halves answer different
 /// questions and only one of them blocks an update.
 fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
-    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let repo = crate::git::open_here(path)?;
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let index = repo.index().map_err(|e| e.message().to_string())?;
 
@@ -509,7 +509,7 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
 /// The uncommitted diff of one file, including an untracked one — which has no
 /// blob to compare against, so git is asked to show its content as added.
 fn patch_working(path: &Path, file: &str) -> Result<FileDiff, String> {
-    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let repo = crate::git::open_here(path)?;
     let index = repo.index().map_err(|e| e.message().to_string())?;
 
     let mut out = FileDiff::default();
@@ -640,6 +640,20 @@ pub fn push_plan(repo: &Repository) -> Result<PushPlan, String> {
     if remote == "." {
         return Err(format!("{branch} tracks a local branch, so there is nowhere to push it."));
     }
+    // A branch can track a branch of another name: `git switch -c fix
+    // origin/main` sets that up without being asked. The upstream is then
+    // where the branch pulls from, not where it belongs, and git's own default
+    // refuses the push for that reason. Spelling the destination out, as this
+    // plan does, would walk straight past that refusal and put the branch's
+    // commits on `main`.
+    if !publish && destination != refname {
+        return Err(format!(
+            "{branch} tracks {remote}/{}, a branch of another name, and omarepos will not push \
+             one branch onto another. Publish it under its own name from a terminal: \
+             git push -u {remote} {branch}",
+            destination.trim_start_matches("refs/heads/")
+        ));
+    }
     if remote.starts_with('-') || !destination.starts_with("refs/heads/") {
         return Err(format!(
             "{branch} tracks {remote} {destination}, which omarepos will not push to. \
@@ -724,9 +738,7 @@ fn push(repo: &Path, armed: &PushPlan) -> Result<String, PushError> {
     // Ask again. The button was drawn from a page that sat open while a
     // terminal was one key away; what it promised is only sent if it is still
     // what the repository says.
-    let now = Repository::open(repo)
-        .map_err(|err| err.message().to_string())
-        .and_then(|repo| push_plan(&repo));
+    let now = crate::git::open_here(repo).and_then(|repo| push_plan(&repo));
     match now {
         Ok(now) if now == *armed => {}
         Ok(now) if now.branch != armed.branch => {
@@ -850,7 +862,10 @@ pub fn why_not_commit(path: &Path, staged: usize, message: &str) -> Option<Strin
     if staged == 0 {
         return Some("Nothing is staged. Stage a file to commit it.".into());
     }
-    let repo = Repository::open(path).ok()?;
+    let repo = match crate::git::open_here(path) {
+        Ok(repo) => repo,
+        Err(why) => return Some(why),
+    };
     let state = repo.state();
     if state != git2::RepositoryState::Clean {
         // omarepos has no conflict story and must not pretend otherwise.
@@ -914,6 +929,10 @@ pub fn spawn_write(
         // `restore --staged` after it throws the three-way record away. Either
         // would settle a merge by accident: the first commits the conflict
         // markers, the second silently keeps this side and drops the other.
+        if let Err(why) = crate::git::open_here(&repo) {
+            let _ = tx.send_blocking(Err(why));
+            return;
+        }
         if let Some(file) = conflicted_among(&repo, &files) {
             let _ = tx.send_blocking(Err(format!(
                 "{file} is conflicted. Resolve it in a terminal: staging it here would record \
@@ -941,6 +960,10 @@ pub fn spawn_commit(
 ) -> async_channel::Receiver<Result<String, String>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
+        if let Err(why) = crate::git::open_here(&repo) {
+            let _ = tx.send_blocking(Err(why));
+            return;
+        }
         let result = crate::gitcmd::run(&repo, &["commit", "-m", &message], WRITE_TIMEOUT)
             .and_then(|_| {
                 crate::gitcmd::run(&repo, &["rev-parse", "--short=8", "HEAD"], WRITE_TIMEOUT)
@@ -958,6 +981,28 @@ mod tests {
 
     fn plan(f: &Fleet) -> Result<PushPlan, String> {
         push_plan(&Repository::open(&f.work).unwrap())
+    }
+
+    // ---- nothing reaches through a redirected work tree --------------------
+
+    #[test]
+    fn another_directorys_files_cannot_be_listed_staged_or_committed() {
+        let _guard = isolate();
+        let f = fleet("commit-redirect");
+        let elsewhere = scratch("commit-redirect-victim");
+        write(&elsewhere.join("id_ed25519"), "PRIVATE\n");
+        git(&f.work, &["config", "core.worktree", elsewhere.to_str().unwrap()]);
+
+        assert!(load_working(&f.work, &Cancel::default()).is_err());
+        assert!(patch_working(&f.work, "id_ed25519").is_err());
+        let staged = recv(spawn_write(f.work.clone(), Write::Stage, vec!["id_ed25519".to_string()]));
+        assert!(staged.is_err());
+        assert!(why_not_commit(&f.work, 1, "exfiltrate").is_some());
+        assert!(recv(spawn_commit(f.work.clone(), "exfiltrate".to_string())).is_err());
+
+        git(&f.work, &["config", "--unset", "core.worktree"]);
+        assert_eq!(git(&f.work, &["ls-files"]), "README.md", "something was staged");
+        assert_eq!(git(&f.work, &["log", "--format=%s", "-1"]), "first", "something was committed");
     }
 
     // ---- a diff the view can survive ---------------------------------------
@@ -1205,6 +1250,25 @@ mod tests {
         let again = plan(&f).unwrap();
         assert!(!again.publish);
         assert_eq!(why_not_push(&again, 0, 0), Some("Nothing to push.".to_string()));
+    }
+
+    /// `git switch -c topic origin/main` makes `topic` track `origin/main`
+    /// without being asked. git's default refuses to push it; a plan that
+    /// named `branch.topic.merge` as the destination would put it on main.
+    #[test]
+    fn a_branch_is_never_pushed_onto_a_branch_of_another_name() {
+        let _guard = isolate();
+        let f = fleet("push-other-name");
+        git(&f.work, &["checkout", "-q", "-b", "topic", "origin/main"]);
+        assert_eq!(git(&f.work, &["rev-parse", "--abbrev-ref", "topic@{u}"]), "origin/main");
+        commit_file(&f.work, "t.txt", "x\n", "topic work");
+        let main_there = f.remote_ref("refs/heads/main");
+
+        let why = plan(&f).unwrap_err();
+
+        assert!(why.contains("another name"), "{why}");
+        assert!(why.contains("git push -u origin topic"), "it should say what to run: {why}");
+        assert_eq!(f.remote_ref("refs/heads/main"), main_there);
     }
 
     #[test]

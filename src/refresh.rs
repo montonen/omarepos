@@ -46,6 +46,9 @@ pub enum Skip {
     Diverged,
     /// A merge, rebase, bisect or cherry-pick is in progress.
     Busy,
+    /// Its git data points at a work tree or a git directory somewhere else;
+    /// see [`crate::git::belongs_here`].
+    Elsewhere,
 }
 
 impl Skip {
@@ -58,6 +61,7 @@ impl Skip {
             Skip::NoUpstream => "no upstream",
             Skip::Diverged => "has unpushed commits",
             Skip::Busy => "merge or rebase in progress",
+            Skip::Elsewhere => "its work tree is not this directory",
         }
     }
 }
@@ -224,6 +228,9 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         Err(err) => return report(Outcome::Failed(err.message().to_string())),
     };
 
+    if crate::git::belongs_here(&repo, path).is_err() {
+        return report(Outcome::Skipped(Skip::Elsewhere));
+    }
     if let Some(skip) = disqualify(&repo) {
         return report(Outcome::Skipped(skip));
     }
@@ -238,6 +245,11 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         Ok(repo) => repo,
         Err(err) => return report(Outcome::Failed(err.message().to_string())),
     };
+    // Asked again: the fetch ran this repository's own git, which is long
+    // enough for its config to have changed.
+    if crate::git::belongs_here(&repo, path).is_err() {
+        return report(Outcome::Skipped(Skip::Elsewhere));
+    }
     let (ahead, behind) = match divergence(&repo) {
         Ok(counts) => counts,
         Err(skip) => return report(Outcome::Skipped(skip)),
@@ -605,6 +617,28 @@ mod tests {
         let got = fleet_pass(&f);
         assert!(matches!(got, Outcome::FastForwarded(2)), "{got:?}");
         assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
+    }
+
+    // ---- an update lands in the repository's own directory or nowhere ------
+
+    #[test]
+    fn a_fast_forward_never_lands_in_another_directory() {
+        let _guard = isolate();
+        let f = fleet("refresh-redirect");
+        let elsewhere = scratch("refresh-redirect-victim");
+        write(&elsewhere.join("README.md"), "the other directory's own file\n");
+        git(&f.work, &["config", "core.worktree", elsewhere.to_str().unwrap()]);
+        f.remote_commits("a payload", |seed| {
+            write(&seed.join("README.md"), "overwritten\n");
+            write(&seed.join(".config/autostart/payload.desktop"), "[Desktop Entry]\n");
+        });
+
+        for pass in [Pass::Fleet, Pass::One] {
+            let got = refresh_one(&f.work, &options(true, pass)).outcome;
+            assert!(matches!(got, Outcome::Skipped(Skip::Elsewhere)), "{pass:?}: {got:?}");
+        }
+        assert_eq!(read(&elsewhere.join("README.md")), "the other directory's own file\n");
+        assert!(!elsewhere.join(".config").exists(), "files were written outside the repository");
     }
 
     // ---- asked for one repository, git decides about uncommitted work -----

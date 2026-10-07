@@ -93,6 +93,10 @@ pub fn build(
     target: Option<&str>,
 ) -> Result<Graph, String> {
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    // History is read from the object store wherever the work tree is said to
+    // be. The work tree itself, and anything that would write, is not touched
+    // unless the repository really is this directory's.
+    let here = crate::git::belongs_here(&repo, path);
     let labels = ref_labels(&repo);
 
     let head = repo
@@ -129,11 +133,11 @@ pub fn build(
                 tip: None,
                 target: None,
                 target_missed: target.is_some(),
-                working_changes: working_changes(&repo),
+                working_changes: if here.is_ok() { working_changes(&repo) } else { 0 },
                 ahead: 0,
                 behind: 0,
                 upstream: None,
-                push: crate::commit::push_plan(&repo),
+                push: here.and_then(|()| crate::commit::push_plan(&repo)),
             });
         }
     }
@@ -267,11 +271,11 @@ pub fn build(
         tip,
         target: found_at,
         target_missed: target.is_some() && found_at.is_none(),
-        working_changes: working_changes(&repo),
+        working_changes: if here.is_ok() { working_changes(&repo) } else { 0 },
         ahead,
         behind,
         upstream,
-        push: crate::commit::push_plan(&repo),
+        push: here.and_then(|()| crate::commit::push_plan(&repo)),
     })
 }
 
@@ -327,7 +331,8 @@ pub fn spawn_glance(path: std::path::PathBuf) -> async_channel::Receiver<Glance>
         let glance = Repository::open(&path)
             .map(|repo| {
                 let (head, tip) = head_of(&repo);
-                Glance { changes: working_changes(&repo), head, tip }
+                let here = crate::git::belongs_here(&repo, &path).is_ok();
+                Glance { changes: if here { working_changes(&repo) } else { 0 }, head, tip }
             })
             .unwrap_or_default();
         let _ = tx.send_blocking(glance);

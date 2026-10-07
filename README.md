@@ -272,6 +272,15 @@ runs with `--no-overwrite-ignore`, and git refuses for those too. When a file
 of yours is in the way the repository is fetched and left where it was; its
 card says "held back", and the tooltip quotes git naming the file.
 
+A repository is only touched if it is really the repository *of* the directory
+it was found in. A `.git` can claim that its files live somewhere else
+(`core.worktree`), or be a file naming another repository's git data; either
+would have status read from, files staged from, and a fast-forward written
+into, a directory you never pointed omarepos at. Such a directory gets a card
+that says so, and nothing else: no fetch, no update, no working-tree view.
+Linked worktrees, submodules and `--separate-git-dir` are told apart from that
+and work as usual.
+
 ### What runs, and what does not
 
 A pass across the fleet — the timer, the catch-up at launch, and
@@ -388,10 +397,12 @@ is reached.
 
 It is refused, with the reason, when the branch is behind (fast-forward first),
 has nothing ahead, has no upstream and no single remote, or HEAD is detached.
-Three setups it will not push for at all, and says so: a branch that tracks one
-remote but is set to push to another (`remote.pushDefault`, `pushRemote`), a
-remote configured as a mirror, and a branch that tracks a local branch. Those
-want a terminal. A `pre-push` hook's refusal is quoted back as git wrote it.
+Four setups it will not push for at all, and says so: a branch that tracks a
+branch of another name (what `git switch -c fix origin/main` leaves you with —
+git's own default refuses that push too, and for the same reason: it would put
+`fix` on `main`), a branch that tracks one remote but is set to push to another
+(`remote.pushDefault`, `pushRemote`), a remote configured as a mirror, and a
+branch that tracks a local branch. Those want a terminal. A `pre-push` hook's refusal is quoted back as git wrote it.
 
 ### What is uncommitted
 

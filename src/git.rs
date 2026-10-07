@@ -160,6 +160,88 @@ pub struct Found {
     pub seed: Option<Seed>,
 }
 
+/// Whether `repo`, opened at `found`, really is the repository *of* that
+/// directory.
+///
+/// Discovery takes any directory with a `.git` in it, and a `.git` can say
+/// that its files live somewhere else. `core.worktree` in its config makes
+/// both libgit2 and git treat another directory as the work tree: status is
+/// read from there, `git add` stages from there, and a fast-forward writes
+/// there, into a place the user never pointed this application at. A `.git`
+/// that is a file can likewise name another repository's git directory. A
+/// directory that arrived under a scan root from somewhere else (an archive, a
+/// synced folder) only has to contain one of these to turn "refresh the
+/// fleet" into "write files anywhere this user can".
+///
+/// So a repository is used only when its work tree is the directory it was
+/// found in, and its git directory is either inside that directory or one of
+/// the arrangements git itself makes: a linked worktree, a submodule, or a git
+/// directory kept apart with `--separate-git-dir`.
+pub fn belongs_here(repo: &Repository, found: &Path) -> Result<(), String> {
+    if repo.is_bare() {
+        return Ok(());
+    }
+    let Ok(here) = found.canonicalize() else {
+        return Err(format!("{} cannot be resolved", found.display()));
+    };
+    let tree = repo.workdir().and_then(|tree| tree.canonicalize().ok());
+    if tree.as_deref() != Some(here.as_path()) {
+        return Err(match tree {
+            Some(tree) => format!(
+                "Its git data says the work tree is somewhere else ({}). omarepos leaves a \
+                 repository like that alone.",
+                tree.display()
+            ),
+            None => "Its work tree cannot be found.".to_string(),
+        });
+    }
+
+    let Ok(gitdir) = repo.path().canonicalize() else {
+        return Err("Its git directory cannot be resolved.".to_string());
+    };
+    if gitdir.starts_with(&here) {
+        return Ok(());
+    }
+    // The `.git` here is a file naming a git directory somewhere else. git
+    // builds three things that way, and each can be told from a directory that
+    // has merely helped itself to another repository's git data.
+    //
+    // A linked worktree's git directory records which `.git` file leads to it.
+    if let Ok(back) = std::fs::read_to_string(gitdir.join("gitdir")) {
+        let ours = Path::new(back.trim()).canonicalize().ok() == Some(here.join(".git"));
+        return if ours {
+            Ok(())
+        } else {
+            Err(format!(
+                "Its .git points at a worktree's git directory ({}) that belongs to another \
+                 directory. omarepos leaves a repository like that alone.",
+                gitdir.display()
+            ))
+        };
+    }
+    // A submodule's names its work tree in `core.worktree`, which the
+    // comparison above has already held to this directory. That leaves a git
+    // directory kept apart on purpose (`--separate-git-dir`), which is fine,
+    // and a `.git` belonging to some other work tree, which is not.
+    if gitdir.file_name().is_some_and(|name| name == ".git") {
+        return Err(format!(
+            "Its .git points at another repository's git directory ({}). omarepos leaves a \
+             repository like that alone.",
+            gitdir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Open the repository found at `path`, refusing one that [`belongs_here`]
+/// does not vouch for. Everything that reads a working tree or writes anything
+/// opens through this.
+pub fn open_here(path: &Path) -> Result<Repository, String> {
+    let repo = Repository::open(path).map_err(|err| err.message().to_string())?;
+    belongs_here(&repo, path)?;
+    Ok(repo)
+}
+
 /// Past this the count stops: the card says "1000+", and a repository with no
 /// remote does not have its whole history walked on every scan.
 pub const UNPUSHED_CAP: usize = 1000;
@@ -357,6 +439,11 @@ pub fn inspect(path: &Path) -> RepoInfo {
     };
 
     info.bare = repo.is_bare();
+    // Before anything is read from a working tree.
+    if let Err(why) = belongs_here(&repo, path) {
+        info.error = Some(why);
+        return info;
+    }
 
     match repo.head() {
         Ok(head) => {
@@ -591,6 +678,57 @@ mod tests {
         let info = inspect(path);
         assert_eq!(info.error, None);
         (info.ahead, info.unpushed, info.stray_branches)
+    }
+
+    // ---- a repository is used only if it is this directory's ---------------
+
+    #[test]
+    fn a_repository_that_says_its_files_are_elsewhere_is_left_alone() {
+        let _guard = isolate();
+        let f = fleet("git-redirect");
+        let elsewhere = scratch("git-redirect-victim");
+        write(&elsewhere.join("private.txt"), "not this repository's\n");
+        git(&f.work, &["config", "core.worktree", elsewhere.to_str().unwrap()]);
+
+        let info = inspect(&f.work);
+        let why = info.error.expect("it has to be refused, and say why");
+        assert!(why.contains("somewhere else"), "{why}");
+        assert_eq!(info.tree.untracked, 0, "the other directory was read");
+        assert!(open_here(&f.work).is_err());
+    }
+
+    /// A directory whose `.git` is a file naming somebody else's git directory.
+    #[test]
+    fn a_directory_that_borrows_another_repositorys_git_data_is_left_alone() {
+        let _guard = isolate();
+        let f = fleet("git-borrowed");
+        let squatter = scratch("git-borrowed-squatter");
+        write(&squatter.join(".git"), &format!("gitdir: {}\n", f.work.join(".git").display()));
+
+        assert!(inspect(&squatter).error.is_some());
+        assert!(open_here(&squatter).is_err());
+        assert_eq!(inspect(&f.work).error, None, "the repository it borrowed from is fine");
+    }
+
+    #[test]
+    fn the_ways_git_itself_keeps_a_work_tree_apart_from_its_git_data_still_work() {
+        let _guard = isolate();
+
+        let f = fleet("git-linked-worktree");
+        let linked = f.root.join("linked");
+        git(&f.work, &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()]);
+        assert_eq!(inspect(&linked).error, None, "a linked worktree");
+
+        let root = scratch("git-separate-git-dir");
+        git(&root, &["init", "-q", "-b", "main", "--separate-git-dir", "store.git", "tree"]);
+        commit_file(&root.join("tree"), "a.txt", "a\n", "one");
+        assert_eq!(inspect(&root.join("tree")).error, None, "--separate-git-dir");
+
+        let f = fleet("git-submodule-super");
+        let lib = fleet("git-submodule-lib");
+        git(&f.work, &["submodule", "add", "-q", lib.remote.to_str().unwrap(), "lib"]);
+        assert_eq!(inspect(&f.work.join("lib")).error, None, "a submodule");
+        assert_eq!(inspect(&f.work).error, None, "and the repository it lives in");
     }
 
     #[test]
