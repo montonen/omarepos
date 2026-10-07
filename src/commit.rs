@@ -545,24 +545,125 @@ fn append_patch(diff: &Diff<'_>, out: &mut FileDiff) {
     }
 }
 
-/// Why a push cannot go ahead, as a sentence. Checked before invoking git so
-/// the user gets an explanation rather than a rejection from the far end.
-pub fn why_not_push(
-    ahead: usize,
-    behind: usize,
-    upstream: Option<&str>,
-    only_remote: Option<&str>,
-) -> Option<String> {
-    if upstream.is_none() {
-        return match only_remote {
-            // Publishing a branch is a different act from pushing one, and it
-            // is named differently in the UI.
-            Some(_) => None,
-            None => Some(
-                "This branch has no upstream, and there is no single remote to publish it to."
-                    .into(),
-            ),
-        };
+/// Exactly what a push of the checked-out branch would send, and where.
+///
+/// A bare `git push` leaves all of this to be decided at the moment it runs:
+/// by whatever HEAD is by then, and by `push.default`, `push.followTags`,
+/// `remote.<name>.push` and friends. The button, meanwhile, was drawn from a
+/// page that may be minutes old. So the plan is worked out from the repository,
+/// shown, and then handed to git spelled out in full — one branch, one
+/// destination, no tags — after checking that the repository still gives the
+/// same plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushPlan {
+    pub branch: String,
+    /// The commit at the branch's tip, in full: what would be sent.
+    pub tip: String,
+    pub remote: String,
+    /// The ref on the remote, in full, e.g. `refs/heads/main`.
+    pub destination: String,
+    /// The branch has never been pushed. Publishing is a different act from
+    /// pushing — it is what makes the branch visible — and is named
+    /// differently in the UI. It is the only time an upstream is set.
+    pub publish: bool,
+    /// `push.recurseSubmodules` asks git to push submodules along with (or
+    /// instead of) this branch. That would be another repository's branch, so
+    /// it is turned down to a check: git still refuses when a submodule commit
+    /// this push refers to is not on its remote, and pushes nothing extra.
+    pub check_submodules: bool,
+}
+
+/// Work out what a push would do, or say why there will not be one.
+///
+/// Every refusal here is about where the push would go; whether there is
+/// anything to send is [`why_not_push`]'s question.
+pub fn push_plan(repo: &Repository) -> Result<PushPlan, String> {
+    let Ok(head) = repo.head() else {
+        return Err("Nothing has been committed yet.".into());
+    };
+    if repo.head_detached().unwrap_or(false) {
+        return Err("Detached HEAD — there is no branch to push from.".into());
+    }
+    let (Ok(branch), Some(tip)) = (head.shorthand(), head.target()) else {
+        return Err("HEAD does not name a branch.".into());
+    };
+    let branch = branch.to_string();
+    // Reachable: cloning a remote whose default branch is called `--mirror`
+    // produces one. After `--` git would not take it for an option, but a
+    // name like that is nobody's ordinary branch.
+    if branch.starts_with('-') {
+        return Err(format!(
+            "A branch named {branch} reads like an option to git. Push it from a terminal."
+        ));
+    }
+
+    let refname = format!("refs/heads/{branch}");
+    let lossy = |buf: git2::Buf| String::from_utf8_lossy(&buf).to_string();
+    let tracked = match (
+        repo.branch_upstream_remote(&refname),
+        repo.branch_upstream_merge(&refname),
+    ) {
+        (Ok(remote), Ok(merge)) => Some((lossy(remote), lossy(merge))),
+        _ => None,
+    };
+    let (remote, destination, publish) = match tracked {
+        Some((remote, merge)) => (remote, merge, false),
+        None => match crate::graph::only_remote(repo) {
+            Some(remote) => (remote, refname.clone(), true),
+            None => {
+                return Err(
+                    "This branch has no upstream, and there is no single remote to publish it to."
+                        .into(),
+                );
+            }
+        },
+    };
+    if remote == "." {
+        return Err(format!("{branch} tracks a local branch, so there is nowhere to push it."));
+    }
+    if remote.starts_with('-') || !destination.starts_with("refs/heads/") {
+        return Err(format!(
+            "{branch} tracks {remote} {destination}, which omarepos will not push to. \
+             Push it from a terminal."
+        ));
+    }
+
+    let config = repo.config().map_err(|err| err.message().to_string())?;
+    // The fork workflow: follow one remote, push to another. Sending the
+    // branch to the remote it tracks would be the one place the user has said
+    // they do not push; sending it to the other would not be what the button
+    // says. Neither is this application's call.
+    let elsewhere = config
+        .get_string(&format!("branch.{branch}.pushRemote"))
+        .or_else(|_| config.get_string("remote.pushDefault"))
+        .ok()
+        .filter(|other| *other != remote);
+    if let Some(other) = elsewhere {
+        return Err(format!(
+            "{branch} tracks {remote} but is set to push to {other}. omarepos only pushes a \
+             branch to the remote it tracks. Push this one from a terminal."
+        ));
+    }
+    if config.get_bool(&format!("remote.{remote}.mirror")).unwrap_or(false) {
+        return Err(format!(
+            "{remote} is a mirror: any push to it sends, and overwrites, every ref. \
+             Push from a terminal."
+        ));
+    }
+    let check_submodules = matches!(
+        config.get_string("push.recurseSubmodules").as_deref(),
+        Ok("on-demand") | Ok("only")
+    );
+
+    Ok(PushPlan { branch, tip: tip.to_string(), remote, destination, publish, check_submodules })
+}
+
+/// Why a push that has somewhere to go still cannot go ahead, as a sentence.
+/// Checked before invoking git so the user gets an explanation rather than a
+/// rejection from the far end.
+pub fn why_not_push(plan: &PushPlan, ahead: usize, behind: usize) -> Option<String> {
+    if plan.publish {
+        return None;
     }
     if behind > 0 {
         return Some(format!(
@@ -575,34 +676,78 @@ pub fn why_not_push(
     None
 }
 
-/// Push the checked-out branch to its upstream. Never forced, never `--all`,
-/// never tags. `publish` names the remote for a branch that has never been
-/// pushed, which is the only time an upstream is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushError {
+    /// The repository is no longer as the button showed it: HEAD is on another
+    /// branch, the branch has new commits, or where it pushes to has changed.
+    /// Nothing was sent. The page wants reading again.
+    Stale(String),
+    /// git, the remote or a hook said no, in these words.
+    Git(String),
+}
+
+/// Push the checked-out branch as `armed` describes, or not at all. Never
+/// forced, never `--all`, never tags, never a second branch: the argument list
+/// names the one source and the one destination, so no `push.*` setting gets a
+/// say in what is sent.
 pub fn spawn_push(
     repo: PathBuf,
-    branch: String,
-    publish: Option<String>,
-) -> async_channel::Receiver<Result<String, String>> {
+    armed: PushPlan,
+) -> async_channel::Receiver<Result<String, PushError>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let mut args: Vec<String> = vec!["push".into()];
-        if let Some(remote) = publish {
-            args.push("--set-upstream".into());
-            args.push(remote);
-            args.push(branch);
-        }
-        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        // A pre-push hook can be a test suite, so the same patience as a commit.
-        let result = crate::gitcmd::run(&repo, &borrowed, WRITE_TIMEOUT).map(|out| {
-            out.lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("Pushed")
-                .trim()
-                .to_string()
-        });
-        let _ = tx.send_blocking(result);
+        let _ = tx.send_blocking(push(&repo, &armed));
     });
     rx
+}
+
+fn push(repo: &Path, armed: &PushPlan) -> Result<String, PushError> {
+    // Ask again. The button was drawn from a page that sat open while a
+    // terminal was one key away; what it promised is only sent if it is still
+    // what the repository says.
+    let now = Repository::open(repo)
+        .map_err(|err| err.message().to_string())
+        .and_then(|repo| push_plan(&repo));
+    match now {
+        Ok(now) if now == *armed => {}
+        Ok(now) if now.branch != armed.branch => {
+            return Err(PushError::Stale(format!(
+                "HEAD is on {} now, not {}. Nothing was pushed.",
+                now.branch, armed.branch
+            )));
+        }
+        Ok(now) if now.tip != armed.tip => {
+            return Err(PushError::Stale(format!(
+                "{} has moved since this page was read. Nothing was pushed.",
+                armed.branch
+            )));
+        }
+        Ok(_) => {
+            return Err(PushError::Stale(format!(
+                "Where {} pushes to has changed since this page was read. Nothing was pushed.",
+                armed.branch
+            )));
+        }
+        Err(why) => return Err(PushError::Stale(format!("{why} Nothing was pushed."))),
+    }
+
+    let refspec = format!("refs/heads/{}:{}", armed.branch, armed.destination);
+    let mut args = vec!["push", "--no-follow-tags"];
+    if armed.check_submodules {
+        args.push("--recurse-submodules=check");
+    }
+    if armed.publish {
+        args.push("--set-upstream");
+    }
+    args.extend(["--", armed.remote.as_str(), refspec.as_str()]);
+
+    // A pre-push hook can be a test suite, so the same patience as a commit.
+    crate::gitcmd::run(repo, &args, WRITE_TIMEOUT)
+        .map(|_| {
+            let verb = if armed.publish { "Published" } else { "Pushed" };
+            format!("{verb} {} to {}", armed.branch, armed.remote)
+        })
+        .map_err(PushError::Git)
 }
 
 /// A node in the tree the pane draws.
@@ -739,4 +884,188 @@ pub fn spawn_commit(
         let _ = tx.send_blocking(result);
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    fn plan(f: &Fleet) -> Result<PushPlan, String> {
+        push_plan(&Repository::open(&f.work).unwrap())
+    }
+
+    // ---- push: one branch, to the place the button named, or nothing ------
+
+    #[test]
+    fn a_push_sends_the_checked_out_branch_to_its_upstream() {
+        let _guard = isolate();
+        let f = fleet("push-plain");
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+
+        let armed = plan(&f).unwrap();
+        assert_eq!(armed.branch, "main");
+        assert_eq!(armed.tip, f.head());
+        assert_eq!((armed.remote.as_str(), armed.destination.as_str()), ("origin", "refs/heads/main"));
+        assert!(!armed.publish);
+
+        assert_eq!(push(&f.work, &armed), Ok("Pushed main to origin".to_string()));
+        assert_eq!(f.remote_ref("refs/heads/main"), f.head());
+    }
+
+    /// The settings that widen a bare `git push`, all at once: `matching`
+    /// sends every branch with a namesake on the remote, `followTags` sends
+    /// tags, and a `+` push refspec makes it all a forced update.
+    #[test]
+    fn a_push_sends_nothing_but_the_branch_whatever_the_push_settings_say() {
+        let _guard = isolate();
+        let f = fleet("push-settings");
+
+        // A second branch, published, that a teammate has since added to...
+        git(&f.work, &["checkout", "-q", "-b", "other"]);
+        commit_file(&f.work, "other.txt", "one\n", "other, shared");
+        git(&f.work, &["push", "-q", "-u", "origin", "other"]);
+        git(&f.seed, &["fetch", "-q"]);
+        git(&f.seed, &["checkout", "-q", "other"]);
+        commit_file(&f.seed, "theirs.txt", "theirs\n", "a teammate's commit");
+        git(&f.seed, &["push", "-q", "origin", "other"]);
+        let theirs = f.remote_ref("refs/heads/other");
+        // ...and that has work here nobody meant to send.
+        commit_file(&f.work, "wip.txt", "wip\n", "WIP do not push");
+
+        git(&f.work, &["checkout", "-q", "main"]);
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+        git(&f.work, &["tag", "-a", "v1", "-m", "v1"]);
+        git(&f.work, &["config", "push.default", "matching"]);
+        git(&f.work, &["config", "push.followTags", "true"]);
+        git(&f.work, &["config", "remote.origin.push", "+refs/heads/*:refs/heads/*"]);
+
+        let armed = plan(&f).unwrap();
+        push(&f.work, &armed).unwrap();
+
+        assert_eq!(f.remote_ref("refs/heads/main"), f.head(), "main was meant to go");
+        assert_eq!(
+            f.remote_ref("refs/heads/other"),
+            theirs,
+            "another branch was sent, over a teammate's commit"
+        );
+        assert_eq!(f.remote_ref("refs/tags/v1"), "", "a tag was sent");
+    }
+
+    /// The page sat open on `main`; a terminal moved HEAD to `wip`. The button
+    /// still says main.
+    #[test]
+    fn a_push_armed_on_one_branch_sends_nothing_once_head_is_on_another() {
+        let _guard = isolate();
+        let f = fleet("push-stale-head");
+        git(&f.work, &["checkout", "-q", "-b", "wip"]);
+        commit_file(&f.work, "wip.txt", "one\n", "wip, shared");
+        git(&f.work, &["push", "-q", "-u", "origin", "wip"]);
+        commit_file(&f.work, "more.txt", "more\n", "WIP do not push");
+        git(&f.work, &["checkout", "-q", "main"]);
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+
+        let armed = plan(&f).unwrap();
+        let (main_there, wip_there) =
+            (f.remote_ref("refs/heads/main"), f.remote_ref("refs/heads/wip"));
+
+        git(&f.work, &["checkout", "-q", "wip"]);
+
+        let got = push(&f.work, &armed);
+        let Err(PushError::Stale(why)) = &got else { panic!("{got:?}") };
+        assert!(why.contains("wip") && why.contains("main"), "{why}");
+        assert_eq!(f.remote_ref("refs/heads/wip"), wip_there, "the WIP commit was published");
+        assert_eq!(f.remote_ref("refs/heads/main"), main_there);
+    }
+
+    /// The button said "Push 1". A second commit has been made since.
+    #[test]
+    fn a_push_sends_nothing_when_the_branch_has_moved_since_it_was_armed() {
+        let _guard = isolate();
+        let f = fleet("push-stale-tip");
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+        let armed = plan(&f).unwrap();
+        let there = f.remote_ref("refs/heads/main");
+
+        commit_file(&f.work, "more.txt", "more\n", "not looked at yet");
+
+        let got = push(&f.work, &armed);
+        assert!(matches!(got, Err(PushError::Stale(_))), "{got:?}");
+        assert_eq!(f.remote_ref("refs/heads/main"), there);
+    }
+
+    #[test]
+    fn publishing_sends_the_one_branch_and_sets_its_upstream() {
+        let _guard = isolate();
+        let f = fleet("push-publish");
+        git(&f.work, &["checkout", "-q", "-b", "feature"]);
+        commit_file(&f.work, "feature.txt", "new\n", "a feature");
+        git(&f.work, &["tag", "-a", "v2", "-m", "v2"]);
+        git(&f.work, &["config", "push.followTags", "true"]);
+
+        let armed = plan(&f).unwrap();
+        assert!(armed.publish);
+        assert_eq!((armed.remote.as_str(), armed.destination.as_str()), ("origin", "refs/heads/feature"));
+        assert_eq!(why_not_push(&armed, 0, 0), None, "a publish needs no count to justify it");
+
+        assert_eq!(push(&f.work, &armed), Ok("Published feature to origin".to_string()));
+        assert_eq!(f.remote_ref("refs/heads/feature"), f.head());
+        assert_eq!(f.remote_ref("refs/tags/v2"), "");
+        assert_eq!(git(&f.work, &["rev-parse", "--abbrev-ref", "feature@{u}"]), "origin/feature");
+
+        // From here on it is an ordinary push.
+        let again = plan(&f).unwrap();
+        assert!(!again.publish);
+        assert_eq!(why_not_push(&again, 0, 0), Some("Nothing to push.".to_string()));
+    }
+
+    #[test]
+    fn there_is_no_plan_for_a_push_with_nowhere_proper_to_go() {
+        let _guard = isolate();
+
+        let f = fleet("push-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("Detached HEAD"), "{why}");
+
+        // What cloning a remote whose default branch is `--mirror` leaves.
+        let f = fleet("push-option-name");
+        git(&f.work, &["update-ref", "refs/heads/--mirror", "HEAD"]);
+        git(&f.work, &["symbolic-ref", "HEAD", "refs/heads/--mirror"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("--mirror"), "{why}");
+
+        let f = fleet("push-fork");
+        git(&f.work, &["remote", "add", "fork", f.remote.to_str().unwrap()]);
+        git(&f.work, &["config", "remote.pushDefault", "fork"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("fork") && why.contains("origin"), "{why}");
+
+        let f = fleet("push-mirror");
+        git(&f.work, &["config", "remote.origin.mirror", "true"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("mirror"), "{why}");
+
+        let f = fleet("push-two-remotes");
+        git(&f.work, &["remote", "add", "second", f.remote.to_str().unwrap()]);
+        git(&f.work, &["checkout", "-q", "-b", "unpublished"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("no single remote"), "{why}");
+
+        let f = fleet("push-local-upstream");
+        git(&f.work, &["checkout", "-q", "-b", "topic", "--track", "main"]);
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("local branch"), "{why}");
+    }
+
+    #[test]
+    fn the_button_says_why_when_a_push_would_do_nothing_or_be_rejected() {
+        let _guard = isolate();
+        let f = fleet("push-why-not");
+        let armed = plan(&f).unwrap();
+        assert_eq!(why_not_push(&armed, 0, 0), Some("Nothing to push.".to_string()));
+        assert_eq!(why_not_push(&armed, 2, 0), None);
+        let behind = why_not_push(&armed, 1, 3).unwrap();
+        assert!(behind.starts_with("3 commits are waiting"), "{behind}");
+    }
 }

@@ -55,6 +55,9 @@ pub struct Graph {
     /// More commits exist than `limit` allowed us to walk.
     pub truncated: bool,
     pub head: Option<String>,
+    /// The commit HEAD is at, in full. Together with `head`, what tells the
+    /// page that the repository has moved on since it was read.
+    pub tip: Option<String>,
     /// Where the requested commit landed, if one was asked for and found.
     pub target: Option<usize>,
     /// True when a commit was asked for and the walk gave up before reaching it.
@@ -67,9 +70,9 @@ pub struct Graph {
     pub ahead: usize,
     pub behind: usize,
     pub upstream: Option<String>,
-    /// The one remote, when there is exactly one — enough to publish a branch
-    /// that has never been pushed, and not enough to guess between several.
-    pub only_remote: Option<String>,
+    /// What a push of the checked-out branch would send and where, or the
+    /// sentence explaining why there is nowhere for one to go.
+    pub push: Result<crate::commit::PushPlan, String>,
 }
 
 /// How far the walk will go past `limit` to reach a commit it was asked for.
@@ -123,13 +126,14 @@ pub fn build(
                 lanes: 0,
                 truncated: false,
                 head,
+                tip: None,
                 target: None,
                 target_missed: target.is_some(),
                 working_changes: working_changes(&repo),
                 ahead: 0,
                 behind: 0,
                 upstream: None,
-                only_remote: only_remote(&repo),
+                push: crate::commit::push_plan(&repo),
             });
         }
     }
@@ -253,23 +257,26 @@ pub fn build(
         .max()
         .unwrap_or(0);
 
+    let (_, tip) = head_of(&repo);
+
     Ok(Graph {
         rows,
         lanes,
         truncated,
         head,
+        tip,
         target: found_at,
         target_missed: target.is_some() && found_at.is_none(),
         working_changes: working_changes(&repo),
         ahead,
         behind,
         upstream,
-        only_remote: only_remote(&repo),
+        push: crate::commit::push_plan(&repo),
     })
 }
 
 /// The name of the only remote, when there is exactly one.
-fn only_remote(repo: &Repository) -> Option<String> {
+pub(crate) fn only_remote(repo: &Repository) -> Option<String> {
     let remotes = repo.remotes().ok()?;
     if remotes.len() != 1 {
         return None;
@@ -298,16 +305,43 @@ fn divergence(repo: &Repository) -> (usize, usize, Option<String>) {
     }
 }
 
-/// Count the working tree off the main thread. The window asks for this every
+/// What one look at a repository says: how much is uncommitted, and where
+/// HEAD is. Enough to tell a page that it is showing a repository that has
+/// since moved — a branch switched or a commit made in a terminal while the
+/// page sat open.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Glance {
+    pub changes: usize,
+    /// What HEAD is called: a branch, or "HEAD" when detached.
+    pub head: Option<String>,
+    /// The commit HEAD is at, in full.
+    pub tip: Option<String>,
+}
+
+/// Look at the repository off the main thread. The window asks for this every
 /// time it regains focus, and a repository with a large untracked tree can take
 /// long enough to be felt.
-pub fn spawn_working_count(path: std::path::PathBuf) -> async_channel::Receiver<usize> {
+pub fn spawn_glance(path: std::path::PathBuf) -> async_channel::Receiver<Glance> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let count = Repository::open(&path).map(|repo| working_changes(&repo)).unwrap_or(0);
-        let _ = tx.send_blocking(count);
+        let glance = Repository::open(&path)
+            .map(|repo| {
+                let (head, tip) = head_of(&repo);
+                Glance { changes: working_changes(&repo), head, tip }
+            })
+            .unwrap_or_default();
+        let _ = tx.send_blocking(glance);
     });
     rx
+}
+
+/// What HEAD is called, and the commit it is at.
+fn head_of(repo: &Repository) -> (Option<String>, Option<String>) {
+    let Ok(head) = repo.head() else { return (None, None) };
+    (
+        head.shorthand().ok().map(str::to_string),
+        head.target().map(|oid| oid.to_string()),
+    )
 }
 
 /// Entries in the working tree, untracked included but never ignored. Counted

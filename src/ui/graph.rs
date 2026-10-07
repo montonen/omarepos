@@ -421,6 +421,8 @@ pub fn page(
                     &working_count,
                     Rc::clone(&load_detail),
                     Rc::clone(&focus_handler),
+                    (graph.head.clone(), graph.tip.clone()),
+                    Rc::clone(&reload_for_push),
                 );
 
                 arm_push(
@@ -566,37 +568,43 @@ fn arm_push(
     if let Some(previous) = handler.borrow_mut().take() {
         push.disconnect(previous);
     }
-    let publish = graph.upstream.is_none().then(|| graph.only_remote.clone()).flatten();
-    let refusal = crate::commit::why_not_push(
-        graph.ahead,
-        graph.behind,
-        graph.upstream.as_deref(),
-        graph.only_remote.as_deref(),
-    );
+    let plan = graph.push.as_ref().ok();
+    let refusal = match &graph.push {
+        Err(nowhere) => Some(nowhere.clone()),
+        Ok(plan) => crate::commit::why_not_push(plan, graph.ahead, graph.behind),
+    };
+    let publish = plan.is_some_and(|plan| plan.publish);
 
-    content.set_label(&match (&publish, graph.ahead) {
+    content.set_label(&match (publish, graph.ahead) {
         // A branch that has never been pushed is published, not pushed — the
         // word matters, because it is the act that makes it visible.
-        (Some(_), _) => "Publish".to_string(),
-        (None, 0) => "Push".to_string(),
-        (None, n) => format!("Push {n}"),
+        (true, _) => "Publish".to_string(),
+        (false, 0) => "Push".to_string(),
+        (false, n) => format!("Push {n}"),
     });
     push.set_sensitive(refusal.is_none());
-    push.set_tooltip_text(Some(&match (&refusal, &publish, &graph.upstream) {
-        (Some(reason), _, _) => reason.clone(),
-        (None, Some(remote), _) => format!("Publish this branch to {remote}"),
-        (None, None, Some(upstream)) => {
-            format!("Send {} commits to {upstream}", graph.ahead)
+    push.set_tooltip_text(Some(&match (&refusal, plan) {
+        (Some(reason), _) => reason.clone(),
+        (None, Some(plan)) if plan.publish => {
+            format!("Publish {} to {}", plan.branch, plan.remote)
         }
-        _ => "Push".to_string(),
+        (None, Some(plan)) => format!(
+            "Send {} commits on {} to {}",
+            graph.ahead,
+            plan.branch,
+            graph.upstream.as_deref().unwrap_or(&plan.remote)
+        ),
+        (None, None) => "Push".to_string(),
     }));
 
-    let Some(branch) = graph.head.clone() else { return };
+    let Some(armed) = plan.cloned() else { return };
     let repo = repo.to_path_buf();
     let toasts = toasts.clone();
     let id = push.connect_clicked(move |button| {
         button.set_sensitive(false);
-        let rx = crate::commit::spawn_push(repo.clone(), branch.clone(), publish.clone());
+        // What goes to git is the plan the button was drawn from, and only if
+        // the repository still gives that plan when the worker asks again.
+        let rx = crate::commit::spawn_push(repo.clone(), armed.clone());
         let button = button.clone();
         let toasts = toasts.clone();
         let reload = Rc::clone(&reload);
@@ -608,8 +616,16 @@ fn arm_push(
                         reload();
                     }
                 }
+                // The page was out of date. Say so, and read it again so the
+                // button shows what is true now.
+                Ok(Err(crate::commit::PushError::Stale(why))) => {
+                    toasts.add_toast(adw::Toast::new(&why));
+                    if let Some(reload) = reload.borrow().clone() {
+                        reload();
+                    }
+                }
                 // A pre-push hook's refusal is quoted, not paraphrased.
-                Ok(Err(err)) => {
+                Ok(Err(crate::commit::PushError::Git(err))) => {
                     button.set_sensitive(true);
                     toasts.add_toast(adw::Toast::new(&err));
                 }
@@ -624,6 +640,12 @@ fn arm_push(
 /// outside the app — that is rather the point of it — and nothing else would
 /// notice. The handler lives only while this page is on screen; left connected
 /// it would fire for pages the user has already left, and keep them alive.
+///
+/// `shown` is where HEAD was when the page was read: its name and its commit.
+/// When either has changed — a branch switched, a commit made, in the terminal
+/// this page offers on `l` — the whole page is read again, not just the count.
+/// The history, the ahead and behind figures and the push button all hang off
+/// HEAD, and all of them would otherwise go on describing where it used to be.
 fn watch_working_tree(
     page: &adw::NavigationPage,
     repo: &Path,
@@ -632,6 +654,8 @@ fn watch_working_tree(
     count_label: &gtk::Label,
     load_detail: Rc<dyn Fn(PathBuf, crate::commit::Target)>,
     handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+    shown: (Option<String>, Option<String>),
+    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 ) {
     let Some(window) = page.root().and_downcast::<gtk::Window>() else { return };
 
@@ -649,14 +673,23 @@ fn watch_working_tree(
             if !window.is_active() {
                 return;
             }
-            let rx = crate::graph::spawn_working_count(repo.clone());
+            let rx = crate::graph::spawn_glance(repo.clone());
             let repo = repo.clone();
             let rows = rows.clone();
             let working = working.clone();
             let count_label = count_label.clone();
             let load_detail = Rc::clone(&load_detail);
+            let shown = shown.clone();
+            let reload = Rc::clone(&reload);
             glib::spawn_future_local(async move {
-                let Ok(changes) = rx.recv().await else { return };
+                let Ok(glance) = rx.recv().await else { return };
+                if (&glance.head, &glance.tip) != (&shown.0, &shown.1) {
+                    if let Some(reload) = reload.borrow().clone() {
+                        reload();
+                    }
+                    return;
+                }
+                let changes = glance.changes;
                 working.set_visible(changes > 0);
                 count_label.set_label(&entries(changes));
                 // Only re-read the pane when it is the working tree on show;

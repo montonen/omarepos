@@ -349,9 +349,26 @@ upstream and nothing is in the way. A branch that has never been pushed says
 guessing which remote to publish to is not a guess worth making.
 
 Never forced, never `--all`, never tags, never another branch, and never from
-the grid across a selection. It is refused, with the reason, when the branch is
-behind (fast-forward first), has nothing ahead, or has no upstream and no single
-remote. A `pre-push` hook's refusal is quoted back as git wrote it.
+the grid across a selection. That is not left to git's defaults: the push names
+its one source and one destination in full
+(`git push --no-follow-tags -- <remote> refs/heads/<branch>:<upstream ref>`), so
+`push.default`, `push.followTags` and a `remote.<name>.push` refspec have no say
+in what is sent.
+
+The button is drawn from a page that may have been open a while, with a
+terminal one key away. So the repository is asked again at the moment of the
+click, and nothing is sent unless it still gives the same answer: HEAD on the
+same branch, the branch at the same commit, pushing to the same place. Otherwise
+the page says what changed and reads itself again. Coming back to the window
+does the same check, so a branch switched in lazygit shows up before the button
+is reached.
+
+It is refused, with the reason, when the branch is behind (fast-forward first),
+has nothing ahead, has no upstream and no single remote, or HEAD is detached.
+Three setups it will not push for at all, and says so: a branch that tracks one
+remote but is set to push to another (`remote.pushDefault`, `pushRemote`), a
+remote configured as a mirror, and a branch that tracks a local branch. Those
+want a terminal. A `pre-push` hook's refusal is quoted back as git wrote it.
 
 ### What is uncommitted
 
