@@ -57,13 +57,19 @@ pub fn build(
         .build();
     {
         let info = info.clone();
-        let card = card.clone();
+        // Weakly. The checkbox lives inside the card, and a closure stored on
+        // it that kept the card alive kept the pair alive for good: every
+        // card ever built, on every rescan and every keystroke in the filter,
+        // stayed in memory until the app quit.
+        let card = card.downgrade();
         check.connect_toggled(move |check| {
             // Restyle in place: a full rebuild here would fight the click.
-            if check.is_active() {
-                card.add_css_class("om-selected");
-            } else {
-                card.remove_css_class("om-selected");
+            if let Some(card) = card.upgrade() {
+                if check.is_active() {
+                    card.add_css_class("om-selected");
+                } else {
+                    card.remove_css_class("om-selected");
+                }
             }
             on_select(&info, check.is_active());
         });
@@ -150,9 +156,12 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
         }
         let info = info.clone();
         let on_action = Rc::clone(&on_action);
-        let popover = popover.clone();
+        // Weakly, for the same reason: the button is inside the popover.
+        let popover = popover.downgrade();
         button.connect_clicked(move |_| {
-            popover.popdown();
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
             on_action(action, &info);
         });
         list.append(&button);

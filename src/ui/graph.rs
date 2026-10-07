@@ -213,13 +213,19 @@ pub fn page(
         // Separate controller only because the toast overlay does not exist
         // yet where the other one is attached.
         let repo = path.to_path_buf();
-        let toasts = toasts.clone();
+        // Weakly: the list this controller is on sits inside the overlay, and
+        // a closure on the list that owned the overlay would keep the whole
+        // page alive after it was closed.
+        let toasts = toasts.downgrade();
         let reload = Rc::clone(&reload_page);
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, state| {
             if !crate::ui::unmodified(state) {
                 return glib::Propagation::Proceed;
             }
+            let Some(toasts) = toasts.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
             match key {
                 gtk::gdk::Key::p => {
                     pull(&repo, &toasts, Rc::clone(&reload), true);
@@ -407,7 +413,8 @@ pub fn page(
                         );
                     }
                 }
-                let toasts_for_rows = toasts_for_rows.clone();
+                // Weakly, as with the key controller above.
+                let toasts_for_rows = toasts_for_rows.downgrade();
                 rows_box.connect_row_activated(move |_, row| {
                     let index = row.index();
                     if index < 0 {
@@ -417,10 +424,12 @@ pub fn page(
                     // The working-tree row has no sha to copy.
                     let Some(crate::commit::Target::Commit(id)) = target else { return };
                     row.clipboard().set_text(&id);
-                    toasts_for_rows.add_toast(adw::Toast::new(&format!(
-                        "Copied {}",
-                        &id[..7.min(id.len())]
-                    )));
+                    if let Some(toasts) = toasts_for_rows.upgrade() {
+                        toasts.add_toast(adw::Toast::new(&format!(
+                            "Copied {}",
+                            &id[..7.min(id.len())]
+                        )));
+                    }
                 });
                 watch_working_tree(
                     &page_for_focus,
@@ -478,6 +487,19 @@ pub fn page(
     };
     *reload_page.borrow_mut() = Some(Rc::clone(&start_load));
     start_load();
+
+    // The slot holds the loader, the loader holds everything it fills in, and
+    // several of those hold the slot: a ring that kept every page ever opened
+    // in memory, five hundred rows and a diff buffer apiece. Emptying the slot
+    // when the page is taken down lets go of all of it. `unrealize` is the
+    // signal for that: unlike `hidden`, it does not fire when the page is
+    // merely covered by another one.
+    {
+        let slot = Rc::clone(&reload_page);
+        page.connect_unrealize(move |_| {
+            slot.borrow_mut().take();
+        });
+    }
 
     page
 }

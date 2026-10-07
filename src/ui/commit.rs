@@ -426,11 +426,13 @@ pub fn pane(
     {
         // Reloading is just loading again, so there is one way for the pane's
         // contents to arrive.
-        let load = Rc::clone(&load);
+        // Weakly: the loader itself holds this slot, so a strong reference
+        // back to it would be a ring nothing could ever free.
+        let load = Rc::downgrade(&load);
         let showing = Rc::clone(&showing);
         *reload.borrow_mut() = Some(Rc::new(move || {
             let current = showing.borrow().clone();
-            if let Some((repo, target)) = current {
+            if let (Some((repo, target)), Some(load)) = (current, load.upgrade()) {
                 load(repo, target);
             }
         }));
