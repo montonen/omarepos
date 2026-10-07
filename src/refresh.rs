@@ -255,7 +255,14 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
 
     // Cleanliness is checked again here rather than before the fetch: the fetch
     // took time, and the user may have started editing during it.
-    if is_dirty(&repo) {
+    //
+    // Only a fleet pass holds a dirty repository back outright. Asked for one
+    // repository, the question goes to git, which answers it better: a
+    // fast-forward leaves uncommitted changes alone when the incoming commits
+    // do not touch the same files, and refuses, changing nothing, when they
+    // do. Holding back here too left "behind, with an edit somewhere" with no
+    // way forward but a commit, and that commit diverged the branch.
+    if options.pass == Pass::Fleet && is_dirty(&repo) {
         return report(Outcome::Skipped(Skip::Dirty));
     }
 
@@ -288,7 +295,7 @@ fn disqualify(repo: &Repository) -> Option<Skip> {
     None
 }
 
-fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
+pub(crate) fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
     let head = repo.head().map_err(|_| Skip::Unborn)?;
     let branch_name = head.shorthand().map_err(|_| Skip::Detached)?.to_string();
     let branch = repo
@@ -598,6 +605,43 @@ mod tests {
         let got = fleet_pass(&f);
         assert!(matches!(got, Outcome::FastForwarded(2)), "{got:?}");
         assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
+    }
+
+    // ---- asked for one repository, git decides about uncommitted work -----
+
+    #[test]
+    fn asked_for_one_repository_an_edit_elsewhere_does_not_stop_the_update() {
+        let _guard = isolate();
+        let f = fleet("refresh-asked-dirty-elsewhere");
+        write(&f.work.join("README.md"), "my edit\n");
+        write(&f.work.join("staged.txt"), "staged\n");
+        git(&f.work, &["add", "staged.txt"]);
+        f.remote_moves(2);
+
+        let got = asked_for(&f);
+
+        assert!(matches!(got, Outcome::FastForwarded(2)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+        assert_eq!(read(&f.work.join("README.md")), "my edit\n");
+        assert_eq!(git(&f.work, &["status", "--porcelain"]), "M README.md\nA  staged.txt");
+    }
+
+    #[test]
+    fn asked_for_one_repository_an_edit_in_the_way_is_refused_and_kept() {
+        let _guard = isolate();
+        let f = fleet("refresh-asked-dirty-overlap");
+        let before = f.head();
+        write(&f.work.join("README.md"), "my edit\n");
+        f.remote_commits("their edit to the same file", |seed| {
+            write(&seed.join("README.md"), "their edit\n");
+        });
+
+        let got = asked_for(&f);
+
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("README.md"), "git's refusal should name the file: {why}");
+        assert_eq!(f.head(), before);
+        assert_eq!(read(&f.work.join("README.md")), "my edit\n");
     }
 
     // ---- a fast-forward is not stopped half-way ---------------------------

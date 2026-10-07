@@ -257,11 +257,18 @@ fn pills(info: &RepoInfo, auto_update: bool, trouble: Option<&Trouble>) -> gtk::
         let blocked = if auto_update { info.update_blocked_by() } else { None };
         if let Some(reason) = blocked {
             let held = pill("held back", "danger");
-            held.set_tooltip_text(Some(&format!(
+            let mut tip = format!(
                 "These {} commits will not arrive on their own: {reason}.\n\
                  The background refresh skips this repository until that is resolved.",
                 info.behind
-            )));
+            );
+            if reason == "uncommitted changes" {
+                tip.push_str(
+                    "\nPress p to update it yourself. git keeps your changes where the update \
+                     does not touch the same files, and refuses, changing nothing, where it does.",
+                );
+            }
+            held.set_tooltip_text(Some(&tip));
             row.append(&held);
         } else if let Some(Trouble::Update { refused }) = trouble {
             // Nothing the card can see is in the way, and git still said no:

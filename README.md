@@ -243,7 +243,7 @@ repository is left alone, with the reason reported, when any of these hold:
 
 | Condition | Why |
 | --- | --- |
-| Uncommitted changes | Updating under your edits is not the app's call |
+| Uncommitted changes | Updating under your edits is not the app's call — on a pass across the fleet. `p` on that repository asks git, which keeps your changes where the update does not touch the same files and refuses where it does |
 | Commits of its own | A fast-forward would not be one |
 | Detached HEAD | No branch to move |
 | No upstream | Nothing to move it to |
@@ -392,10 +392,16 @@ A **Local changes** row sits above the history whenever the working tree has
 anything in it, drawn dashed and hollow because it is not a commit. Selecting it
 fills the same pane with everything uncommitted, grouped:
 
-| Group | Blocks an update |
+| Group | Holds back the background refresh |
 | --- | --- |
 | Staged, Not staged, Conflicted | yes |
 | **Untracked** | **no** |
+
+"Holds back" is about the pass across the fleet, which will not update under
+uncommitted work. `p` on the repository asks git instead, and git manages more
+than that: it fast-forwards over changes the incoming commits do not touch and
+keeps them, and refuses — naming the files, changing nothing — where they
+overlap.
 
 Each group folds. Untracked starts folded past ten files, where it stops being
 information and starts being noise.
@@ -403,8 +409,19 @@ information and starts being noise.
 The `+` beside a file stages it, `−` unstages it, and the box below commits what
 is staged. Whole files only — staging a hunk is the heart of a committing tool
 and omarepos is not one; `Open in terminal` starts lazygit for that. The commit
-is refused, with the reason, when nothing is staged, the message is empty, or
-the repository is mid-merge or mid-rebase.
+is refused, with the reason, when nothing is staged, the message is empty, the
+repository is mid-merge or mid-rebase, there are unresolved conflicts, HEAD is
+detached, or the branch is behind its upstream.
+
+That last one is deliberate. A commit on a branch that is behind leaves it
+diverged, and the ways out of that are a rebase or a merge, neither of which
+omarepos does — so it will not start what it cannot finish. Press `p` first:
+the update goes through with your changes in place unless it touches the same
+files.
+
+A conflicted file has no `+`. Staging is how git is told a conflict has been
+resolved, so the button would settle a merge by accident, markers and all.
+Conflicts want a terminal.
 
 All of it runs through `git` rather than libgit2, so hooks run, commits are
 signed if you sign them, and the identity is whichever `includeIf gitdir:`

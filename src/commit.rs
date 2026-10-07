@@ -393,6 +393,9 @@ fn collect(
         }
         let group = match delta.status() {
             git2::Delta::Untracked => Group::Untracked,
+            // Both diffs report a conflicted path, and the first has already
+            // listed it. Twice in the list reads as two files.
+            git2::Delta::Conflicted if default_group == Group::Unstaged => continue,
             git2::Delta::Conflicted => Group::Conflicted,
             _ => default_group,
         };
@@ -831,14 +834,49 @@ pub fn why_not_commit(path: &Path, staged: usize, message: &str) -> Option<Strin
     if staged == 0 {
         return Some("Nothing is staged. Stage a file to commit it.".into());
     }
-    let state = Repository::open(path).map(|r| r.state()).ok()?;
+    let repo = Repository::open(path).ok()?;
+    let state = repo.state();
     if state != git2::RepositoryState::Clean {
         // omarepos has no conflict story and must not pretend otherwise.
         return Some(format!(
             "This repository is in the middle of something ({state:?}). Finish or abort it in a terminal."
         ));
     }
+    // A conflict does not always come with something in progress. `git stash
+    // pop` and `checkout -m` leave unmerged entries and no MERGE_HEAD, so the
+    // state above reads Clean with conflict markers sitting in the files.
+    if repo.index().map(|index| index.has_conflicts()).unwrap_or(false) {
+        return Some("There are unresolved conflicts here. Resolve them in a terminal first.".into());
+    }
+    if repo.head_detached().unwrap_or(false) {
+        return Some(
+            "Detached HEAD — a commit made here would belong to no branch. Commit from a terminal."
+                .into(),
+        );
+    }
+    // A commit on a branch that is behind leaves it diverged, and a diverged
+    // branch is one this application can neither push nor fast-forward: the
+    // ways out are a rebase or a merge, which it does not do. The pane used to
+    // recommend exactly this commit as the way to unblock an update.
+    if let Ok((_, behind)) = crate::refresh::divergence(&repo) {
+        if behind > 0 {
+            return Some(format!(
+                "{behind} commits are waiting on the upstream. Update first (p): a commit made \
+                 now would leave the branch diverged, which omarepos can neither push nor \
+                 fast-forward."
+            ));
+        }
+    }
     None
+}
+
+/// The first of `files` that the index holds as a conflict, if any.
+fn conflicted_among(repo: &Path, files: &[String]) -> Option<String> {
+    let index = Repository::open(repo).ok()?.index().ok()?;
+    files
+        .iter()
+        .find(|file| (1..=3).any(|stage| index.get_path(Path::new(file.as_str()), stage).is_some()))
+        .cloned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -856,6 +894,17 @@ pub fn spawn_write(
 ) -> async_channel::Receiver<Result<(), String>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
+        // `git add` is how git is told a conflict has been resolved, and
+        // `restore --staged` after it throws the three-way record away. Either
+        // would settle a merge by accident: the first commits the conflict
+        // markers, the second silently keeps this side and drops the other.
+        if let Some(file) = conflicted_among(&repo, &files) {
+            let _ = tx.send_blocking(Err(format!(
+                "{file} is conflicted. Resolve it in a terminal: staging it here would record \
+                 it as resolved, markers and all."
+            )));
+            return;
+        }
         let mut args: Vec<&str> = match what {
             Write::Stage => vec!["add", "--"],
             // `restore --staged` leaves the working tree alone; `reset` would
@@ -893,6 +942,84 @@ mod tests {
 
     fn plan(f: &Fleet) -> Result<PushPlan, String> {
         push_plan(&Repository::open(&f.work).unwrap())
+    }
+
+    // ---- the commit box: nothing it cannot finish ---------------------------
+
+    /// A conflict with nothing "in progress": what `git stash pop` leaves.
+    /// There is no MERGE_HEAD, so the repository's state reads Clean.
+    fn stash_pop_conflict(name: &str) -> PathBuf {
+        let dir = scratch(name);
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "f.txt", "base\n", "base");
+        write(&dir.join("f.txt"), "MY CHANGE\n");
+        git(&dir, &["stash", "-q"]);
+        commit_file(&dir, "f.txt", "THEIR CHANGE\n", "theirs");
+        let (popped, _) = try_git(&dir, &["stash", "pop"]);
+        assert!(!popped, "the fixture needs the pop to conflict");
+        dir
+    }
+
+    #[test]
+    fn a_conflicted_file_is_listed_once_and_cannot_be_staged_or_committed() {
+        let _guard = isolate();
+        let dir = stash_pop_conflict("commit-conflict");
+        assert_eq!(
+            Repository::open(&dir).unwrap().state(),
+            git2::RepositoryState::Clean,
+            "which is how it used to get through"
+        );
+
+        let listed = load_working(&dir, &Cancel::default()).unwrap();
+        let rows: Vec<(&str, Group)> =
+            listed.files.iter().map(|f| (f.path.as_str(), f.group)).collect();
+        assert_eq!(rows, vec![("f.txt", Group::Conflicted)]);
+
+        // Staging is how git is told a conflict has been resolved.
+        let staged = recv(spawn_write(dir.clone(), Write::Stage, vec!["f.txt".to_string()]));
+        assert!(staged.unwrap_err().contains("conflicted"));
+        let unstaged = recv(spawn_write(dir.clone(), Write::Unstage, vec!["f.txt".to_string()]));
+        assert!(unstaged.is_err());
+        assert!(!git(&dir, &["ls-files", "-u"]).is_empty(), "the three-way record is gone");
+
+        let why = why_not_commit(&dir, 1, "resolved, honest").unwrap();
+        assert!(why.contains("unresolved conflicts"), "{why}");
+        assert!(read(&dir.join("f.txt")).contains("<<<<<<<"), "the markers are still the user's to deal with");
+    }
+
+    #[test]
+    fn a_commit_that_would_diverge_the_branch_is_refused() {
+        let _guard = isolate();
+        let f = fleet("commit-behind");
+        write(&f.work.join("mine.txt"), "mine\n");
+        git(&f.work, &["add", "mine.txt"]);
+        assert_eq!(why_not_commit(&f.work, 1, "mine"), None, "level with the upstream");
+
+        f.remote_moves(3);
+        git(&f.work, &["fetch", "-q"]);
+
+        let why = why_not_commit(&f.work, 1, "mine").unwrap();
+        assert!(why.starts_with("3 commits are waiting"), "{why}");
+        assert!(why.contains("Update first"), "{why}");
+    }
+
+    #[test]
+    fn a_detached_head_is_not_committed_to() {
+        let _guard = isolate();
+        let f = fleet("commit-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        write(&f.work.join("mine.txt"), "mine\n");
+        git(&f.work, &["add", "mine.txt"]);
+        let why = why_not_commit(&f.work, 1, "mine").unwrap();
+        assert!(why.starts_with("Detached HEAD"), "{why}");
+    }
+
+    #[test]
+    fn the_ordinary_refusals_still_come_first() {
+        let _guard = isolate();
+        let f = fleet("commit-ordinary");
+        assert_eq!(why_not_commit(&f.work, 1, "  "), Some("Write a commit message first.".into()));
+        assert!(why_not_commit(&f.work, 0, "message").unwrap().starts_with("Nothing is staged"));
     }
 
     // ---- push: one branch, to the place the button named, or nothing ------

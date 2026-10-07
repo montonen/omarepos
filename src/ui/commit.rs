@@ -564,7 +564,9 @@ fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> g
 fn describe(detail: &Detail) -> String {
     if detail.author.is_empty() {
         let blocking = if detail.files.iter().any(|f| f.group.blocks_update()) {
-            "an update is blocked until these are committed or stashed"
+            // Not "until these are committed": on a branch that is behind, the
+            // commit is what makes the update impossible.
+            "the background refresh leaves this repository alone while these are here"
         } else {
             "nothing here blocks an update"
         };
@@ -845,7 +847,9 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             churn.add_css_class("om-meta");
             line.append(&churn);
 
-            if let Some(on_write) = on_write {
+            // A conflicted file gets no button, and so no Space either: to
+            // stage it is to tell git the conflict is settled.
+            if let Some(on_write) = on_write.filter(|_| file.group != Group::Conflicted) {
                 // Whole files only. Staging a hunk is a different tool.
                 let staged = file.group == Group::Staged;
                 let button = gtk::Button::builder()
@@ -872,6 +876,9 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             let mut tip = file.path.clone();
             if let Some(from) = &file.from {
                 tip = format!("{tip}\nrenamed from {from}");
+            }
+            if file.group == Group::Conflicted {
+                tip.push_str("\nConflicted — resolve it in a terminal");
             }
             line.set_tooltip_text(Some(&tip));
 
