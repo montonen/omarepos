@@ -198,6 +198,10 @@ pub struct Config {
     pub terminal: Option<String>,
     /// Editor launched inside the terminal by "Open in editor".
     pub editor: Option<String>,
+    /// Command run inside the terminal by "Open in terminal", before the shell
+    /// takes over. Unset means lazygit when it is installed; an empty string
+    /// means a plain shell.
+    pub terminal_runs: Option<String>,
     /// Follow the active Omarchy theme and restyle when it changes.
     pub follow_omarchy_theme: bool,
     /// Background refresh settings.
@@ -212,6 +216,7 @@ impl Default for Config {
             max_depth: 3,
             terminal: None,
             editor: None,
+            terminal_runs: None,
             follow_omarchy_theme: true,
             refresh: Refresh::default(),
         }
@@ -344,6 +349,12 @@ impl Config {
             Some(editor) => out.push_str(&format!("editor = {editor:?}\n")),
             None => out.push_str("# editor = \"nvim\"          # defaults to $EDITOR\n"),
         }
+        match &self.terminal_runs {
+            Some(cmd) => out.push_str(&format!("terminal_runs = {cmd:?}\n")),
+            None => out.push_str(
+                "# terminal_runs = \"lazygit\"  # run in the terminal; \"\" for a plain shell\n",
+            ),
+        }
         out.push_str(&format!(
             "\nfollow_omarchy_theme = {}\n",
             self.follow_omarchy_theme
@@ -379,6 +390,17 @@ impl Config {
             }
         }
         "xterm".to_string()
+    }
+
+    /// What to run inside the terminal before handing over to the shell.
+    /// Defaults to lazygit where it exists, since a terminal opened on a
+    /// repository is nearly always opened to do something with git.
+    pub fn terminal_runs_command(&self) -> Option<String> {
+        match &self.terminal_runs {
+            Some(cmd) if cmd.trim().is_empty() => None,
+            Some(cmd) => Some(cmd.trim().to_string()),
+            None => which("lazygit").then(|| "lazygit".to_string()),
+        }
     }
 
     pub fn editor_command(&self) -> String {

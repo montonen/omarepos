@@ -111,7 +111,10 @@ The filter matches repo name, path, branch, remote and language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind, or
 unreadable. Each card's checkbox adds it to the contributions scope — once
 anything is ticked the rest of the grid dims, so the selection stays visible
-while you scroll. The `⋮` menu holds the terminal, editor and clipboard actions.
+while you scroll. The `⋮` menu holds the terminal, editor and clipboard actions. **Open in terminal**
+starts lazygit in the repository when it is installed, and leaves you in a shell
+there when you quit it — so it is both, not one instead of the other. Change or
+disable that in settings.
 
 ## Adding repositories
 
@@ -345,6 +348,10 @@ max_depth = 3
 
 # Defaults to $TERMINAL, then the first of alacritty/ghostty/kitty/foot/wezterm.
 terminal = "alacritty"
+
+# Run in the terminal by "Open in terminal", before the shell takes over.
+# Unset follows lazygit when it is installed; "" gives a plain shell.
+terminal_runs = "lazygit"
 
 # Defaults to $EDITOR, then nvim.
 editor = "nvim"

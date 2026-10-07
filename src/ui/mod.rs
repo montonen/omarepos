@@ -60,37 +60,56 @@ pub fn relative_time(when: i64) -> String {
     }
 }
 
-/// Open a terminal in `dir`. Terminals inherit the working directory, so the
-/// cwd alone is enough and we avoid per-emulator `--working-directory` flags.
+/// Open a terminal in `dir`, running whatever the config wants started there
+/// first — lazygit by default, since a terminal opened on a repository is
+/// nearly always opened to do something with git.
+///
+/// The shell is left behind when that command exits, so the terminal is still
+/// a terminal afterwards rather than closing out from under you.
 pub fn open_terminal(cfg: &Config, dir: &Path) {
     let term = cfg.terminal_command();
-    spawn(Command::new(&term).current_dir(dir), &term);
+    match cfg.terminal_runs_command() {
+        Some(command) => run_in_terminal(&term, dir, &format!("{command}; exec \"$SHELL\"")),
+        // Terminals inherit the working directory, so the cwd alone is enough
+        // and we avoid per-emulator `--working-directory` flags.
+        None => spawn(Command::new(&term).current_dir(dir), &term),
+    }
 }
 
-/// Open `$EDITOR` inside a terminal at `dir`. The flag that takes a command
-/// differs per emulator, hence the per-terminal arms.
+/// Open `$EDITOR` inside a terminal at `dir`.
 pub fn open_editor(cfg: &Config, dir: &Path) {
     let term = cfg.terminal_command();
-    let editor = cfg.editor_command();
-    let base = Path::new(&term)
+    run_in_terminal(&term, dir, &format!("{} .", cfg.editor_command()));
+}
+
+/// Run a shell command inside a terminal emulator, in `dir`. The flag that
+/// takes a command differs per emulator, hence the arms.
+fn run_in_terminal(term: &str, dir: &Path, script: &str) {
+    let base = Path::new(term)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| term.clone());
+        .unwrap_or_else(|| term.to_string());
 
-    let mut cmd = Command::new(&term);
+    let mut cmd = Command::new(term);
     cmd.current_dir(dir);
     match base.as_str() {
+        // The default-terminal launcher takes the command directly. It is what
+        // $TERMINAL points at on a spec-following desktop, and passing it `-e`
+        // silently does the wrong thing.
+        "xdg-terminal-exec" => {
+            cmd.args(["--", "sh", "-c", script]);
+        }
         "kitty" => {
-            cmd.args([editor.as_str(), "."]);
+            cmd.args(["sh", "-c", script]);
         }
         "wezterm" => {
-            cmd.args(["start", "--", editor.as_str(), "."]);
+            cmd.args(["start", "--", "sh", "-c", script]);
         }
         _ => {
-            cmd.args(["-e", editor.as_str(), "."]);
+            cmd.args(["-e", "sh", "-c", script]);
         }
     }
-    spawn(&mut cmd, &term);
+    spawn(&mut cmd, term);
 }
 
 pub fn open_folder(dir: &Path) {

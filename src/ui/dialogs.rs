@@ -171,6 +171,33 @@ pub fn settings(
     )));
     tools_group.add(&terminal);
 
+    let runs = adw::EntryRow::builder()
+        .title("Run in the terminal")
+        .show_apply_button(true)
+        .build();
+    runs.set_text(cfg.borrow().terminal_runs.as_deref().unwrap_or(""));
+    runs.set_tooltip_text(Some(&format!(
+        "Started in the repository by “Open in terminal”; the shell is left \
+         behind when it exits. Blank follows lazygit when installed, \
+         “none” for a plain shell. Currently: {}",
+        cfg.borrow()
+            .terminal_runs_command()
+            .unwrap_or_else(|| "a plain shell".into())
+    )));
+    tools_group.add(&runs);
+    {
+        let cfg = Rc::clone(&cfg);
+        runs.connect_apply(move |row| {
+            let value = row.text().trim().to_string();
+            cfg.borrow_mut().terminal_runs = match value.as_str() {
+                "" => None,
+                "none" => Some(String::new()),
+                other => Some(other.to_string()),
+            };
+            persist(&cfg);
+        });
+    }
+
     let editor = adw::EntryRow::builder()
         .title("Editor")
         .show_apply_button(true)
