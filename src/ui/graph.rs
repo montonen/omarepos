@@ -39,6 +39,7 @@ pub fn page(
     detail_open: bool,
     on_detail_toggled: Rc<dyn Fn(bool)>,
     on_terminal: Rc<dyn Fn()>,
+    on_editor: Rc<dyn Fn()>,
     on_contributions: Rc<dyn Fn(PathBuf)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new(name, &tildify(path));
@@ -168,11 +169,16 @@ pub fn page(
         let focus_files = Rc::clone(&focus_files);
         let keys = gtk::EventControllerKey::new();
         let on_terminal = Rc::clone(&on_terminal);
+        let on_editor = Rc::clone(&on_editor);
         keys.connect_key_pressed(move |_, key, _, state| {
             // Same letter as the grid: you are inside a repository here, so it
             // means the same thing.
             if key == gtk::gdk::Key::l && crate::ui::unmodified(state) {
                 on_terminal();
+                return glib::Propagation::Stop;
+            }
+            if key == gtk::gdk::Key::e && crate::ui::unmodified(state) {
+                on_editor();
                 return glib::Propagation::Stop;
             }
             if key != gtk::gdk::Key::Tab || state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
@@ -211,11 +217,26 @@ pub fn page(
         let reload = Rc::clone(&reload_page);
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, state| {
-            if key == gtk::gdk::Key::p && crate::ui::unmodified(state) {
-                pull(&repo, &toasts, Rc::clone(&reload));
-                return glib::Propagation::Stop;
+            if !crate::ui::unmodified(state) {
+                return glib::Propagation::Proceed;
             }
-            glib::Propagation::Proceed
+            match key {
+                gtk::gdk::Key::p => {
+                    pull(&repo, &toasts, Rc::clone(&reload), true);
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::f => {
+                    pull(&repo, &toasts, Rc::clone(&reload), false);
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::question => {
+                    if let Some(window) = toasts.root().and_downcast::<gtk::Window>() {
+                        crate::ui::shortcuts::dialog().present(Some(&window));
+                    }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
         });
         rows_box.add_controller(keys);
     }
@@ -483,11 +504,12 @@ fn pull(
     repo: &Path,
     toasts: &adw::ToastOverlay,
     reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    fast_forward: bool,
 ) {
     let rx = crate::refresh::spawn(
         vec![repo.to_path_buf()],
         crate::refresh::Options {
-            fast_forward: true,
+            fast_forward,
             max_parallel: 1,
             timeout: std::time::Duration::from_secs(120),
         },
@@ -506,7 +528,7 @@ fn pull(
                         }
                         crate::refresh::Outcome::UpToDate => "Up to date".into(),
                         crate::refresh::Outcome::Behind(n) => {
-                            format!("{n} behind, not fast-forwarded")
+                            format!("Fetched — {n} behind")
                         }
                         crate::refresh::Outcome::Skipped(skip) => {
                             format!("Left alone: {}", skip.reason())

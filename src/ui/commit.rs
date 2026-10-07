@@ -60,6 +60,7 @@ pub fn pane(
 
     let files = gtk::ListBox::new();
     let files_for_focus = files.clone();
+    let files_for_keys = files.clone();
     files.set_selection_mode(gtk::SelectionMode::Browse);
     files.add_css_class("om-results");
     files.set_margin_top(10);
@@ -432,6 +433,41 @@ pub fn pane(
         }));
     }
 
+    {
+        // Space stages the focused file and `c` moves to the message, the two
+        // reflexes anyone arriving from lazygit already has. The controller is
+        // on the list, so neither fires while the message is being typed.
+        let message = message.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |controller, key, _, state| {
+            if !crate::ui::unmodified(state) {
+                return glib::Propagation::Proceed;
+            }
+            if key == gtk::gdk::Key::c {
+                if message.get_visible() {
+                    message.grab_focus();
+                    return glib::Propagation::Stop;
+                }
+                return glib::Propagation::Proceed;
+            }
+            if key != gtk::gdk::Key::space {
+                return glib::Propagation::Proceed;
+            }
+            let focused = controller
+                .widget()
+                .and_downcast::<gtk::ListBox>()
+                .and_then(|list| list.focus_child());
+            match focused.as_ref().and_then(find_button) {
+                Some(button) => {
+                    button.emit_clicked();
+                    glib::Propagation::Stop
+                }
+                None => glib::Propagation::Proceed,
+            }
+        });
+        files_for_keys.add_controller(keys);
+    }
+
     // No Tab handler on the file list: the natural order already runs row,
     // stage button, next row, and on to the message box. Intercepting Tab here
     // jumped straight to the message and made the stage buttons unreachable
@@ -609,6 +645,22 @@ fn colour_tag(buffer: &gtk::TextBuffer, colour: syntect::highlighting::Color) ->
     )));
     buffer.tag_table().add(&tag);
     tag
+}
+
+/// The stage button inside a file row. Rows are a handful of widgets wide, so
+/// walking them is cheaper than threading a reference out to the key handler.
+fn find_button(widget: &gtk::Widget) -> Option<gtk::Button> {
+    if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+        return Some(button);
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_button(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
 }
 
 /// Pick a syntax for a path.

@@ -365,8 +365,30 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             // refusal the background pass already knows how to make.
             if key == gdk::Key::p && ui::unmodified(state) {
                 if let Some(path) = nav.focused_repo() {
-                    nav.pull_one(path);
+                    nav.pull_one(path, true);
                 }
+                return glib::Propagation::Stop;
+            }
+
+            // `f` fetches without touching the working tree.
+            if key == gdk::Key::f && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo() {
+                    nav.pull_one(path, false);
+                }
+                return glib::Propagation::Stop;
+            }
+
+            if key == gdk::Key::e && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo() {
+                    ui::open_editor(&nav.cfg.borrow(), &path);
+                }
+                return glib::Propagation::Stop;
+            }
+
+            // `?` lives here rather than on an accelerator, so typing one into
+            // the filter box types one.
+            if key == gdk::Key::question {
+                ui::shortcuts::dialog().present(Some(&nav.window));
                 return glib::Propagation::Stop;
             }
 
@@ -476,6 +498,15 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_search_commits);
 
+    let act_keys = gio::SimpleAction::new("keyboard", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_keys.connect_activate(move |_, _| {
+            ui::shortcuts::dialog().present(Some(&ui.window));
+        });
+    }
+    window.add_action(&act_keys);
+
     let act_focus_grid = gio::SimpleAction::new("focus-grid", None);
     {
         let ui = Rc::clone(&ui);
@@ -525,6 +556,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.escape", &["Escape"]);
     app.set_accels_for_action("win.search-commits", &["<Ctrl><Shift>f"]);
     app.set_accels_for_action("win.focus-grid", &["<Ctrl>l"]);
+    // F1 only as an accelerator: binding `?` here would fire while typing one
+    // into the filter box, since accelerators run ahead of the focused widget.
+    app.set_accels_for_action("win.keyboard", &["F1"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
@@ -1508,6 +1542,7 @@ impl Ui {
             open,
             remember,
             self.terminal_opener(&info.path),
+            self.editor_opener(&info.path),
             on_contributions,
         ));
     }
@@ -1526,6 +1561,7 @@ impl Ui {
         let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
             Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
                 let open_terminal_there = ui_for_terminal.terminal_opener(&path);
+                let open_editor_there = ui_for_terminal.editor_opener(&path);
             let nav_inner = nav.clone();
             let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
                 let name = path
@@ -1541,6 +1577,7 @@ impl Ui {
                     open,
                     Rc::clone(&remember),
                     Rc::clone(&open_terminal_there),
+                    Rc::clone(&open_editor_there),
                     on_contributions,
                 ));
             });
@@ -1551,7 +1588,7 @@ impl Ui {
     /// same pass the timer runs, narrowed to the repository in hand, so a
     /// dirty tree or a diverged branch is refused for the same reasons and
     /// says so.
-    fn pull_one(self: &Rc<Self>, path: PathBuf) {
+    fn pull_one(self: &Rc<Self>, path: PathBuf, fast_forward: bool) {
         if self.refreshing.get() || self.spinner.is_visible() {
             self.toasts.add_toast(adw::Toast::new("Already busy"));
             return;
@@ -1571,7 +1608,7 @@ impl Ui {
         let rx = refresh::spawn(
             vec![path],
             refresh::Options {
-                fast_forward: true,
+                fast_forward,
                 max_parallel: 1,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
             },
@@ -1588,7 +1625,7 @@ impl Ui {
                             }
                             refresh::Outcome::UpToDate => format!("{name} is up to date"),
                             refresh::Outcome::Behind(n) => {
-                                format!("{name}: {n} behind, not fast-forwarded")
+                                format!("{name}: fetched, {n} behind")
                             }
                             refresh::Outcome::Skipped(skip) => {
                                 format!("{name} left alone: {}", skip.reason())
@@ -1613,6 +1650,12 @@ impl Ui {
         let ui = Rc::clone(self);
         let path = path.to_path_buf();
         Rc::new(move || ui::open_terminal(&ui.cfg.borrow(), &path))
+    }
+
+    fn editor_opener(self: &Rc<Self>, path: &Path) -> Rc<dyn Fn()> {
+        let ui = Rc::clone(self);
+        let path = path.to_path_buf();
+        Rc::new(move || ui::open_editor(&ui.cfg.borrow(), &path))
     }
 
     fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {
