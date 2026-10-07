@@ -134,9 +134,18 @@ Three ways, in order of convenience:
    repository itself gets a card. Edits are written to the config file
    immediately and the grid rescans.
 2. **The config file**, `~/.config/omarepos/config.toml`: `roots` for folders to
-   search, `extra_repos` for individual repositories outside them.
+   search, `extra_repos` for individual repositories outside them. If the file
+   cannot be parsed, omarepos says so in a banner, runs on the defaults, and
+   saves nothing until it is fixed — it will not write its defaults over a file
+   with a typo in it. The same goes for the tag file, `repos.toml`. Each save
+   keeps the version it replaced beside it as `config.toml.bak`.
 3. **`--root <PATH>`** on the command line, repeatable, for a one-off look at
-   somewhere else. It overrides the configured roots for that run and is not saved.
+   somewhere else. It overrides the configured roots for that run and is not
+   saved. A one-off look opens its own window even when omarepos is already
+   running, applies no root tags, and does no background refresh.
+
+Otherwise there is one window: starting omarepos while it is already open
+brings that window forward.
 
 A root is searched `max_depth` levels down and stops descending at the first
 repository it finds, so `~/code` picks up `~/code/foo` and `~/code/plugins/bar`

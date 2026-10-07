@@ -169,6 +169,58 @@ impl Default for Refresh {
     }
 }
 
+/// One line saying why a file was not used: where the parser stopped, and
+/// what it objected to. The parser's own message runs to five lines with a
+/// drawing of the offending one, which is right for a terminal and wrong for a
+/// banner.
+pub fn why_unusable(path: &Path, why: &str) -> String {
+    let mut lines = why.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or("could not be read");
+    let said = match lines.last() {
+        Some(last) => format!("{first}: {last}"),
+        None => first.to_string(),
+    };
+    format!("{} — {said}", tildify(path))
+}
+
+/// The error for a save that must not happen.
+pub fn refuse_to_replace(load_error: &Option<String>) -> std::io::Result<()> {
+    match load_error {
+        Some(why) => Err(std::io::Error::other(format!(
+            "not saved, so as not to replace a file that could not be read ({why})"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Replace a file whole or not at all: write beside it, then rename over it.
+/// Writing in place truncates first, so a full disk or a crash in the middle
+/// leaves half a file — and for the settings and the tags there is no other
+/// copy. The version being replaced is kept beside it as `<name>.bak`.
+pub fn replace_file(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let fresh = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::File::create(&fresh)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&fresh);
+        return Err(err);
+    }
+    if path.exists() {
+        let _ = std::fs::copy(path, dir.join(format!("{name}.bak")));
+    }
+    std::fs::rename(&fresh, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&fresh);
+    })
+}
+
 /// Where the last refresh time is kept. Not in the config file: it is state,
 /// not configuration, and rewriting a file the user edits by hand every half
 /// hour is a good way to lose their comments.
@@ -284,6 +336,22 @@ pub struct Config {
     pub commit_detail: bool,
     /// Background refresh settings.
     pub refresh: Refresh,
+    /// Roots given on the command line, for this run only. Used in place of
+    /// `roots` and never written: `omarepos -r <dir>` is a look at somewhere
+    /// else, not a change of configuration. They used to be assigned straight
+    /// into `roots`, and the next save — hiding the detail pane was enough —
+    /// made the one-off permanent.
+    #[serde(skip)]
+    pub roots_override: Option<Vec<RootSpec>>,
+    /// `--depth`, for this run only. Likewise never written.
+    #[serde(skip)]
+    pub depth_override: Option<usize>,
+    /// Why the file on disk could not be used, when it could not. While this
+    /// is set the defaults are in force and `save` refuses: the file is the
+    /// only copy of what the user wrote, and one mistyped key must not cost
+    /// them the rest of it.
+    #[serde(skip)]
+    pub load_error: Option<String>,
 }
 
 impl Default for Config {
@@ -298,6 +366,9 @@ impl Default for Config {
             follow_omarchy_theme: true,
             commit_detail: true,
             refresh: Refresh::default(),
+            roots_override: None,
+            depth_override: None,
+            load_error: None,
         }
     }
 }
@@ -310,12 +381,16 @@ impl Config {
         base.join("omarepos/config.toml")
     }
 
-    /// Load the config file, falling back to defaults. A malformed file is
-    /// reported on stderr rather than being fatal — the app is still usable.
+    /// Load the config file. No file is the ordinary first run and means the
+    /// defaults. A file that is there but cannot be read or parsed also gets
+    /// the defaults — the app is still usable — but it is remembered in
+    /// `load_error`, shown in the window, and never saved over.
     pub fn load() -> Self {
         let path = Self::path();
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(err) => return Self::unusable(&path, &err.to_string()),
         };
         match toml::from_str::<Config>(&text) {
             Ok(mut cfg) => {
@@ -324,15 +399,40 @@ impl Config {
                 }
                 cfg
             }
-            Err(err) => {
-                eprintln!("omarepos: ignoring {}: {err}", path.display());
-                Self::default()
-            }
+            Err(err) => Self::unusable(&path, &err.to_string()),
         }
     }
 
+    fn unusable(path: &Path, why: &str) -> Self {
+        eprintln!("omarepos: ignoring {}: {why}", path.display());
+        Self { load_error: Some(why_unusable(path, why)), ..Self::default() }
+    }
+
+    /// The roots in force: the command line's for this run if it gave any,
+    /// otherwise the configured ones.
     pub fn roots(&self) -> Vec<Root> {
-        self.roots.iter().map(RootSpec::resolve).collect()
+        self.root_specs().iter().map(RootSpec::resolve).collect()
+    }
+
+    fn root_specs(&self) -> &[RootSpec] {
+        self.roots_override.as_deref().unwrap_or(&self.roots)
+    }
+
+    /// The roots in force, as the user wrote them.
+    pub fn root_labels(&self) -> Vec<String> {
+        self.root_specs().iter().map(|r| r.path_str().trim().to_string()).collect()
+    }
+
+    /// The search depth in force.
+    pub fn depth(&self) -> usize {
+        self.depth_override.unwrap_or(self.max_depth).max(1)
+    }
+
+    /// A run that is looking somewhere other than the configuration says.
+    /// Such a run keeps its hands off everything shared: it seeds no tags and
+    /// runs no background refresh.
+    pub fn one_off(&self) -> bool {
+        self.roots_override.is_some() || self.depth_override.is_some()
     }
 
     pub fn extra_repos(&self) -> Vec<PathBuf> {
@@ -394,12 +494,12 @@ impl Config {
     }
 
     /// Rewrite the config file. Comments in an existing file are lost; the
-    /// generated one documents itself instead.
+    /// generated one documents itself instead. Refuses when the file on disk
+    /// could not be read at launch: what is in memory then is the defaults,
+    /// and writing them would replace the only copy of the user's settings.
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        refuse_to_replace(&self.load_error)?;
         let list = |values: &[String]| -> String {
             values
                 .iter()
@@ -451,7 +551,7 @@ impl Config {
         out.push_str(&format!("max_parallel = {}\n", refresh.max_parallel));
         out.push_str(&format!("timeout_seconds = {}\n", refresh.timeout_seconds));
 
-        std::fs::write(&path, out)
+        replace_file(&path, &out)
     }
 
     /// Terminal command, honouring `$TERMINAL` before guessing.
@@ -502,6 +602,93 @@ mod tests {
 
     use super::*;
     use crate::testkit::*;
+
+    const WRITTEN_BY_HAND: &str = "roots = [\"~/src\", { path = \"~/Work/client\", nested = true, tag = \"client\" }]\nmax_depth = 4\n";
+
+    #[test]
+    fn no_file_is_the_first_run_and_means_the_defaults() {
+        let _guard = isolate();
+        let _ = std::fs::remove_file(Config::path());
+        let cfg = Config::load();
+        assert_eq!(cfg.load_error, None);
+        assert_eq!(cfg.root_labels(), vec!["~/code".to_string()]);
+        assert!(!cfg.one_off());
+    }
+
+    /// One mistyped key, in a file the README invites editing by hand.
+    #[test]
+    fn a_file_that_does_not_parse_is_remembered_and_never_saved_over() {
+        let _guard = isolate();
+        let written = WRITTEN_BY_HAND.replace("max_depth", "max_dpeth");
+        write(&Config::path(), &written);
+
+        let mut cfg = Config::load();
+        let why = cfg.load_error.clone().expect("the failure is remembered");
+        assert!(why.contains("config.toml"), "{why}");
+        assert!(why.contains("max_dpeth"), "it should say what the parser objected to: {why}");
+        assert!(!why.contains('\n'), "one line, for a banner: {why:?}");
+
+        // Hiding the detail pane is all it used to take.
+        cfg.commit_detail = false;
+        assert!(cfg.save().is_err());
+        assert_eq!(read(&Config::path()), written);
+
+        let _ = std::fs::remove_file(Config::path());
+    }
+
+    #[test]
+    fn what_the_command_line_says_is_used_for_the_run_and_never_written() {
+        let _guard = isolate();
+        write(&Config::path(), WRITTEN_BY_HAND);
+        let mut cfg = Config::load();
+        assert_eq!(cfg.load_error, None);
+
+        // omarepos --root /tmp/one-off --depth 1
+        cfg.roots_override = Some(vec![RootSpec::Simple("/tmp/one-off".to_string())]);
+        cfg.depth_override = Some(1);
+        assert!(cfg.one_off());
+        assert_eq!(cfg.root_labels(), vec!["/tmp/one-off".to_string()]);
+        assert_eq!(cfg.depth(), 1);
+
+        // ...and then any save at all.
+        cfg.commit_detail = false;
+        cfg.save().unwrap();
+
+        let back = Config::load();
+        assert!(!back.one_off());
+        assert!(!back.commit_detail, "the edit that was meant is kept");
+        assert_eq!(back.root_labels(), vec!["~/src".to_string(), "~/Work/client".to_string()]);
+        assert_eq!(back.depth(), 4);
+        let client = &back.roots()[1];
+        assert!(client.nested && client.tag.as_deref() == Some("client"), "{client:?}");
+
+        let _ = std::fs::remove_file(Config::path());
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_whole_and_keeps_the_one_before() {
+        let _guard = isolate();
+        let path = Config::path();
+        let _ = std::fs::remove_file(&path);
+
+        let mut cfg = Config::default();
+        cfg.save().unwrap();
+        let first = read(&path);
+        cfg.max_depth = 7;
+        cfg.save().unwrap();
+
+        assert!(read(&path).contains("max_depth = 7"));
+        assert_eq!(read(&path.with_file_name("config.toml.bak")), first);
+        let strays: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "half-written files left behind: {strays:?}");
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn troubles_of_both_kinds_survive_being_written_and_read_back() {

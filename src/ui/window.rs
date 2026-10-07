@@ -250,7 +250,14 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .build();
     status.add_css_class("om-statusbar");
 
+    // Shown only when a file the app keeps could not be read at launch. It
+    // stays up: the app is running on defaults and will not save, and a toast
+    // that came and went would leave that to be discovered later.
+    let trouble = adw::Banner::new("");
+    trouble.set_use_markup(false);
+
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(&trouble);
     body.append(&stack);
     body.append(&status);
 
@@ -573,6 +580,22 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     breakpoint.add_setter(&ui.tags_content, "label", Some(&"".to_value()));
     window.add_breakpoint(breakpoint);
 
+    let unusable: Vec<String> = [
+        ui.cfg.borrow().load_error.clone(),
+        ui.meta.borrow().load_error.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !unusable.is_empty() {
+        trouble.set_title(&format!(
+            "Could not read {}. Running without it, and nothing will be saved over it. \
+             Fix the file and start omarepos again.",
+            unusable.join("; ")
+        ));
+        trouble.set_revealed(true);
+    }
+
     ui.apply_theme();
     ui.watch_theme();
     ui.schedule_refresh();
@@ -590,14 +613,7 @@ impl Ui {
         } else {
             adw::ColorScheme::ForceLight
         });
-        let roots = self
-            .cfg
-            .borrow()
-            .roots
-            .iter()
-            .map(|r| r.path_str().trim().to_string())
-            .collect::<Vec<_>>()
-            .join("  ");
+        let roots = self.cfg.borrow().root_labels().join("  ");
         self.subtitle
             .set_label(&format!("{}  ·  {}", roots, palette.name));
     }
@@ -633,9 +649,9 @@ impl Ui {
         self.spinner.start();
         self.status.set_label("Scanning…");
 
-        let (roots, extras, depth) = {
+        let (roots, extras, depth, one_off) = {
             let cfg = self.cfg.borrow();
-            (cfg.roots(), cfg.extra_repos(), cfg.max_depth.max(1))
+            (cfg.roots(), cfg.extra_repos(), cfg.depth(), cfg.one_off())
         };
         let rx = scan::spawn(roots, extras, depth);
         let ui = Rc::clone(self);
@@ -653,7 +669,11 @@ impl Ui {
                         ui.update_status();
                     }
                     Event::Repo { info, seed } => {
-                        if let Some(seed) = seed {
+                        // A run pointed somewhere else by the command line
+                        // has no opinion about tags: its roots are not the
+                        // configured ones, and "this root gives no tag" would
+                        // be read as "take the tag away".
+                        if let Some(seed) = seed.filter(|_| !one_off) {
                             let changed = ui.meta.borrow_mut().apply_root_tag(
                                 &info.path,
                                 &seed.root,
@@ -667,7 +687,9 @@ impl Ui {
                     Event::Done => {
                         // Pruning after the scan, so a repository that was just
                         // found is never a candidate for removal.
-                        seeded_any |= ui.meta.borrow_mut().prune() > 0;
+                        if !one_off {
+                            seeded_any |= ui.meta.borrow_mut().prune() > 0;
+                        }
                         if seeded_any {
                             if let Err(err) = ui.meta.borrow().save() {
                                 eprintln!("omarepos: could not write the tag file: {err}");
@@ -885,8 +907,11 @@ impl Ui {
         if let Some(when) = self.last_refresh.get() {
             parts.push(format!("fetched {}", ui::relative_time(when)));
         }
-        let settings = &self.cfg.borrow().refresh;
-        if settings.enabled() {
+        let cfg = self.cfg.borrow();
+        let settings = &cfg.refresh;
+        if cfg.one_off() {
+            parts.push("one-off look: no background refresh".to_string());
+        } else if settings.enabled() {
             let what = if settings.fast_forward {
                 "fast-forward"
             } else if settings.fetch {
@@ -925,7 +950,11 @@ impl Ui {
             source.remove();
         }
         self.refresh_armed.set(settings.every_minutes);
-        if !settings.enabled() {
+        // A run pointed elsewhere by the command line is a look, not the
+        // fleet's keeper: the ordinary window, if one is open, has that job,
+        // and two timers fetching the same repositories get in each other's
+        // way.
+        if !settings.enabled() || self.cfg.borrow().one_off() {
             self.update_status();
             return;
         }
@@ -978,7 +1007,7 @@ impl Ui {
             return;
         }
         let settings = self.cfg.borrow().refresh.clone();
-        if !settings.enabled() || !settings.will_fetch() {
+        if !settings.enabled() || !settings.will_fetch() || self.cfg.borrow().one_off() {
             return;
         }
         let due = match self.last_refresh.get() {

@@ -41,6 +41,11 @@ struct File {
 #[derive(Debug, Clone, Default)]
 pub struct Meta {
     repos: BTreeMap<String, RepoMeta>,
+    /// Why the file on disk could not be used, when it could not. While this
+    /// is set the store is empty and `save` refuses. Tags cannot be worked out
+    /// again from anything else, and this file used to be overwritten by the
+    /// first scan after a launch that failed to read it.
+    pub load_error: Option<String>,
 }
 
 pub fn path() -> PathBuf {
@@ -78,15 +83,23 @@ pub fn parse_list(raw: &str) -> Vec<String> {
 
 impl Meta {
     pub fn load() -> Self {
-        let Ok(text) = std::fs::read_to_string(path()) else {
-            return Self::default();
+        let path = path();
+        let unusable = |why: String| {
+            eprintln!("omarepos: ignoring {}: {why}", path.display());
+            Self {
+                repos: BTreeMap::new(),
+                load_error: Some(crate::config::why_unusable(&path, &why)),
+            }
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            // No file yet: nothing has been tagged.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(err) => return unusable(err.to_string()),
         };
         match toml::from_str::<File>(&text) {
-            Ok(file) => Self { repos: file.repos },
-            Err(err) => {
-                eprintln!("omarepos: ignoring {}: {err}", path().display());
-                Self::default()
-            }
+            Ok(file) => Self { repos: file.repos, load_error: None },
+            Err(err) => unusable(err.to_string()),
         }
     }
 
@@ -231,15 +244,55 @@ impl Meta {
 
     pub fn save(&self) -> std::io::Result<()> {
         let path = path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        crate::config::refuse_to_replace(&self.load_error)?;
         let file = File { repos: self.repos.clone() };
         let body = toml::to_string_pretty(&file)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(
+        crate::config::replace_file(
             &path,
-            format!("# omarepos repository metadata — written by the app.\n\n{body}"),
+            &format!("# omarepos repository metadata — written by the app.\n\n{body}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    #[test]
+    fn tags_survive_being_saved_and_loaded() {
+        let _guard = isolate();
+        let _ = std::fs::remove_file(path());
+        let repo = Path::new("/home/me/code/app");
+
+        let mut meta = Meta::load();
+        assert_eq!(meta.load_error, None, "no file yet means nothing tagged, not a failure");
+        meta.set_tags(repo, vec!["work".to_string(), "rust".to_string()]);
+        meta.save().unwrap();
+
+        assert_eq!(Meta::load().tags_for(repo), ["rust".to_string(), "work".to_string()]);
+        let _ = std::fs::remove_file(path());
+    }
+
+    /// Tags cannot be worked out again from anything else. A launch that could
+    /// not read the file used to start from an empty store, and the first scan
+    /// under a tagged root then wrote that empty store back.
+    #[test]
+    fn a_tag_file_that_cannot_be_read_is_not_replaced_by_the_next_scan() {
+        let _guard = isolate();
+        let written = "[repos.\"/home/me/code/app\"]\ntags = [\"work\"\n";
+        write(&path(), written);
+
+        let mut meta = Meta::load();
+        let why = meta.load_error.clone().expect("the failure is remembered");
+        assert!(why.contains("repos.toml"), "{why}");
+
+        // What a scan does when the root it found the repository under has a tag.
+        meta.apply_root_tag(Path::new("/home/me/code/app"), "/home/me/code", Some("JM"));
+        assert!(meta.save().is_err());
+        assert_eq!(read(&path()), written);
+
+        let _ = std::fs::remove_file(path());
     }
 }
