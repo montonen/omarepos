@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::gdk;
 use gtk::glib;
 use gtk::pango;
 
@@ -46,7 +47,11 @@ pub fn page(
         .title("No matching commits")
         .build();
 
-    let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A list box rather than a plain box: it makes every row focusable, gives
+    // arrow navigation between them, and turns Enter into an activation.
+    let rows = gtk::ListBox::new();
+    rows.set_selection_mode(gtk::SelectionMode::None);
+    rows.add_css_class("om-results");
     rows.set_margin_top(8);
     rows.set_margin_bottom(12);
     rows.set_margin_start(10);
@@ -92,6 +97,64 @@ pub fn page(
     let generation = Rc::new(RefCell::new(0u64));
     let running: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     let repos = Rc::new(repos);
+    // What each row stands for, by index, so activation can find it.
+    let listed: Rc<RefCell<Vec<Hit>>> = Rc::new(RefCell::new(Vec::new()));
+
+    {
+        // Enter on a result takes you to the repository it is in.
+        let listed = Rc::clone(&listed);
+        let on_open = Rc::clone(&on_open);
+        rows.connect_row_activated(move |_, row| {
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            let hit = listed.borrow().get(index as usize).cloned();
+            if let Some(hit) = hit {
+                on_open(hit.path.clone(), hit.repo.clone());
+            }
+        });
+    }
+    {
+        // Down from the query moves into the results, the way a launcher does.
+        let rows = rows.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gdk::Key::Down {
+                return glib::Propagation::Proceed;
+            }
+            match rows.row_at_index(0) {
+                Some(first) => {
+                    first.grab_focus();
+                    glib::Propagation::Stop
+                }
+                None => glib::Propagation::Proceed,
+            }
+        });
+        entry.add_controller(keys);
+    }
+    {
+        // ...and Up from the first result goes back to it.
+        let entry = entry.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |controller, key, _, _| {
+            if key != gdk::Key::Up {
+                return glib::Propagation::Proceed;
+            }
+            let on_first = controller
+                .widget()
+                .and_downcast::<gtk::ListBox>()
+                .and_then(|list| list.focus_child())
+                .and_downcast::<gtk::ListBoxRow>()
+                .is_some_and(|row| row.index() == 0);
+            if on_first {
+                entry.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        rows.add_controller(keys);
+    }
 
     {
         let generation = Rc::clone(&generation);
@@ -102,7 +165,7 @@ pub fn page(
         let status = status.clone();
         let empty = empty.clone();
         let toasts = toasts.clone();
-        let on_open = Rc::clone(&on_open);
+        let listed = Rc::clone(&listed);
         let scope = scope.clone();
 
         entry.connect_search_changed(move |entry| {
@@ -133,7 +196,7 @@ pub fn page(
             let status = status.clone();
             let empty = empty.clone();
             let toasts = toasts.clone();
-            let on_open = Rc::clone(&on_open);
+            let listed = Rc::clone(&listed);
             let scope = scope.clone();
 
             glib::spawn_future_local(async move {
@@ -176,12 +239,12 @@ pub fn page(
                     names.len()
                 };
 
-                while let Some(child) = rows.first_child() {
-                    rows.remove(&child);
+                rows.remove_all();
+                let visible: Vec<Hit> = hits.iter().take(MAX_ROWS).cloned().collect();
+                for hit in &visible {
+                    rows.append(&row(hit, &toasts));
                 }
-                for hit in hits.iter().take(MAX_ROWS) {
-                    rows.append(&row(hit, &toasts, Rc::clone(&on_open)));
-                }
+                *listed.borrow_mut() = visible;
 
                 if found == 0 {
                     empty.set_description(Some(&format!("Nothing in {searched} repositories matches “{query}”.")));
@@ -211,10 +274,11 @@ pub fn page(
     page
 }
 
-fn row(hit: &Hit, toasts: &adw::ToastOverlay, on_open: Rc<dyn Fn(PathBuf, String)>) -> gtk::Widget {
+/// One result. Activating it is handled by the list; the button copies the sha,
+/// which is the other thing anyone wants from a commit they have found.
+fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(28);
-    line.add_css_class("om-row");
 
     let repo = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     repo.append(&crate::ui::color_dot(key_color(&hit.repo)));
@@ -268,40 +332,32 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay, on_open: Rc<dyn Fn(PathBuf, String
     when.add_css_class("om-meta");
     line.append(&when);
 
-    let open = gtk::Button::builder()
-        .icon_name("view-list-symbolic")
-        .tooltip_text("Open this repository's commit graph")
+    let copy = gtk::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy the full sha")
         .has_frame(false)
         .valign(gtk::Align::Center)
         .build();
     {
-        let path = hit.path.clone();
-        let name = hit.repo.clone();
-        open.connect_clicked(move |_| on_open(path.clone(), name.clone()));
+        let id = hit.id.clone();
+        let short = hit.short_id.clone();
+        let toasts = toasts.clone();
+        copy.connect_clicked(move |button| {
+            button.clipboard().set_text(&id);
+            toasts.add_toast(adw::Toast::new(&format!("Copied {short}")));
+        });
     }
-    line.append(&open);
+    line.append(&copy);
 
-    line.set_tooltip_text(Some(&format!(
-        "{}\n{}\n{} · {}\n{}",
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.add_css_class("om-row");
+    row.set_tooltip_text(Some(&format!(
+        "{}\n{}\n{} · {}\n{}\n\nEnter opens this repository's graph.",
         hit.repo,
         hit.summary,
         hit.author,
         absolute_time(hit.when),
         hit.id,
     )));
-
-    let click = gtk::GestureClick::new();
-    let id = hit.id.clone();
-    let short = hit.short_id.clone();
-    let toasts = toasts.clone();
-    click.connect_released(move |gesture, _, _, _| {
-        gesture.set_state(gtk::EventSequenceState::Claimed);
-        if let Some(widget) = gesture.widget() {
-            widget.clipboard().set_text(&id);
-        }
-        toasts.add_toast(adw::Toast::new(&format!("Copied {short}")));
-    });
-    line.add_controller(click);
-
-    line.upcast()
+    row
 }

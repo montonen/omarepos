@@ -56,7 +56,11 @@ pub fn page(
     loading_label.add_css_class("om-meta");
     loading.append(&loading_label);
 
-    let rows_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A list box so rows take focus, arrow keys walk them, and Enter means
+    // the same thing a click does.
+    let rows_box = gtk::ListBox::new();
+    rows_box.set_selection_mode(gtk::SelectionMode::None);
+    rows_box.add_css_class("om-results");
     rows_box.set_margin_top(8);
     rows_box.set_margin_bottom(12);
     rows_box.set_margin_start(10);
@@ -120,9 +124,22 @@ pub fn page(
             }
             Ok(graph) => {
                 let width = lanes_width(graph.lanes);
+                let ids: Vec<String> = graph.rows.iter().map(|row| row.id.to_string()).collect();
                 for row in &graph.rows {
-                    rows_box.append(&row_widget(row, width, &toasts_for_rows));
+                    rows_box.append(&row_widget(row, width));
                 }
+                rows_box.connect_row_activated(move |_, row| {
+                    let index = row.index();
+                    if index < 0 {
+                        return;
+                    }
+                    let Some(id) = ids.get(index as usize) else { return };
+                    row.clipboard().set_text(id);
+                    toasts_for_rows.add_toast(adw::Toast::new(&format!(
+                        "Copied {}",
+                        &id[..7.min(id.len())]
+                    )));
+                });
                 stack.set_visible_child_name("graph");
                 status.set_label(&summary(&graph));
             }
@@ -158,10 +175,9 @@ fn summary(graph: &Graph) -> String {
     parts.join("  ·  ")
 }
 
-fn row_widget(row: &Row, graph_width: i32, toasts: &adw::ToastOverlay) -> gtk::Widget {
+fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(ROW_H);
-    line.add_css_class("om-row");
 
     line.append(&graph_cell(row, graph_width));
 
@@ -215,30 +231,19 @@ fn row_widget(row: &Row, graph_width: i32, toasts: &adw::ToastOverlay) -> gtk::W
     when.add_css_class("om-meta");
     line.append(&when);
 
-    line.set_tooltip_text(Some(&format!(
-        "{}\n\n{}\n{} <{}>\n{}",
+    let listed = gtk::ListBoxRow::builder().child(&line).build();
+    listed.add_css_class("om-row");
+    // Activating a row puts its sha on the clipboard — the thing you nearly
+    // always want a commit graph for.
+    listed.set_tooltip_text(Some(&format!(
+        "{}\n\n{}\n{} <{}>\n{}\n\nEnter copies the sha.",
         row.short_id,
         if row.body.is_empty() { &row.summary } else { &row.body },
         row.author,
         row.email,
         absolute_time(row.when),
     )));
-
-    // Clicking a row puts its sha on the clipboard — the thing you nearly
-    // always want a commit graph for.
-    let click = gtk::GestureClick::new();
-    let id = row.id.to_string();
-    let toasts = toasts.clone();
-    click.connect_released(move |gesture, _, _, _| {
-        gesture.set_state(gtk::EventSequenceState::Claimed);
-        if let Some(widget) = gesture.widget() {
-            widget.clipboard().set_text(&id);
-        }
-        toasts.add_toast(adw::Toast::new(&format!("Copied {}", &id[..7.min(id.len())])));
-    });
-    line.add_controller(click);
-
-    line.upcast()
+    listed
 }
 
 /// One row of the DAG. The top half draws what arrives from the row above, the

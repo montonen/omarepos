@@ -86,6 +86,7 @@ omarepos [options]
 | --- | --- |
 | `Ctrl+R` / `F5` | Rescan (local only) |
 | `Ctrl+Shift+R` | Fetch now |
+| `Ctrl+L` | Jump to the grid |
 | `Ctrl+F` / `/` | Focus the filter box |
 | `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
@@ -98,6 +99,9 @@ omarepos [options]
 | `Alt+←` | Back to the grid |
 | `Ctrl+Q` | Quit |
 | Click a card, or `Enter` on a focused one | Open its commit graph |
+| `Enter` on a search result | Open that repository's graph |
+| `Enter` on a commit-graph row | Copy its sha |
+| `Down` from the commit-search box | Move into the results |
 | `Space` on a focused card | Tick it for the contributions scope |
 
 The filter matches repo name, path, branch, remote and language. The warning
@@ -266,8 +270,9 @@ message, the author's name or e-mail, and a sha prefix. Each result says which
 of those matched, so a hit on an author reads differently from a hit on a
 subject.
 
-Clicking a result copies its full sha; the button at the end of the row opens
-that repository's commit graph.
+`Down` from the query moves into the results and `Up` from the first one comes
+back. Activating a result — `Enter` or a click — opens that repository's commit
+graph; the button at the end of the row copies the full sha.
 
 Searches run on worker threads and are abandoned the moment the query changes,
 so typing does not queue up passes over the fleet. A repository stops at 50,000
@@ -284,7 +289,7 @@ they actually did.
 - Filled dot: ordinary commit. Ring: merge commit. Outer ring: something points
   at it.
 - Pills are refs — the current branch, other local branches, tags, remote branches.
-- Clicking a row copies its full sha.
+- Activating a row — `Enter` or a click — copies its full sha.
 - The newest 500 commits are shown; the status bar says so when there are more.
   Lanes past the sixteenth are clipped rather than squeezed.
 

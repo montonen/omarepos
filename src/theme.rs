@@ -442,6 +442,22 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
   padding: 4px 12px;
 }}
 
+listbox.om-results,
+listbox.om-results > row {{
+  background-color: transparent;
+}}
+
+listbox.om-results > row {{
+  padding: 0;
+  min-height: 0;
+  border-radius: 6px;
+}}
+
+listbox.om-results > row:focus-visible {{
+  outline: 2px solid @om_fg;
+  outline-offset: -2px;
+}}
+
 .om-row {{
   border-radius: 6px;
   padding: 0 6px;

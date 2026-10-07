@@ -449,6 +449,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_search_commits);
 
+    let act_focus_grid = gio::SimpleAction::new("focus-grid", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_focus_grid.connect_activate(move |_, _| ui.focus_grid(true));
+    }
+    window.add_action(&act_focus_grid);
+
     let act_escape = gio::SimpleAction::new("escape", None);
     {
         let ui = Rc::clone(&ui);
@@ -490,6 +497,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.select-all", &["<Ctrl>a"]);
     app.set_accels_for_action("win.escape", &["Escape"]);
     app.set_accels_for_action("win.search-commits", &["<Ctrl><Shift>f"]);
+    app.set_accels_for_action("win.focus-grid", &["<Ctrl>l"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
@@ -606,6 +614,9 @@ impl Ui {
                         ui.spinner.stop();
                         ui.spinner.set_visible(false);
                         ui.rebuild();
+                        // Arrow keys should work the moment the grid has
+                        // something in it, without hunting for it with Tab.
+                        ui.focus_grid(false);
                         break;
                     }
                 }
@@ -694,6 +705,10 @@ impl Ui {
         // rather than immediately gives the flow box time to allocate, without
         // which the adjustment clamps the value back to zero.
         let offset = self.scroller.vadjustment().value();
+        // Rebuilding destroys the focused card. Without putting focus back on
+        // the same repository, a background refresh would throw a keyboard
+        // user to the top of the grid every few minutes.
+        let focused = self.focused_repo();
 
         while let Some(child) = self.flow.first_child() {
             self.flow.remove(&child);
@@ -736,6 +751,14 @@ impl Ui {
         let page = if repos.is_empty() && !scanning { "empty" } else { "grid" };
         self.stack.set_visible_child_name(page);
         self.update_status();
+
+        if let Some(path) = focused {
+            if let Some(index) = repos.iter().position(|repo| repo.path == path) {
+                if let Some(child) = self.flow.child_at_index(index as i32) {
+                    child.grab_focus();
+                }
+            }
+        }
 
         if offset > 0.0 {
             let adjustment = self.scroller.vadjustment();
@@ -1226,6 +1249,42 @@ impl Ui {
 
         if !self.search.text().is_empty() {
             self.search.set_text("");
+        }
+    }
+
+    /// Which repository the focused widget belongs to, if the focus is in the
+    /// grid at all.
+    fn focused_repo(&self) -> Option<PathBuf> {
+        let mut widget = gtk::prelude::GtkWindowExt::focus(&self.window);
+        while let Some(current) = widget {
+            if let Ok(child) = current.clone().downcast::<gtk::FlowBoxChild>() {
+                let index = child.index();
+                if index >= 0 {
+                    return self
+                        .shown
+                        .borrow()
+                        .get(index as usize)
+                        .map(|repo| repo.path.clone());
+                }
+            }
+            widget = current.parent();
+        }
+        None
+    }
+
+    /// Put the keyboard in the grid. `force` takes focus even from a text
+    /// field, which is what Ctrl+L is for; without it the grid is only claimed
+    /// when nothing else holds the focus, so a scan finishing mid-sentence
+    /// does not swallow what is being typed.
+    fn focus_grid(&self, force: bool) {
+        if self.nav.navigation_stack().n_items() > 1 {
+            return;
+        }
+        if !force && gtk::prelude::GtkWindowExt::focus(&self.window).is_some() {
+            return;
+        }
+        if let Some(child) = self.flow.child_at_index(0) {
+            child.grab_focus();
         }
     }
 
