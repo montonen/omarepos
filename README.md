@@ -291,6 +291,15 @@ nobody has read yet, in a repository nobody is looking at. The same pass also
 switches off the fsmonitor command and the `ext::` transport, the other two
 ways a repository's own config commonly names a command to run.
 
+Switching those off is a list of the known ways, not a proof there are no
+others: a repository's own config can name a command in more places than any
+list covers. So a pass across the fleet also only enters repositories you have
+seen. A directory that turns up under a scan root — an unpacked archive, a
+synced folder — gets a card marked `new` and is fetched by nothing unattended
+until you have opened it, or pressed `p` or `f` on it. The first run takes
+everything already on the grid as seen. The list is kept in
+`~/.local/state/omarepos/known-repos`.
+
 The cost is that a `post-merge` hook that reinstalls dependencies, or git-lfs's,
 does not fire on a background update. Press `p` on a repository to update it
 with your whole setup in force, hooks included, exactly as your own `git pull`

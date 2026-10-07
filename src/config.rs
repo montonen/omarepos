@@ -286,6 +286,56 @@ pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, Trouble>) {
     }
 }
 
+/// The repositories the user has seen, one path to a line.
+///
+/// A pass across the fleet runs git inside every repository in scope, and git
+/// does what a repository's own config tells it: there are more keys that name
+/// a command than any list of overrides covers. So a pass only enters
+/// repositories on this list. A directory that turns up under a scan root —
+/// an unpacked archive, a synced folder — gets a card like any other, and is
+/// not fetched by anything unattended until the user has opened it or asked
+/// for it by name.
+pub fn known_repos_path() -> PathBuf {
+    last_refresh_path().with_file_name("known-repos")
+}
+
+/// `None` when nothing has been recorded yet. That is the first run with this
+/// list, when the repositories already on the grid are the ones the user has
+/// been fetching all along, and all of them are taken as seen.
+pub fn load_known_repos() -> Option<std::collections::BTreeSet<String>> {
+    let text = std::fs::read_to_string(known_repos_path()).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+pub fn save_known_repos(known: &std::collections::BTreeSet<String>) {
+    let body: String = known.iter().map(|path| format!("{path}\n")).collect();
+    if let Err(err) = replace_file(&known_repos_path(), &body) {
+        eprintln!("omarepos: could not record which repositories have been seen: {err}");
+    }
+}
+
+/// Split the repositories a pass would cover into those it may enter and the
+/// number it must leave for the user to look at first.
+pub fn only_known(
+    scope: Vec<PathBuf>,
+    known: Option<&std::collections::BTreeSet<String>>,
+) -> (Vec<PathBuf>, usize) {
+    let Some(known) = known else { return (scope, 0) };
+    let total = scope.len();
+    let seen: Vec<PathBuf> = scope
+        .into_iter()
+        .filter(|path| known.contains(&path.display().to_string()))
+        .collect();
+    let unseen = total - seen.len();
+    (seen, unseen)
+}
+
 pub fn record_refresh(at: i64) {
     let path = last_refresh_path();
     if let Some(parent) = path.parent() {
@@ -688,6 +738,29 @@ mod tests {
         assert!(strays.is_empty(), "half-written files left behind: {strays:?}");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_pass_enters_only_repositories_that_have_been_seen() {
+        let _guard = isolate();
+        let _ = std::fs::remove_file(known_repos_path());
+        let scope = || vec![PathBuf::from("/code/app"), PathBuf::from("/code/unpacked-archive")];
+
+        // Nothing recorded yet: the first run, where everything already on
+        // the grid is taken as seen.
+        assert_eq!(load_known_repos(), None);
+        assert_eq!(only_known(scope(), None), (scope(), 0));
+
+        let mut known = std::collections::BTreeSet::new();
+        known.insert("/code/app".to_string());
+        save_known_repos(&known);
+        let known = load_known_repos().expect("recorded");
+
+        let (enter, left) = only_known(scope(), Some(&known));
+        assert_eq!(enter, vec![PathBuf::from("/code/app")]);
+        assert_eq!(left, 1, "the directory that turned up since is left for the user");
+
+        let _ = std::fs::remove_file(known_repos_path());
     }
 
     #[test]

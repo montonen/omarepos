@@ -49,6 +49,9 @@ pub enum Skip {
     /// Its git data points at a work tree or a git directory somewhere else;
     /// see [`crate::git::belongs_here`].
     Elsewhere,
+    /// Found since the user last looked, and not yet opened or asked for. A
+    /// pass across the fleet does not enter a repository nobody has seen.
+    Unseen,
 }
 
 impl Skip {
@@ -62,6 +65,7 @@ impl Skip {
             Skip::Diverged => "has unpushed commits",
             Skip::Busy => "merge or rebase in progress",
             Skip::Elsewhere => "its work tree is not this directory",
+            Skip::Unseen => "new here, open it once",
         }
     }
 }

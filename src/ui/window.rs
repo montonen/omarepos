@@ -111,6 +111,9 @@ struct Ui {
     /// why. Keyed by the path as a string so it can be written out and read
     /// back.
     fetch_errors: RefCell<BTreeMap<String, Trouble>>,
+    /// The repositories the user has seen; see `config::known_repos_path`.
+    /// `None` until the first scan has recorded what was already here.
+    known: RefCell<Option<BTreeSet<String>>>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -318,6 +321,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         refresh_armed: Cell::new(0),
         checked_overdue: Cell::new(false),
         fetch_errors: RefCell::new(crate::config::load_fetch_errors()),
+        known: RefCell::new(crate::config::load_known_repos()),
         refreshing: Cell::new(false),
         refresh_progress: Cell::new((0, 0)),
         last_refresh: Cell::new(crate::config::last_refresh()),
@@ -741,6 +745,7 @@ impl Ui {
                         // found is never a candidate for removal.
                         if !one_off {
                             seeded_any |= ui.meta.borrow_mut().prune() > 0;
+                            ui.reconcile_known();
                         }
                         if seeded_any {
                             if let Err(err) = ui.meta.borrow().save() {
@@ -895,6 +900,7 @@ impl Ui {
                 selected: self.selected.borrow().contains(&info.path),
                 auto_update,
                 trouble: errors.get(&info.path.display().to_string()),
+                unseen: !self.is_known(&info.path),
             };
             self.flow.append(&card::build(
                 info,
@@ -1025,6 +1031,60 @@ impl Ui {
     /// Which repositories a refresh covers: everything found, narrowed to the
     /// configured tags when there are any. Deliberately not the *filtered*
     /// grid — what you are looking at should not change what gets fetched.
+    /// Whether the user has seen this repository. Everything counts as seen
+    /// until the first scan has recorded what was already on the grid.
+    fn is_known(&self, path: &Path) -> bool {
+        self.known
+            .borrow()
+            .as_ref()
+            .is_none_or(|known| known.contains(&path.display().to_string()))
+    }
+
+    /// The user has opened this repository, or asked for it to be updated.
+    fn accept(self: &Rc<Self>, path: &Path) {
+        let fresh = match self.known.borrow_mut().as_mut() {
+            Some(known) => known.insert(path.display().to_string()),
+            None => false,
+        };
+        if fresh {
+            if let Some(known) = self.known.borrow().as_ref() {
+                crate::config::save_known_repos(known);
+            }
+            self.rebuild();
+        }
+    }
+
+    /// At the end of a scan: on the first run, take everything found as seen;
+    /// after that, forget repositories that are gone, so that something else
+    /// appearing at the same path later is new again.
+    fn reconcile_known(&self) {
+        let mut known = self.known.borrow_mut();
+        match known.as_mut() {
+            None => {
+                let found: BTreeSet<String> = self
+                    .repos
+                    .borrow()
+                    .iter()
+                    .map(|repo| repo.path.display().to_string())
+                    .collect();
+                crate::config::save_known_repos(&found);
+                *known = Some(found);
+            }
+            Some(known) => {
+                let before = known.len();
+                // Only where the parent is there to be looked in: a drive that
+                // is not mounted has not had its repositories deleted.
+                known.retain(|path| {
+                    let path = Path::new(path);
+                    path.exists() || !path.parent().is_some_and(Path::exists)
+                });
+                if known.len() != before {
+                    crate::config::save_known_repos(known);
+                }
+            }
+        }
+    }
+
     fn refresh_scope(&self) -> Vec<PathBuf> {
         let wanted: Vec<String> = self
             .cfg
@@ -1090,11 +1150,16 @@ impl Ui {
             return;
         }
 
-        let repos = self.refresh_scope();
+        // A pass across the fleet enters only repositories the user has seen.
+        let (repos, unseen) =
+            crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref());
         if repos.is_empty() {
             if manual {
-                self.toasts
-                    .add_toast(adw::Toast::new("Nothing in scope to fetch"));
+                self.toasts.add_toast(adw::Toast::new(&if unseen > 0 {
+                    format!("Nothing fetched: {unseen} new here, open each once to include it")
+                } else {
+                    "Nothing in scope to fetch".to_string()
+                }));
             }
             return;
         }
@@ -1121,6 +1186,9 @@ impl Ui {
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
             let mut summary = Summary::default();
+            for _ in 0..unseen {
+                summary.add(&refresh::Outcome::Skipped(refresh::Skip::Unseen));
+            }
             let mut done = 0usize;
             while let Ok(event) = rx.recv().await {
                 match event {
@@ -1636,6 +1704,7 @@ impl Ui {
                 .add_toast(adw::Toast::new(&format!("{}: {err}", info.name)));
             return;
         }
+        self.accept(&info.path);
         let nav = self.nav.clone();
         let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
             let name = path
@@ -1670,6 +1739,7 @@ impl Ui {
         let ui_for_terminal = Rc::clone(self);
         let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
             Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
+                ui_for_terminal.accept(&path);
                 let open_terminal_there = ui_for_terminal.terminal_opener(&path);
                 let open_editor_there = ui_for_terminal.editor_opener(&path);
             let nav_inner = nav.clone();
@@ -1703,6 +1773,8 @@ impl Ui {
             self.toasts.add_toast(adw::Toast::new("Already busy"));
             return;
         }
+        // Asking for a repository by name is looking at it.
+        self.accept(&path);
         let settings = self.cfg.borrow().refresh.clone();
         let name = path
             .file_name()

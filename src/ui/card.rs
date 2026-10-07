@@ -21,6 +21,9 @@ pub struct Context<'a> {
     /// about. Otherwise the failure only reaches stderr, which under a desktop
     /// launcher nobody reads.
     pub trouble: Option<&'a Trouble>,
+    /// Found since the user last looked. Nothing unattended fetches it until
+    /// it has been opened, or updated by hand.
+    pub unseen: bool,
 }
 
 /// Build the card widget. `on_action` is invoked with the repo the user acted
@@ -31,7 +34,7 @@ pub fn build(
     on_action: Rc<dyn Fn(Action, &RepoInfo)>,
     on_select: Rc<dyn Fn(&RepoInfo, bool)>,
 ) -> gtk::Widget {
-    let Context { tags, selected, auto_update, trouble } = *ctx;
+    let Context { tags, selected, auto_update, trouble, unseen } = *ctx;
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(7)
@@ -106,7 +109,7 @@ pub fn build(
     path.set_tooltip_text(Some(&where_tip));
     card.append(&path);
 
-    card.append(&pills(info, auto_update, trouble));
+    card.append(&pills(info, auto_update, trouble, unseen));
 
     if !tags.is_empty() {
         card.append(&tag_row(tags));
@@ -187,7 +190,12 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-fn pills(info: &RepoInfo, auto_update: bool, trouble: Option<&Trouble>) -> gtk::Box {
+fn pills(
+    info: &RepoInfo,
+    auto_update: bool,
+    trouble: Option<&Trouble>,
+    unseen: bool,
+) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
 
     if let Some(err) = &info.error {
@@ -347,6 +355,16 @@ fn pills(info: &RepoInfo, auto_update: bool, trouble: Option<&Trouble>) -> gtk::
         p.set_tooltip_text(Some(&format!(
             "The last refresh could not fetch this repository:\n{error}"
         )));
+        row.append(&p);
+    }
+
+    if unseen {
+        let p = pill("new", "");
+        p.set_tooltip_text(Some(
+            "Found since you last looked. The refresh across the fleet leaves it alone until \
+             you have opened it, or pressed p or f on it: running git in a repository means \
+             doing what its own config says, and nobody has looked at this one yet.",
+        ));
         row.append(&p);
     }
 
