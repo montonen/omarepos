@@ -96,6 +96,10 @@ struct Ui {
     contrib_content: adw::ButtonContent,
     generation: Cell<u64>,
     expected: Cell<usize>,
+    /// How many repositories the scan in progress has read so far. Not
+    /// `repos.len()`: a rescan leaves the grid as it is until it has the whole
+    /// answer, so the list on screen says nothing about how far along it is.
+    scanned: Cell<usize>,
     /// Handle of the periodic refresh timer, so it can be rescheduled.
     refresh_source: RefCell<Option<glib::SourceId>>,
     /// Interval the live timer was armed with, so an unrelated settings change
@@ -309,6 +313,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         contrib_content,
         generation: Cell::new(0),
         expected: Cell::new(0),
+        scanned: Cell::new(0),
         refresh_source: RefCell::new(None),
         refresh_armed: Cell::new(0),
         checked_overdue: Cell::new(false),
@@ -643,11 +648,24 @@ impl Ui {
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         self.expected.set(0);
-        self.repos.borrow_mut().clear();
-        self.rebuild();
+        self.scanned.set(0);
+        // Up before anything can rebuild: `rebuild` tells an empty grid that
+        // is still filling from "No repositories found" by this spinner.
         self.spinner.set_visible(true);
         self.spinner.start();
         self.status.set_label("Scanning…");
+
+        // With nothing on screen there is nothing to keep, and cards arriving
+        // one at a time beat an empty window. With a grid on screen the scan
+        // collects off to the side and the grid is replaced once, at the end.
+        // It used to be emptied first and refilled card by card: every refresh
+        // blanked the window to "No repositories found", threw the keyboard
+        // back to the first card and the scroll to the top, and built the grid
+        // once per repository found.
+        let streaming = self.repos.borrow().is_empty();
+        if streaming {
+            self.rebuild();
+        }
 
         let (roots, extras, depth, one_off) = {
             let cfg = self.cfg.borrow();
@@ -659,6 +677,7 @@ impl Ui {
             // Roots that seed a tag write to the metadata store as repos come
             // in; saving once at the end keeps it to a single write.
             let mut seeded_any = false;
+            let mut fresh: Vec<RepoInfo> = Vec::new();
             while let Ok(event) = rx.recv().await {
                 if ui.generation.get() != generation {
                     break;
@@ -681,10 +700,20 @@ impl Ui {
                             );
                             seeded_any |= changed;
                         }
-                        ui.repos.borrow_mut().push(info);
-                        ui.rebuild();
+                        if streaming {
+                            ui.repos.borrow_mut().push(info);
+                            ui.scanned.set(ui.repos.borrow().len());
+                            ui.rebuild();
+                        } else {
+                            fresh.push(info);
+                            ui.scanned.set(fresh.len());
+                            ui.update_status();
+                        }
                     }
                     Event::Done => {
+                        if !streaming {
+                            *ui.repos.borrow_mut() = std::mem::take(&mut fresh);
+                        }
                         // Pruning after the scan, so a repository that was just
                         // found is never a candidate for removal.
                         if !one_off {
@@ -887,7 +916,7 @@ impl Ui {
         } else if self.spinner.is_visible() {
             let expected = self.expected.get();
             if expected > 0 {
-                parts = vec![format!("scanning {total}/{expected}")];
+                parts = vec![format!("scanning {}/{expected}", self.scanned.get())];
             }
         }
         parts.push(format!("{dirty} dirty"));
@@ -1416,6 +1445,18 @@ impl Ui {
         let mut widget = gtk::prelude::GtkWindowExt::focus(&self.window);
         while let Some(current) = widget {
             if let Ok(child) = current.clone().downcast::<gtk::FlowBoxChild>() {
+                // The window goes on naming a card as its focus for a while
+                // after the card has been taken out of the grid. Such a card
+                // must not be asked for its index: the flow box frees the
+                // slot it kept for it and leaves the card pointing there, so
+                // the answer is read out of freed memory. That crashed the
+                // app twice in an afternoon.
+                let in_grid = child
+                    .parent()
+                    .is_some_and(|parent| &parent == self.flow.upcast_ref::<gtk::Widget>());
+                if !in_grid {
+                    return None;
+                }
                 let index = child.index();
                 if index >= 0 {
                     return self
