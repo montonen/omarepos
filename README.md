@@ -313,6 +313,26 @@ they actually did.
 Every branch is walked, not just the one checked out, so a commit that only exists
 on a side branch still appears.
 
+### What is uncommitted
+
+A **Local changes** row sits above the history whenever the working tree has
+anything in it, drawn dashed and hollow because it is not a commit. Selecting it
+fills the same pane with everything uncommitted, grouped:
+
+| Group | Blocks an update |
+| --- | --- |
+| Staged, Not staged, Conflicted | yes |
+| **Untracked** | **no** |
+
+That split is the point. Untracked files never stop a fast-forward — git refuses
+rather than overwriting one — so they are shown stepped back and labelled,
+rather than padding the same list as the changes that really are holding a
+repository behind. Untracked directories are recursed into, since "two untracked
+things" is what the card already says and this view exists to say which.
+
+An untracked file has nothing to diff against, so its contents are shown as
+added, the way `git diff --no-index` would.
+
 ### What a commit changed
 
 The pane below the graph lists the files, as a tree rather than a flat list —

@@ -8,7 +8,7 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
-use crate::commit::{self, Cancel, Detail, Node};
+use crate::commit::{self, Cancel, Detail, Group, Node, Target};
 use crate::ui::{absolute_time, relative_time};
 
 /// Holding Down through a graph walks a commit per frame. Waiting for the
@@ -17,7 +17,7 @@ const SETTLE_MS: u64 = 120;
 
 /// Build the pane. The returned closure loads a commit into it; calling it
 /// again abandons whatever was still loading.
-pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
+pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
     let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
     header.set_margin_top(10);
     header.set_margin_start(14);
@@ -132,7 +132,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
     let running: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     // Which commit the file list belongs to, so selecting a file knows what to
     // diff, and a patch load of its own that can be abandoned the same way.
-    let showing: Rc<RefCell<Option<(PathBuf, String)>>> = Rc::new(RefCell::new(None));
+    let showing: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
     let patching: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     let patch_generation = Rc::new(RefCell::new(0u64));
 
@@ -147,7 +147,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
                 return;
             };
             let path_for_render = path.clone();
-            let Some((repo, id)) = showing.borrow().clone() else { return };
+            let Some((repo, target)) = showing.borrow().clone() else { return };
 
             let mine = {
                 let mut counter = patch_generation.borrow_mut();
@@ -164,7 +164,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
             let buffer = buffer.clone();
             glib::spawn_future_local(async move {
                 let path = path_for_render;
-                let (rx, cancel) = commit::spawn_patch(repo, id, path.clone());
+                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone());
                 *patching.borrow_mut() = Some(cancel);
                 let Ok(result) = rx.recv().await else { return };
                 if *patch_generation.borrow() != mine {
@@ -178,10 +178,10 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
         });
     }
 
-    let load: Rc<dyn Fn(PathBuf, String)> = {
+    let load: Rc<dyn Fn(PathBuf, Target)> = {
         let generation = Rc::clone(&generation);
         let running = Rc::clone(&running);
-        Rc::new(move |repo: PathBuf, id: String| {
+        Rc::new(move |repo: PathBuf, target: Target| {
             let mine = {
                 let mut counter = generation.borrow_mut();
                 *counter += 1;
@@ -208,8 +208,8 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
                     return;
                 }
 
-                *showing.borrow_mut() = Some((repo.clone(), id.clone()));
-                let (rx, cancel) = commit::spawn(repo, id);
+                *showing.borrow_mut() = Some((repo.clone(), target.clone()));
+                let (rx, cancel) = commit::spawn(repo, target);
                 *running.borrow_mut() = Some(cancel);
                 let Ok(result) = rx.recv().await else { return };
                 if *generation.borrow() != mine {
@@ -229,8 +229,28 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
                         meta.set_label(&describe(&detail));
                         body.set_visible(!detail.body.is_empty());
                         body.set_label(&detail.body);
-                        for node in commit::tree(&detail.files) {
-                            files.append(&row(&node));
+                        for group in [
+                            Group::Committed,
+                            Group::Conflicted,
+                            Group::Staged,
+                            Group::Unstaged,
+                            Group::Untracked,
+                        ] {
+                            let in_group: Vec<_> = detail
+                                .files
+                                .iter()
+                                .filter(|f| f.group == group)
+                                .cloned()
+                                .collect();
+                            if in_group.is_empty() {
+                                continue;
+                            }
+                            if group != Group::Committed {
+                                files.append(&group_heading(group, in_group.len()));
+                            }
+                            for node in commit::tree(&in_group) {
+                                files.append(&row(&node));
+                            }
                         }
                         // Browse mode will not pick a starting row on its own
                         // when the first one is not selectable, so the first
@@ -274,7 +294,45 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, String)>) {
     (root.upcast(), load)
 }
 
+/// A heading above each kind of change. Untracked is marked as not blocking an
+/// update, because the question people bring to this view is usually "what do I
+/// have to clean up", and untracked files are not the answer.
+fn group_heading(group: Group, count: usize) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_margin_top(10);
+
+    let title = gtk::Label::builder()
+        .label(format!("{}  ({count})", group.heading()))
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    title.add_css_class("om-name");
+    line.append(&title);
+
+    if !group.blocks_update() {
+        let note = gtk::Label::new(Some("does not block an update"));
+        note.add_css_class("om-meta");
+        line.append(&note);
+    }
+
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.set_selectable(false);
+    row.set_activatable(false);
+    if !group.blocks_update() {
+        row.add_css_class("om-aside");
+    }
+    row
+}
+
 fn describe(detail: &Detail) -> String {
+    if detail.author.is_empty() {
+        let blocking = if detail.files.iter().any(|f| f.group.blocks_update()) {
+            "an update is blocked until these are committed or stashed"
+        } else {
+            "nothing here blocks an update"
+        };
+        return format!("uncommitted  ·  {blocking}");
+    }
     let mut parts = vec![
         detail.author.clone(),
         relative_time(detail.when),

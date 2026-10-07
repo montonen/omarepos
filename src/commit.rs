@@ -22,6 +22,7 @@ pub enum Change {
     Renamed,
     Copied,
     TypeChange,
+    Untracked,
     Other,
 }
 
@@ -35,7 +36,9 @@ impl Change {
             Change::Renamed => "R",
             Change::Copied => "C",
             Change::TypeChange => "T",
-            Change::Other => "?",
+            // The same mark git's porcelain uses.
+            Change::Untracked => "?",
+            Change::Other => "·",
         }
     }
 
@@ -44,6 +47,7 @@ impl Change {
             Change::Added => "added",
             Change::Deleted => "deleted",
             Change::Renamed | Change::Copied => "renamed",
+            Change::Untracked => "untracked",
             _ => "modified",
         }
     }
@@ -56,8 +60,40 @@ impl Change {
             git2::Delta::Renamed => Change::Renamed,
             git2::Delta::Copied => Change::Copied,
             git2::Delta::Typechange => Change::TypeChange,
+            git2::Delta::Untracked => Change::Untracked,
             _ => Change::Other,
         }
+    }
+}
+
+/// Which part of a repository's state a file change belongs to. For a commit
+/// there is only one; for the working tree the distinction is the point —
+/// untracked files are the one kind that does not block a fast-forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Committed,
+    Staged,
+    Unstaged,
+    Conflicted,
+    Untracked,
+}
+
+impl Group {
+    pub fn heading(self) -> &'static str {
+        match self {
+            Group::Committed => "",
+            Group::Staged => "Staged",
+            Group::Unstaged => "Not staged",
+            Group::Conflicted => "Conflicted",
+            Group::Untracked => "Untracked",
+        }
+    }
+
+    /// Whether changes of this kind stop the background refresh from
+    /// fast-forwarding. Untracked files do not: git refuses rather than
+    /// overwriting one.
+    pub fn blocks_update(self) -> bool {
+        matches!(self, Group::Staged | Group::Unstaged | Group::Conflicted)
     }
 }
 
@@ -70,6 +106,15 @@ pub struct FileChange {
     pub insertions: usize,
     pub deletions: usize,
     pub binary: bool,
+    pub group: Group,
+}
+
+/// What the pane is being asked to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Commit(String),
+    /// Everything uncommitted, including untracked files.
+    Working,
 }
 
 #[derive(Debug, Clone)]
@@ -109,14 +154,17 @@ impl Cancel {
 
 pub fn spawn(
     repo: PathBuf,
-    id: String,
+    target: Target,
 ) -> (async_channel::Receiver<Result<Box<Detail>, String>>, Cancel) {
     let (tx, rx) = async_channel::bounded(1);
     let cancel = Cancel::default();
     {
         let cancel = cancel.clone();
         std::thread::spawn(move || {
-            let result = load(&repo, &id, &cancel);
+            let result = match &target {
+                Target::Commit(id) => load(&repo, id, &cancel),
+                Target::Working => load_working(&repo, &cancel),
+            };
             if !cancel.stopped() {
                 let _ = tx.send_blocking(result.map(Box::new));
             }
@@ -195,6 +243,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
             insertions: adds,
             deletions: dels,
             binary,
+            group: Group::Committed,
         });
     }
 
@@ -254,7 +303,7 @@ const MAX_LINES: usize = 4_000;
 
 pub fn spawn_patch(
     repo: PathBuf,
-    id: String,
+    target: Target,
     file: String,
 ) -> (async_channel::Receiver<Result<Box<FileDiff>, String>>, Cancel) {
     let (tx, rx) = async_channel::bounded(1);
@@ -262,13 +311,127 @@ pub fn spawn_patch(
     {
         let cancel = cancel.clone();
         std::thread::spawn(move || {
-            let result = patch_for(&repo, &id, &file);
+            let result = match &target {
+                Target::Commit(id) => patch_for(&repo, id, &file),
+                Target::Working => patch_working(&repo, &file),
+            };
             if !cancel.stopped() {
                 let _ = tx.send_blocking(result.map(Box::new));
             }
         });
     }
     (rx, cancel)
+}
+
+/// Everything uncommitted: staged against HEAD, unstaged and untracked against
+/// the index. Two diffs rather than one because the two halves answer different
+/// questions and only one of them blocks an update.
+fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
+    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let index = repo.index().map_err(|e| e.message().to_string())?;
+
+    let mut files = Vec::new();
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+
+    let mut staged_opts = DiffOptions::new();
+    staged_opts.include_typechange(true).context_lines(0);
+    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
+    {
+        collect(&diff, Group::Staged, cancel, &mut files, &mut insertions, &mut deletions);
+    }
+
+    let mut work_opts = DiffOptions::new();
+    work_opts
+        .include_typechange(true)
+        .include_untracked(true)
+        // One row per untracked file rather than one per untracked directory:
+        // "two untracked things" is what the card already says, and this view
+        // exists to say which.
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .context_lines(0);
+    if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut work_opts)) {
+        collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
+    }
+
+    let total_files = files.len();
+    files.truncate(MAX_FILES);
+
+    Ok(Detail {
+        id: String::new(),
+        short_id: "working".into(),
+        summary: "Local changes".into(),
+        body: String::new(),
+        author: String::new(),
+        email: String::new(),
+        when: 0,
+        committer: None,
+        parents: Vec::new(),
+        merge: false,
+        files,
+        total_files,
+        insertions,
+        deletions,
+    })
+}
+
+/// Turn a diff's deltas into file changes, assigning each to a group. The group
+/// passed in is the default; untracked and conflicted entries say so themselves.
+fn collect(
+    diff: &Diff<'_>,
+    default_group: Group,
+    cancel: &Cancel,
+    files: &mut Vec<FileChange>,
+    insertions: &mut usize,
+    deletions: &mut usize,
+) {
+    for (index, delta) in diff.deltas().enumerate() {
+        if cancel.stopped() {
+            return;
+        }
+        let group = match delta.status() {
+            git2::Delta::Untracked => Group::Untracked,
+            git2::Delta::Conflicted => Group::Conflicted,
+            _ => default_group,
+        };
+        let binary = delta.new_file().is_binary() || delta.old_file().is_binary();
+        let (adds, dels) = if binary || group == Group::Untracked {
+            // An untracked file has nothing to diff against; counting its whole
+            // length as additions would drown the totals.
+            (0, 0)
+        } else {
+            match Patch::from_diff(diff, index) {
+                Ok(Some(patch)) => {
+                    let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
+                    (adds, dels)
+                }
+                _ => (0, 0),
+            }
+        };
+        *insertions += adds;
+        *deletions += dels;
+
+        let path_of = |f: git2::DiffFile<'_>| {
+            f.path()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        let new_path = path_of(delta.new_file());
+        let old_path = path_of(delta.old_file());
+        let change = Change::from(delta.status());
+        files.push(FileChange {
+            path: if new_path.is_empty() { old_path.clone() } else { new_path },
+            from: (matches!(change, Change::Renamed | Change::Copied) && !old_path.is_empty())
+                .then_some(old_path),
+            change,
+            insertions: adds,
+            deletions: dels,
+            binary,
+            group,
+        });
+    }
 }
 
 fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
@@ -318,6 +481,68 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
         }
     }
     Ok(out)
+}
+
+/// The uncommitted diff of one file, including an untracked one — which has no
+/// blob to compare against, so git is asked to show its content as added.
+fn patch_working(path: &Path, file: &str) -> Result<FileDiff, String> {
+    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let index = repo.index().map_err(|e| e.message().to_string())?;
+
+    let mut out = FileDiff::default();
+    let mut opts = DiffOptions::new();
+    opts.context_lines(3)
+        .include_typechange(true)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true)
+        .pathspec(file);
+
+    // Staged first, so a file that is both staged and modified still shows
+    // something rather than nothing.
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let mut staged_opts = DiffOptions::new();
+    staged_opts.context_lines(3).include_typechange(true).pathspec(file);
+    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts)) {
+        append_patch(&diff, &mut out);
+    }
+    if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
+        append_patch(&diff, &mut out);
+    }
+    Ok(out)
+}
+
+fn append_patch(diff: &Diff<'_>, out: &mut FileDiff) {
+    for index in 0..diff.deltas().len() {
+        let Ok(Some(patch)) = Patch::from_diff(diff, index) else { continue };
+        if patch.num_hunks() == 0 {
+            out.binary = diff
+                .get_delta(index)
+                .map(|d| d.new_file().is_binary() || d.old_file().is_binary())
+                .unwrap_or(out.binary);
+        }
+        for hunk_index in 0..patch.num_hunks() {
+            let Ok((hunk, lines_in_hunk)) = patch.hunk(hunk_index) else { continue };
+            out.lines.push(Line {
+                origin: '@',
+                text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
+            });
+            for line_index in 0..lines_in_hunk {
+                if out.lines.len() >= MAX_LINES {
+                    out.truncated = true;
+                    return;
+                }
+                let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
+                out.lines.push(Line {
+                    origin: line.origin(),
+                    text: String::from_utf8_lossy(line.content())
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string(),
+                });
+            }
+        }
+    }
 }
 
 /// A node in the tree the pane draws.

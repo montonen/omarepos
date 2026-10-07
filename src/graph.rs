@@ -59,6 +59,9 @@ pub struct Graph {
     pub target: Option<usize>,
     /// True when a commit was asked for and the walk gave up before reaching it.
     pub target_missed: bool,
+    /// How many uncommitted entries the working tree has, untracked included.
+    /// Zero means there is nothing for a "Local changes" row to show.
+    pub working_changes: usize,
 }
 
 /// How far the walk will go past `limit` to reach a commit it was asked for.
@@ -114,6 +117,7 @@ pub fn build(
                 head,
                 target: None,
                 target_missed: target.is_some(),
+                working_changes: working_changes(&repo),
             });
         }
     }
@@ -242,7 +246,20 @@ pub fn build(
         head,
         target: found_at,
         target_missed: target.is_some() && found_at.is_none(),
+        working_changes: working_changes(&repo),
     })
+}
+
+/// Entries in the working tree, untracked included but never ignored. Counted
+/// without recursing into untracked directories — this only decides whether to
+/// offer the row, and the pane does the detailed reading.
+fn working_changes(repo: &Repository) -> usize {
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(false)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    repo.statuses(Some(&mut opts)).map(|s| s.len()).unwrap_or(0)
 }
 
 fn alloc(state: &mut Vec<Option<Oid>>) -> usize {

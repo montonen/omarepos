@@ -467,6 +467,12 @@ textview.om-diff text {{
   font-size: 12px;
 }}
 
+/* A group whose changes do not block an update steps back from the ones that
+   do — the view is usually being read to answer "what must I clean up". */
+listbox.om-results > row.om-aside {{
+  opacity: 0.70;
+}}
+
 .om-status {{
   font-family: monospace;
   font-size: 11px;
@@ -485,6 +491,10 @@ textview.om-diff text {{
 
 .om-status.renamed {{
   color: {cyan};
+}}
+
+.om-status.untracked {{
+  color: @om_dim;
 }}
 
 .om-status.modified {{

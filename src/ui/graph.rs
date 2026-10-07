@@ -220,12 +220,19 @@ pub fn page(
                 };
                 let slice = &graph.rows[from..to];
 
+                // A row for everything uncommitted, above the history, when
+                // there is anything to show. Offering a permanently empty one
+                // on a clean repository would be noise in the place the eye
+                // lands first.
+                let has_working = graph.working_changes > 0;
+
                 // Wired before the rows go in, and before anything is
                 // selected. A list box in Browse mode selects the first row as
                 // it is appended, and selecting the row we came for is a no-op
                 // when that is already the first row — connecting afterwards
                 // meant the pane stayed empty until the cursor moved.
-                let ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+                let ids: Rc<RefCell<Vec<crate::commit::Target>>> =
+                    Rc::new(RefCell::new(Vec::new()));
                 {
                     let ids = Rc::clone(&ids);
                     let repo = load_path_for_detail.clone();
@@ -236,25 +243,39 @@ pub fn page(
                         if index < 0 {
                             return;
                         }
-                        let id = ids.borrow().get(index as usize).cloned();
-                        if let Some(id) = id {
-                            load_detail(repo.clone(), id);
+                        let target = ids.borrow().get(index as usize).cloned();
+                        if let Some(target) = target {
+                            load_detail(repo.clone(), target);
                         }
                     });
                 }
-                *ids.borrow_mut() = slice.iter().map(|row| row.id.to_string()).collect();
+                {
+                    let mut targets = ids.borrow_mut();
+                    if has_working {
+                        targets.push(crate::commit::Target::Working);
+                    }
+                    targets.extend(
+                        slice
+                            .iter()
+                            .map(|row| crate::commit::Target::Commit(row.id.to_string())),
+                    );
+                }
 
+                if has_working {
+                    rows_box.append(&working_row(graph.working_changes, width));
+                }
                 for row in slice {
                     rows_box.append(&row_widget(row, width));
                 }
 
-                let select_at = graph.target.map(|index| index - from).unwrap_or(0);
+                let offset = usize::from(has_working);
+                let select_at = graph.target.map(|index| index - from + offset).unwrap_or(0);
                 if let Some(row) = rows_box.row_at_index(select_at as i32) {
                     rows_box.select_row(Some(&row));
                 }
 
                 if let Some(index) = graph.target {
-                    let at = index - from;
+                    let at = index - from + offset;
                     if let Some(row) = rows_box.row_at_index(at as i32) {
                         row.add_css_class("om-target");
                         // Once the list has been laid out, focusing the row
@@ -273,8 +294,9 @@ pub fn page(
                     if index < 0 {
                         return;
                     }
-                    let id = ids.borrow().get(index as usize).cloned();
-                    let Some(id) = id else { return };
+                    let target = ids.borrow().get(index as usize).cloned();
+                    // The working-tree row has no sha to copy.
+                    let Some(crate::commit::Target::Commit(id)) = target else { return };
                     row.clipboard().set_text(&id);
                     toasts_for_rows.add_toast(adw::Toast::new(&format!(
                         "Copied {}",
@@ -318,6 +340,55 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
         parts.push(format!("HEAD {head}"));
     }
     parts.join("  ·  ")
+}
+
+/// The row that stands for everything uncommitted, drawn where the next commit
+/// would go so the graph reads as continuing into the working tree.
+fn working_row(changes: usize, graph_width: i32) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_height_request(ROW_H);
+
+    let area = gtk::DrawingArea::builder()
+        .content_width(graph_width)
+        .content_height(ROW_H)
+        .build();
+    area.set_draw_func(move |_, cr, _, height| {
+        let mid = height as f64 / 2.0;
+        let x = lane_x(0);
+        set_color(cr, lane_color(0));
+        cr.set_line_width(1.6);
+        // Dashed, because this is not a commit and should not pretend to be.
+        cr.set_dash(&[3.0, 3.0], 0.0);
+        cr.move_to(x, mid);
+        cr.line_to(x, height as f64);
+        let _ = cr.stroke();
+        cr.set_dash(&[], 0.0);
+        cr.arc(x, mid, DOT_R, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+    });
+    line.append(&area);
+
+    let label = gtk::Label::builder()
+        .label("Local changes")
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    label.add_css_class("om-summary");
+    line.append(&label);
+
+    let count = gtk::Label::new(Some(&format!(
+        "{changes} {}",
+        if changes == 1 { "entry" } else { "entries" }
+    )));
+    count.add_css_class("om-meta");
+    line.append(&count);
+
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.add_css_class("om-row");
+    row.set_tooltip_text(Some(
+        "Everything uncommitted, including untracked files.\nNot a commit — nothing to copy.",
+    ));
+    row
 }
 
 fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
