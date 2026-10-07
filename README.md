@@ -327,6 +327,13 @@ an add. Binary files say so instead of claiming no lines changed.
 A merge is diffed **against its first parent**, which shows what the merge
 brought in rather than everything on both sides; the totals line says so.
 
+Selecting a file shows its diff beside the tree, with the file's own language
+highlighted and added and removed lines marked by a line background rather than
+by colouring the text — so what changed and what it says are both readable at
+once. Highlighting is syntect's bundled set, which has no TypeScript, JSX or
+Bicep; those fall back to JavaScript, which gets strings, comments, keywords and
+braces right.
+
 Reading a diff costs more than reading a commit header, and the pane reloads
 whenever the cursor moves, so it runs off the main thread, waits for the cursor
 to settle, and abandons a read the moment you move on. Holding `Down` through a

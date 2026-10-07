@@ -1,5 +1,6 @@
 //! The per-repository commit graph page.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -218,7 +219,30 @@ pub fn page(
                     None => (0, graph.rows.len().min(COMMIT_LIMIT)),
                 };
                 let slice = &graph.rows[from..to];
-                let ids: Vec<String> = slice.iter().map(|row| row.id.to_string()).collect();
+
+                // Wired before the rows go in, and before anything is
+                // selected. A list box in Browse mode selects the first row as
+                // it is appended, and selecting the row we came for is a no-op
+                // when that is already the first row — connecting afterwards
+                // meant the pane stayed empty until the cursor moved.
+                let ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+                {
+                    let ids = Rc::clone(&ids);
+                    let repo = load_path_for_detail.clone();
+                    let load_detail = Rc::clone(&load_detail);
+                    rows_box.connect_row_selected(move |_, row| {
+                        let Some(row) = row else { return };
+                        let index = row.index();
+                        if index < 0 {
+                            return;
+                        }
+                        let id = ids.borrow().get(index as usize).cloned();
+                        if let Some(id) = id {
+                            load_detail(repo.clone(), id);
+                        }
+                    });
+                }
+                *ids.borrow_mut() = slice.iter().map(|row| row.id.to_string()).collect();
 
                 for row in slice {
                     rows_box.append(&row_widget(row, width));
@@ -244,31 +268,14 @@ pub fn page(
                         );
                     }
                 }
-                {
-                    // The pane follows the cursor: walking history and seeing
-                    // what each commit touched is the point of having it.
-                    let ids = ids.clone();
-                    let repo = load_path_for_detail.clone();
-                    let load_detail = Rc::clone(&load_detail);
-                    rows_box.connect_row_selected(move |_, row| {
-                        let Some(row) = row else { return };
-                        let index = row.index();
-                        if index < 0 {
-                            return;
-                        }
-                        if let Some(id) = ids.get(index as usize) {
-                            load_detail(repo.clone(), id.clone());
-                        }
-                    });
-                }
-
                 rows_box.connect_row_activated(move |_, row| {
                     let index = row.index();
                     if index < 0 {
                         return;
                     }
-                    let Some(id) = ids.get(index as usize) else { return };
-                    row.clipboard().set_text(id);
+                    let id = ids.borrow().get(index as usize).cloned();
+                    let Some(id) = id else { return };
+                    row.clipboard().set_text(&id);
                     toasts_for_rows.add_toast(adw::Toast::new(&format!(
                         "Copied {}",
                         &id[..7.min(id.len())]

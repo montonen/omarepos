@@ -234,13 +234,105 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     })
 }
 
+/// One line of a unified diff.
+#[derive(Debug, Clone)]
+pub struct Line {
+    /// git's own marker: ' ', '+', '-', or '@' for a hunk header.
+    pub origin: char,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileDiff {
+    pub lines: Vec<Line>,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+/// Past this a diff is not being read, it is being scrolled past.
+const MAX_LINES: usize = 4_000;
+
+pub fn spawn_patch(
+    repo: PathBuf,
+    id: String,
+    file: String,
+) -> (async_channel::Receiver<Result<Box<FileDiff>, String>>, Cancel) {
+    let (tx, rx) = async_channel::bounded(1);
+    let cancel = Cancel::default();
+    {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let result = patch_for(&repo, &id, &file);
+            if !cancel.stopped() {
+                let _ = tx.send_blocking(result.map(Box::new));
+            }
+        });
+    }
+    (rx, cancel)
+}
+
+fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
+    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let oid = Oid::from_str(id).map_err(|e| e.message().to_string())?;
+    let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+    // Narrowed to the one file, and with real context this time — the commit
+    // summary asks for counts, this asks to be read.
+    let mut opts = DiffOptions::new();
+    opts.context_lines(3).include_typechange(true).pathspec(file);
+    let diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
+        .map_err(|e| e.message().to_string())?;
+
+    let mut out = FileDiff::default();
+    for index in 0..diff.deltas().len() {
+        let Ok(Some(patch)) = Patch::from_diff(&diff, index) else { continue };
+        if patch.num_hunks() == 0 {
+            out.binary = diff
+                .get_delta(index)
+                .map(|d| d.new_file().is_binary() || d.old_file().is_binary())
+                .unwrap_or(false);
+        }
+        for hunk_index in 0..patch.num_hunks() {
+            let Ok((hunk, lines_in_hunk)) = patch.hunk(hunk_index) else { continue };
+            out.lines.push(Line {
+                origin: '@',
+                text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
+            });
+            for line_index in 0..lines_in_hunk {
+                if out.lines.len() >= MAX_LINES {
+                    out.truncated = true;
+                    return Ok(out);
+                }
+                let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
+                out.lines.push(Line {
+                    origin: line.origin(),
+                    text: String::from_utf8_lossy(line.content())
+                        .trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// A node in the tree the pane draws.
 pub enum Node {
     /// A directory, with the path segment(s) it stands for. Single-child chains
     /// are collapsed into one node, so `src/Api/One/Interfaces` is one row
     /// rather than four.
     Dir { name: String, depth: usize },
-    File { file: FileChange, depth: usize },
+    /// `file.path` stays the full path, since that is what a diff needs;
+    /// `display` is the part worth putting on screen under its directory.
+    File {
+        file: FileChange,
+        display: String,
+        depth: usize,
+    },
 }
 
 /// Arrange changed files into an indented tree, flattened for rendering.
@@ -287,10 +379,8 @@ pub fn tree(files: &[FileChange]) -> Vec<Node> {
             walk(child, String::new(), depth + 1, out);
         }
         for file in &dir.files {
-            let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_string();
-            let mut shown = file.clone();
-            shown.path = name;
-            out.push(Node::File { file: shown, depth });
+            let display = file.path.rsplit('/').next().unwrap_or(&file.path).to_string();
+            out.push(Node::File { file: file.clone(), display, depth });
         }
     }
 

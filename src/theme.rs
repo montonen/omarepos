@@ -460,6 +460,13 @@ listbox.om-results > row {{
   border-top: 1px solid @om_border;
 }}
 
+textview.om-diff,
+textview.om-diff text {{
+  background-color: @om_bg;
+  color: @om_fg;
+  font-size: 12px;
+}}
+
 .om-status {{
   font-family: monospace;
   font-size: 11px;

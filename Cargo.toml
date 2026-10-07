@@ -13,6 +13,10 @@ git2 = { version = "0.21", default-features = false }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 async-channel = "2"
+# Syntax highlighting for the diff view. Pure Rust (no oniguruma), so the app
+# keeps installing with nothing but a C toolchain, and bundles its own syntax
+# definitions rather than depending on a system library being present.
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 
 [profile.release]
 lto = "thin"
