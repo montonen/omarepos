@@ -2,11 +2,15 @@
 
 mod config;
 mod git;
+mod graph;
 mod lang;
+mod meta;
 mod scan;
+mod stats;
 mod theme;
 mod ui;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -66,7 +70,7 @@ fn main() -> glib::ExitCode {
     if !roots.is_empty() {
         cfg.roots = roots;
     }
-    let cfg = Rc::new(cfg);
+    let cfg = Rc::new(RefCell::new(cfg));
 
     let app = adw::Application::builder().application_id(APP_ID).build();
 

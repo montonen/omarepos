@@ -236,6 +236,37 @@ dropdown.om-sort > button {{
   background-color: shade(@om_raised, 1.08);
 }}
 
+.om-card.om-selected {{
+  border-color: @om_accent;
+  background-color: mix(@om_raised, @om_accent, 0.14);
+  box-shadow: inset 0 0 0 1px @om_accent;
+}}
+
+.om-card.om-selected:hover {{
+  background-color: mix(@om_raised, @om_accent, 0.22);
+}}
+
+.om-card.om-selected checkbutton check {{
+  background-color: @om_accent;
+  border-color: @om_accent;
+}}
+
+.om-tag {{
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  background-color: alpha(@om_fg, 0.10);
+  color: @om_fg;
+}}
+
+.om-tag-chip {{
+  font-size: 11px;
+  border-radius: 999px;
+  min-height: 24px;
+  padding: 0 10px;
+}}
+
 .om-card.om-dirty {{
   border-left: 3px solid {yellow};
   padding-left: 12px;
@@ -330,12 +361,85 @@ flowbox.om-flow > flowboxchild:selected {{
   outline: 0;
 }}
 
+flowbox.om-flow > flowboxchild:focus-visible {{
+  outline: 0;
+}}
+
+flowbox.om-flow > flowboxchild:focus-visible .om-card {{
+  border-color: @om_accent;
+  background-color: shade(@om_raised, 1.12);
+}}
+
 .om-statusbar {{
   font-size: 11px;
   color: @om_dim;
   border-top: 1px solid @om_border;
   background-color: @om_sunken;
   padding: 4px 12px;
+}}
+
+.om-row {{
+  border-radius: 6px;
+  padding: 0 6px;
+}}
+
+.om-row:hover {{
+  background-color: alpha(@om_fg, 0.07);
+}}
+
+.om-sha {{
+  font-family: monospace;
+  font-size: 11px;
+  color: @om_dim;
+}}
+
+.om-ref {{
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 4px;
+  background-color: alpha(@om_fg, 0.12);
+  color: @om_fg;
+}}
+
+.om-ref.local {{
+  background-color: alpha({green}, 0.20);
+  color: {green};
+}}
+
+.om-ref.current {{
+  background-color: alpha(@om_accent, 0.30);
+  color: {accent};
+}}
+
+.om-ref.remote {{
+  background-color: alpha({cyan}, 0.18);
+  color: {cyan};
+}}
+
+.om-ref.tag {{
+  background-color: alpha({yellow}, 0.20);
+  color: {yellow};
+}}
+
+.om-ref.head {{
+  background-color: alpha({red}, 0.24);
+  color: {red};
+}}
+
+.om-big {{
+  font-size: 22px;
+  font-weight: 700;
+  color: @om_fg;
+}}
+
+.om-stat-row {{
+  padding: 10px 14px;
+}}
+
+.om-stat-row:hover {{
+  border-color: @om_border;
+  background-color: @om_raised;
 }}
 
 popover.menu contents, popover contents {{

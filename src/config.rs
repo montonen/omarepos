@@ -39,6 +39,8 @@ pub fn tildify(path: &Path) -> String {
 pub struct Config {
     /// Directories to scan for repositories.
     pub roots: Vec<String>,
+    /// Individual repositories to include regardless of where they live.
+    pub extra_repos: Vec<String>,
     /// How many directory levels below each root to look for a `.git`.
     pub max_depth: usize,
     /// Terminal emulator used by "Open in terminal".
@@ -53,6 +55,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             roots: vec!["~/code".to_string()],
+            extra_repos: Vec::new(),
             max_depth: 3,
             terminal: None,
             editor: None,
@@ -92,6 +95,78 @@ impl Config {
 
     pub fn roots(&self) -> Vec<PathBuf> {
         self.roots.iter().map(|r| expand(r)).collect()
+    }
+
+    pub fn extra_repos(&self) -> Vec<PathBuf> {
+        self.extra_repos.iter().map(|r| expand(r)).collect()
+    }
+
+    /// Store a path the way the user is most likely to recognise it.
+    fn store(path: &Path) -> String {
+        tildify(path)
+    }
+
+    /// Returns false when the root was already listed.
+    pub fn add_root(&mut self, path: &Path) -> bool {
+        let candidate = Self::store(path);
+        if self.roots.iter().any(|r| expand(r) == path) {
+            return false;
+        }
+        self.roots.push(candidate);
+        true
+    }
+
+    pub fn remove_root(&mut self, path: &Path) {
+        self.roots.retain(|r| expand(r) != path);
+    }
+
+    pub fn add_extra_repo(&mut self, path: &Path) -> bool {
+        let candidate = Self::store(path);
+        if self.extra_repos.iter().any(|r| expand(r) == path) {
+            return false;
+        }
+        self.extra_repos.push(candidate);
+        true
+    }
+
+    pub fn remove_extra_repo(&mut self, path: &Path) {
+        self.extra_repos.retain(|r| expand(r) != path);
+    }
+
+    /// Rewrite the config file. Comments in an existing file are lost; the
+    /// generated one documents itself instead.
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let list = |values: &[String]| -> String {
+            values
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut out = String::from("# omarepos configuration — written by the app.\n\n");
+        out.push_str("# Directories scanned for repositories.\n");
+        out.push_str(&format!("roots = [{}]\n\n", list(&self.roots)));
+        out.push_str("# Individual repositories included wherever they live.\n");
+        out.push_str(&format!("extra_repos = [{}]\n\n", list(&self.extra_repos)));
+        out.push_str("# Levels below each root to search for a `.git`.\n");
+        out.push_str(&format!("max_depth = {}\n\n", self.max_depth));
+        match &self.terminal {
+            Some(term) => out.push_str(&format!("terminal = {term:?}\n")),
+            None => out.push_str("# terminal = \"alacritty\"   # defaults to $TERMINAL\n"),
+        }
+        match &self.editor {
+            Some(editor) => out.push_str(&format!("editor = {editor:?}\n")),
+            None => out.push_str("# editor = \"nvim\"          # defaults to $EDITOR\n"),
+        }
+        out.push_str(&format!(
+            "\nfollow_omarchy_theme = {}\n",
+            self.follow_omarchy_theme
+        ));
+        std::fs::write(&path, out)
     }
 
     /// Terminal command, honouring `$TERMINAL` before guessing.

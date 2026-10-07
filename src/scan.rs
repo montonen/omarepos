@@ -17,12 +17,29 @@ pub enum Event {
 }
 
 /// Kick off a scan. The returned receiver yields one `Discovered`, then one
-/// `Repo` per repository, then `Done`.
-pub fn spawn(roots: Vec<PathBuf>, max_depth: usize) -> async_channel::Receiver<Event> {
+/// `Repo` per repository, then `Done`. `extras` are individually added
+/// repositories, included whether or not they sit under a root.
+pub fn spawn(
+    roots: Vec<PathBuf>,
+    extras: Vec<PathBuf>,
+    max_depth: usize,
+) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
 
     std::thread::spawn(move || {
-        let paths = git::discover(&roots, max_depth);
+        let mut paths = git::discover(&roots, max_depth);
+        let known: std::collections::HashSet<PathBuf> = paths
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect();
+        for extra in extras {
+            let canonical = extra.canonicalize().unwrap_or_else(|_| extra.clone());
+            if !known.contains(&canonical) && canonical.join(".git").exists() {
+                paths.push(canonical);
+            }
+        }
+        paths.sort();
+        paths.dedup();
         if tx.send_blocking(Event::Discovered(paths.len())).is_err() {
             return;
         }

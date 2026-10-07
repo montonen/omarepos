@@ -10,8 +10,15 @@ use crate::git::RepoInfo;
 use crate::theme::Palette;
 use crate::ui::{Action, relative_time};
 
-/// Build the card widget. `on_action` is invoked with the repo the user acted on.
-pub fn build(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk::Widget {
+/// Build the card widget. `on_action` is invoked with the repo the user acted
+/// on; `on_select` with the new state of the card's selection checkbox.
+pub fn build(
+    info: &RepoInfo,
+    tags: &[String],
+    selected: bool,
+    on_action: Rc<dyn Fn(Action, &RepoInfo)>,
+    on_select: Rc<dyn Fn(&RepoInfo, bool)>,
+) -> gtk::Widget {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(7)
@@ -23,9 +30,33 @@ pub fn build(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk::
     } else if !info.tree.is_clean() {
         card.add_css_class("om-dirty");
     }
+    if selected {
+        card.add_css_class("om-selected");
+    }
 
-    // Title row: name, then the action menu.
+    // Title row: selection checkbox, name, then the action menu.
     let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+    let check = gtk::CheckButton::builder()
+        .active(selected)
+        .tooltip_text("Include in contributions")
+        .valign(gtk::Align::Center)
+        .build();
+    {
+        let info = info.clone();
+        let card = card.clone();
+        check.connect_toggled(move |check| {
+            // Restyle in place: a full rebuild here would fight the click.
+            if check.is_active() {
+                card.add_css_class("om-selected");
+            } else {
+                card.remove_css_class("om-selected");
+            }
+            on_select(&info, check.is_active());
+        });
+    }
+    title_row.append(&check);
+
     let name = gtk::Label::builder()
         .label(&info.name)
         .xalign(0.0)
@@ -45,10 +76,17 @@ pub fn build(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk::
         .max_width_chars(34)
         .build();
     path.add_css_class("om-path");
-    path.set_tooltip_text(Some(&info.path.display().to_string()));
+    path.set_tooltip_text(Some(&format!(
+        "{}\n\nClick the card for its commit graph.",
+        info.path.display()
+    )));
     card.append(&path);
 
     card.append(&pills(info));
+
+    if !tags.is_empty() {
+        card.append(&tag_row(tags));
+    }
 
     if let Some(remote) = &info.remote {
         let label = gtk::Label::builder()
@@ -68,18 +106,6 @@ pub fn build(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk::
 
     card.append(&footer(info));
 
-    // Double-click anywhere on the card opens a terminal there.
-    let click = gtk::GestureClick::new();
-    let info_for_click = info.clone();
-    let action_cb = Rc::clone(&on_action);
-    click.connect_pressed(move |gesture, n_press, _, _| {
-        if n_press == 2 {
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-            action_cb(Action::OpenTerminal, &info_for_click);
-        }
-    });
-    card.add_controller(click);
-
     card.upcast()
 }
 
@@ -88,6 +114,9 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
     let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
     let items = [
+        ("Commit graph", Action::CommitGraph),
+        ("Contributions", Action::Contributions),
+        ("Tags…", Action::EditTags),
         ("Open in terminal", Action::OpenTerminal),
         ("Open in editor", Action::OpenEditor),
         ("Open folder", Action::OpenFolder),
@@ -244,6 +273,28 @@ fn lang_legend(info: &RepoInfo) -> gtk::Box {
         label.add_css_class("om-meta");
         item.append(&label);
         row.append(&item);
+    }
+    row
+}
+
+fn tag_row(tags: &[String]) -> gtk::FlowBox {
+    let row = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .max_children_per_line(5)
+        .column_spacing(5)
+        .row_spacing(4)
+        .build();
+    for tag in tags {
+        let chip = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        chip.add_css_class("om-tag");
+        chip.append(&dot(crate::ui::key_color(&tag.to_lowercase())));
+        let label = gtk::Label::builder()
+            .label(tag)
+            .ellipsize(pango::EllipsizeMode::End)
+            .max_width_chars(18)
+            .build();
+        chip.append(&label);
+        row.append(&chip);
     }
     row
 }

@@ -1,6 +1,9 @@
 # Copy to ~/.config/omarepos/config.toml and edit. Every key is optional.
 
 roots = ["~/code"]
+
+# Individual repositories outside the roots above.
+extra_repos = []
 max_depth = 3
 # terminal = "alacritty"
 # editor = "nvim"

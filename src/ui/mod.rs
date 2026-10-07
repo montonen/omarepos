@@ -1,4 +1,7 @@
 pub mod card;
+pub mod dialogs;
+pub mod graph;
+pub mod stats;
 pub mod window;
 
 use std::path::Path;
@@ -8,6 +11,12 @@ use crate::config::Config;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
+    /// Drill into this repository's commit graph.
+    CommitGraph,
+    /// Contributions scoped to this one repository.
+    Contributions,
+    /// Edit this repository's tags.
+    EditTags,
     OpenTerminal,
     OpenEditor,
     OpenFolder,
@@ -98,4 +107,85 @@ fn spawn(cmd: &mut Command, what: &str) {
     if let Err(err) = result {
         eprintln!("omarepos: could not launch {what}: {err}");
     }
+}
+
+/// A fixed accent ramp for graph lanes and author colours. Deliberately not
+/// taken from the Omarchy palette: these have to stay distinguishable from each
+/// other in every theme, which a theme's own handful of hues cannot promise.
+pub const ACCENTS: [&str; 8] = [
+    "#7e9cd8", "#98bb6c", "#dca561", "#e46876", "#957fb8", "#7aa89f", "#d27e99", "#c0a36e",
+];
+
+pub fn lane_color(lane: usize) -> &'static str {
+    ACCENTS[lane % ACCENTS.len()]
+}
+
+/// Stable colour per author, so the same person keeps their colour between runs.
+pub fn key_color(key: &str) -> &'static str {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    ACCENTS[(hash % ACCENTS.len() as u64) as usize]
+}
+
+/// Absolute local timestamp, for tooltips.
+pub fn absolute_time(when: i64) -> String {
+    gtk::glib::DateTime::from_unix_local(when)
+        .ok()
+        .and_then(|dt| dt.format("%Y-%m-%d %H:%M").ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| when.to_string())
+}
+
+/// Build the day buckets for a contributions window, in the local timezone.
+/// Index 0 is the oldest day; the last entry is today.
+pub fn day_window(days: usize) -> crate::stats::Window {
+    let days = days.max(1);
+    let mut day_starts = Vec::with_capacity(days);
+    let mut day_labels = Vec::with_capacity(days);
+    let mut day_titles = Vec::with_capacity(days);
+
+    if let Ok(now) = gtk::glib::DateTime::now_local() {
+        if let Ok(midnight) = gtk::glib::DateTime::from_local(
+            now.year(),
+            now.month(),
+            now.day_of_month(),
+            0,
+            0,
+            0.0,
+        ) {
+            for back in (0..days as i32).rev() {
+                let Ok(day) = midnight.add_days(-back) else { continue };
+                day_starts.push(day.to_unix());
+                day_labels.push(
+                    day.format("%a")
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                );
+                day_titles.push(
+                    day.format("%a %-d %b")
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    if day_starts.is_empty() {
+        // No local timezone to be had; fall back to rolling 24-hour buckets.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let today = now - now.rem_euclid(86_400);
+        for back in (0..days as i64).rev() {
+            day_starts.push(today - back * 86_400);
+            day_labels.push(format!("-{back}d"));
+            day_titles.push(format!("{back} days ago"));
+        }
+    }
+
+    crate::stats::Window { day_starts, day_labels, day_titles }
 }
