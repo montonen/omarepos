@@ -396,9 +396,42 @@ flowbox.om-flow > flowboxchild:focus-visible {{
   outline: 0;
 }}
 
+/* Keyboard focus is drawn in the foreground colour rather than the accent.
+   The accent is whatever the theme says it is — in some themes it sits a
+   shade away from the card background and the ring all but disappears — while
+   the foreground contrasts with the background by definition. */
 flowbox.om-flow > flowboxchild:focus-visible .om-card {{
+  outline: 2px solid @om_fg;
+  outline-offset: 2px;
+  border-color: @om_fg;
+  background-color: shade(@om_raised, 1.30);
+}}
+
+/* While the keyboard is driving, hover says nothing useful — the pointer is
+   wherever it was left — and a lit card beside the focused one reads as a
+   second, weaker selection. */
+flowbox.om-flow.om-keyboard .om-card:hover {{
+  background-color: @om_raised;
+  border-color: @om_border;
+}}
+
+flowbox.om-flow.om-keyboard .om-card.om-selected:hover {{
+  background-color: mix(@om_raised, @om_accent, 0.22);
   border-color: @om_accent;
-  background-color: shade(@om_raised, 1.12);
+}}
+
+flowbox.om-flow.om-keyboard.om-has-selection .om-card:not(.om-selected):hover {{
+  opacity: 0.42;
+}}
+
+/* A focused card is the one being looked at, so it is never the dimmed one. */
+flowbox.om-flow.om-has-selection > flowboxchild:focus-visible .om-card:not(.om-selected) {{
+  opacity: 1;
+}}
+
+flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
+  outline-color: @om_accent;
+  background-color: mix(@om_raised, @om_accent, 0.38);
 }}
 
 .om-statusbar {{

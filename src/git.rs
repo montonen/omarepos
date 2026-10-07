@@ -70,18 +70,27 @@ impl RepoInfo {
         self.last_commit.as_ref().map(|c| c.when).unwrap_or(i64::MIN)
     }
 
-    /// Everything the search box matches against.
+    /// What free text in the filter box matches against.
+    ///
+    /// Languages are deliberately not in here. They were, and the result was
+    /// that searching for a repository called `asc` returned half the fleet,
+    /// because `javascript` contains `asc`. Languages have their own `lang:`
+    /// term instead, where a match is something the user asked for.
     pub fn haystack(&self) -> String {
         let mut s = format!("{} {} {}", self.name, self.path.display(), self.head);
         if let Some(remote) = &self.remote {
             s.push(' ');
             s.push_str(remote);
         }
-        for l in &self.langs {
-            s.push(' ');
-            s.push_str(&l.name);
-        }
         s.to_lowercase()
+    }
+
+    /// Does any language in the mix match `needle`? Anchored at the start of
+    /// the name, so `script` does not find JavaScript but `java` does.
+    pub fn speaks(&self, needle: &str) -> bool {
+        self.langs
+            .iter()
+            .any(|lang| lang.name.to_lowercase().starts_with(needle))
     }
 }
 

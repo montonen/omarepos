@@ -88,9 +88,11 @@ omarepos [options]
 | `Ctrl+Shift+R` | Fetch now |
 | `Ctrl+F` / `/` | Focus the filter box |
 | `Enter` in the filter | Open the commit graph of the top hit |
-| `Esc` | Clear the filter |
+| `Ctrl+A` | Select every repo shown; again to deselect |
+| `Esc` | Back out: what you are typing, then the selection, then the filter |
 | `Ctrl+G` | Contributions for the selected repos, or all of them |
 | `Ctrl+Shift+A` | Clear the selection |
+| `lang:rust` in the filter | Narrow by language |
 | `Ctrl+,` | Settings |
 | `Alt+←` | Back to the grid |
 | `Ctrl+Q` | Quit |

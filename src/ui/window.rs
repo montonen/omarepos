@@ -69,6 +69,14 @@ struct Ui {
     /// Set while the toggles are being synced, so programmatic changes do not
     /// come back round as user toggles.
     tag_syncing: Cell<bool>,
+    /// True while the grid is being driven from the keyboard. Hover styling is
+    /// suppressed then, so the pointer resting somewhere does not light a
+    /// second card and leave two looking half-chosen.
+    keyboard_nav: Cell<bool>,
+    /// When the last key went to the grid. Arrow navigation scrolls the grid
+    /// under a stationary pointer, which GTK reports as motion; ignoring
+    /// motion briefly after a keypress keeps that from undoing the mode.
+    last_key: Cell<Option<std::time::Instant>>,
     scroller: gtk::ScrolledWindow,
     /// Lower-cased tags the grid is narrowed to; empty means no tag filter.
     tag_filter: RefCell<BTreeSet<String>>,
@@ -265,6 +273,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         tag_quick_buttons: RefCell::new(Vec::new()),
         tag_signature: RefCell::new(String::new()),
         tag_syncing: Cell::new(false),
+        keyboard_nav: Cell::new(false),
+        last_key: Cell::new(None),
         scroller: scroller.clone(),
         tag_filter: RefCell::new(BTreeSet::new()),
         untagged_only: Cell::new(false),
@@ -323,7 +333,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // Space ticks the focused card, so the grid can be worked through
         // without reaching for the mouse.
         let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed(|controller, key, _, _| {
+        let nav = Rc::clone(&ui);
+        keys.connect_key_pressed(move |controller, key, _, _| {
+            nav.enter_keyboard_nav();
             if key != gdk::Key::space {
                 return glib::Propagation::Proceed;
             }
@@ -342,6 +354,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             }
         });
         ui.flow.add_controller(keys);
+    }
+    {
+        // Moving the pointer hands control back to it.
+        let motion = gtk::EventControllerMotion::new();
+        let nav = Rc::clone(&ui);
+        motion.connect_motion(move |_, _, _| nav.leave_keyboard_nav());
+        ui.flow.add_controller(motion);
     }
     {
         let ui = Rc::clone(&ui);
@@ -405,6 +424,20 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_contrib);
 
+    let act_select_all = gio::SimpleAction::new("select-all", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_select_all.connect_activate(move |_, _| ui.select_all_shown());
+    }
+    window.add_action(&act_select_all);
+
+    let act_escape = gio::SimpleAction::new("escape", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_escape.connect_activate(move |_, _| ui.on_escape());
+    }
+    window.add_action(&act_escape);
+
     let act_clear = gio::SimpleAction::new("clear-selection", None);
     {
         let ui = Rc::clone(&ui);
@@ -436,6 +469,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.contributions", &["<Ctrl>g"]);
     app.set_accels_for_action("win.settings", &["<Ctrl>comma"]);
     app.set_accels_for_action("win.fetch", &["<Ctrl><Shift>r"]);
+    app.set_accels_for_action("win.select-all", &["<Ctrl>a"]);
+    app.set_accels_for_action("win.escape", &["Escape"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
@@ -568,7 +603,7 @@ impl Ui {
     }
 
     fn visible(&self) -> Vec<RepoInfo> {
-        let (query, query_tags) = split_query(&self.search.text());
+        let query = split_query(&self.search.text());
         let dirty_only = self.dirty_only.is_active();
         let tag_filter = self.tag_filter.borrow().clone();
         let untagged_only = self.untagged_only.get();
@@ -586,7 +621,7 @@ impl Ui {
                     .map(|t| t.to_lowercase())
                     .collect();
                 // `tag:` in the search box is an AND; the popover is an OR.
-                if !query_tags.iter().all(|wanted| tags.iter().any(|t| t == wanted)) {
+                if !query.tags.iter().all(|wanted| tags.iter().any(|t| t == wanted)) {
                     return false;
                 }
                 if tag_filter.is_empty() && !untagged_only {
@@ -595,7 +630,8 @@ impl Ui {
                 (untagged_only && tags.is_empty())
                     || tags.iter().any(|t| tag_filter.contains(t))
             })
-            .filter(|r| query.is_empty() || r.haystack().contains(&query))
+            .filter(|r| query.langs.iter().all(|lang| r.speaks(lang)))
+            .filter(|r| query.text.is_empty() || r.haystack().contains(&query.text))
             .cloned()
             .collect();
         drop(meta);
@@ -1113,6 +1149,92 @@ impl Ui {
         );
     }
 
+    /// Tick every repository the grid is currently showing, or untick them all
+    /// when they are already ticked. Toggling means the selection can be
+    /// undone with the key that made it, without reaching for a chord.
+    ///
+    /// An accelerator fires ahead of the focused widget, so Ctrl+A in the
+    /// filter box would otherwise stop selecting its text. When the focus is
+    /// somewhere typable it keeps its usual meaning.
+    fn enter_keyboard_nav(&self) {
+        self.last_key.set(Some(std::time::Instant::now()));
+        if !self.keyboard_nav.replace(true) {
+            self.flow.add_css_class("om-keyboard");
+        }
+    }
+
+    fn leave_keyboard_nav(&self) {
+        if !self.keyboard_nav.get() {
+            return;
+        }
+        // Motion arriving right after a keypress is the grid scrolling beneath
+        // a pointer that has not actually moved.
+        if let Some(when) = self.last_key.get() {
+            if when.elapsed() < std::time::Duration::from_millis(300) {
+                return;
+            }
+        }
+        self.keyboard_nav.set(false);
+        self.flow.remove_css_class("om-keyboard");
+    }
+
+    /// Escape backs out of whatever is in the way, nearest first: the text you
+    /// are typing, then the selection, then a filter left in the box.
+    fn on_escape(self: &Rc<Self>) {
+        if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
+            if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
+                if !editable.text().is_empty() {
+                    editable.set_text("");
+                    return;
+                }
+            }
+        }
+
+        if !self.selected.borrow().is_empty() {
+            self.selected.borrow_mut().clear();
+            self.rebuild();
+            return;
+        }
+
+        if !self.search.text().is_empty() {
+            self.search.set_text("");
+        }
+    }
+
+    fn select_all_shown(self: &Rc<Self>) {
+        if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
+            if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
+                editable.select_region(0, -1);
+                return;
+            }
+        }
+
+        let shown: Vec<PathBuf> = self
+            .shown
+            .borrow()
+            .iter()
+            .map(|repo| repo.path.clone())
+            .collect();
+        if shown.is_empty() {
+            return;
+        }
+        let all_ticked = {
+            let selected = self.selected.borrow();
+            shown.iter().all(|path| selected.contains(path))
+        };
+        {
+            let mut selected = self.selected.borrow_mut();
+            for path in shown {
+                if all_ticked {
+                    selected.remove(&path);
+                } else {
+                    selected.insert(path);
+                }
+            }
+        }
+        self.rebuild();
+    }
+
     fn open_settings(self: &Rc<Self>) {
         let rescan = {
             let ui = Rc::clone(self);
@@ -1229,17 +1351,30 @@ fn noun(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
-/// Pull `tag:foo` terms out of the filter text; what is left is free text.
-fn split_query(raw: &str) -> (String, Vec<String>) {
-    let mut text = Vec::new();
-    let mut tags = Vec::new();
+/// A parsed filter: free text, plus the `tag:` and `lang:` terms pulled out of
+/// it. Each kind of term is matched against its own field, so a word can only
+/// match where the user aimed it.
+#[derive(Default)]
+struct Query {
+    text: String,
+    tags: Vec<String>,
+    langs: Vec<String>,
+}
+
+fn split_query(raw: &str) -> Query {
+    let mut words = Vec::new();
+    let mut query = Query::default();
     for token in raw.split_whitespace() {
-        match token.strip_prefix("tag:") {
-            Some(tag) if !tag.is_empty() => tags.push(tag.to_lowercase()),
-            _ => text.push(token.to_lowercase()),
+        if let Some(tag) = token.strip_prefix("tag:").filter(|t| !t.is_empty()) {
+            query.tags.push(tag.to_lowercase());
+        } else if let Some(lang) = token.strip_prefix("lang:").filter(|l| !l.is_empty()) {
+            query.langs.push(lang.to_lowercase());
+        } else {
+            words.push(token.to_lowercase());
         }
     }
-    (text.join(" "), tags)
+    query.text = words.join(" ");
+    query
 }
 
 /// The selection checkbox of a card, found by walking down from its flow box
