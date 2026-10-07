@@ -1,6 +1,7 @@
 pub mod card;
 pub mod dialogs;
 pub mod graph;
+pub mod search;
 pub mod stats;
 pub mod window;
 

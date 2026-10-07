@@ -87,6 +87,7 @@ omarepos [options]
 | `Ctrl+R` / `F5` | Rescan (local only) |
 | `Ctrl+Shift+R` | Fetch now |
 | `Ctrl+F` / `/` | Focus the filter box |
+| `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Ctrl+A` | Select every repo shown; again to deselect |
 | `Esc` | Back out: what you are typing, then the selection, then the filter |
@@ -254,6 +255,25 @@ backstop.
   the filter box is showing, so what you are looking at never changes what gets
   fetched.
 
+## Searching commits
+
+`Ctrl+Shift+F`, or the magnifier in the header. One query across every
+repository in scope — the ticked ones, or everything the grid is showing, the
+same rule contributions uses.
+
+It matches, in that order of preference: the commit subject, the rest of the
+message, the author's name or e-mail, and a sha prefix. Each result says which
+of those matched, so a hit on an author reads differently from a hit on a
+subject.
+
+Clicking a result copies its full sha; the button at the end of the row opens
+that repository's commit graph.
+
+Searches run on worker threads and are abandoned the moment the query changes,
+so typing does not queue up passes over the fleet. A repository stops at 50,000
+commits or 200 matches, and the newest 500 results are listed — the status bar
+says when there were more.
+
 ## Commit graph
 
 Click any card for its history. Lanes are assigned the usual way: a commit takes
@@ -347,6 +367,7 @@ counts.
 | `src/graph.rs` | Revwalk → lane assignment for the commit graph |
 | `src/meta.rs` | Tag store (`repos.toml`) |
 | `src/stats.rs` | Contribution aggregation over a day window |
+| `src/search.rs` | Commit search across many repositories |
 | `src/scan.rs` | Worker threads streaming results to the main loop |
 | `src/refresh.rs` | Background fetch and fast-forward, with the safety rules |
 | `src/lang.rs` | Extension → language + colour table |
@@ -354,6 +375,7 @@ counts.
 | `src/ui/card.rs` | One repository card |
 | `src/ui/graph.rs` | Commit graph page and its cairo row renderer |
 | `src/ui/stats.rs` | Contributions page |
+| `src/ui/search.rs` | Commit search page |
 | `src/ui/dialogs.rs` | Settings dialog and the tag editor |
 
 ## Status

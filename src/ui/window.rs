@@ -154,6 +154,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .build();
     header.pack_start(&contributions);
 
+    let commit_search = gtk::Button::builder()
+        .icon_name("edit-find-symbolic")
+        .tooltip_text("Search commits across these repos (Ctrl+Shift+F)")
+        .has_frame(false)
+        .build();
+    header.pack_start(&commit_search);
+
     let tags_content = adw::ButtonContent::builder()
         .icon_name("view-list-symbolic")
         .label("Tags")
@@ -364,6 +371,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     {
         let ui = Rc::clone(&ui);
+        commit_search.connect_clicked(move |_| ui.open_commit_search());
+    }
+    {
+        let ui = Rc::clone(&ui);
         settings.connect_clicked(move |_| ui.open_settings());
     }
     {
@@ -431,6 +442,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_select_all);
 
+    let act_search_commits = gio::SimpleAction::new("search-commits", None);
+    {
+        let ui = Rc::clone(&ui);
+        act_search_commits.connect_activate(move |_, _| ui.open_commit_search());
+    }
+    window.add_action(&act_search_commits);
+
     let act_escape = gio::SimpleAction::new("escape", None);
     {
         let ui = Rc::clone(&ui);
@@ -471,6 +489,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.fetch", &["<Ctrl><Shift>r"]);
     app.set_accels_for_action("win.select-all", &["<Ctrl>a"]);
     app.set_accels_for_action("win.escape", &["Escape"]);
+    app.set_accels_for_action("win.search-commits", &["<Ctrl><Shift>f"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
@@ -1316,6 +1335,29 @@ impl Ui {
         });
         self.nav
             .push(&ui::graph::page(&info.path, &info.name, on_contributions));
+    }
+
+    /// Search commits across the ticked repositories, or everything shown.
+    fn open_commit_search(self: &Rc<Self>) {
+        let (repos, scope) = self.contribution_scope();
+        if repos.is_empty() {
+            self.toasts
+                .add_toast(adw::Toast::new("No repositories to search"));
+            return;
+        }
+        let nav = self.nav.clone();
+        let on_open: Rc<dyn Fn(PathBuf, String)> = Rc::new(move |path: PathBuf, name: String| {
+            let nav_inner = nav.clone();
+            let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                nav_inner.push(&ui::stats::page(vec![path], name));
+            });
+            nav.push(&ui::graph::page(&path, &name, on_contributions));
+        });
+        self.nav.push(&ui::search::page(repos, scope, on_open));
     }
 
     fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {

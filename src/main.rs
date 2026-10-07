@@ -7,6 +7,7 @@ mod lang;
 mod meta;
 mod refresh;
 mod scan;
+mod search;
 mod stats;
 mod theme;
 mod ui;
