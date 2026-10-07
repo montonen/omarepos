@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Omarepos
+GenericName=Git Repository Overview
+Comment=Overview of every git repo on your machine
+Exec=omarepos
+Icon=se.alphadev.Omarepos
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;repository;repos;vcs;
+StartupNotify=true
+StartupWMClass=omarepos

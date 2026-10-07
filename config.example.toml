@@ -1,0 +1,7 @@
+# Copy to ~/.config/omarepos/config.toml and edit. Every key is optional.
+
+roots = ["~/code"]
+max_depth = 3
+# terminal = "alacritty"
+# editor = "nvim"
+follow_omarchy_theme = true
