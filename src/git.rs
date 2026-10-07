@@ -54,6 +54,10 @@ pub struct RepoInfo {
     pub ahead: usize,
     pub behind: usize,
     pub upstream: Option<String>,
+    /// When the upstream tip was committed. Without it a card can only say how
+    /// old the local commit is, which reads as "nothing has happened here"
+    /// even when the remote moved an hour ago.
+    pub upstream_when: Option<i64>,
     pub remote: Option<String>,
     pub local_branches: usize,
     pub stashes: usize,
@@ -65,6 +69,30 @@ pub struct RepoInfo {
 }
 
 impl RepoInfo {
+    /// Why an automatic fast-forward would refuse to touch this repository.
+    /// Mirrors the checks the refresher makes, so a card can say up front what
+    /// the refresher would otherwise only say to the log.
+    pub fn update_blocked_by(&self) -> Option<&'static str> {
+        if self.bare || self.unborn {
+            return Some("nothing to update");
+        }
+        if self.detached {
+            return Some("detached HEAD");
+        }
+        if self.upstream.is_none() {
+            return Some("no upstream");
+        }
+        if self.ahead > 0 {
+            return Some("unpushed commits of its own");
+        }
+        // Untracked files do not block a fast-forward; git refuses rather than
+        // overwriting one, so they are not the user's problem here.
+        if self.tree.staged + self.tree.unstaged + self.tree.conflicted > 0 {
+            return Some("uncommitted changes");
+        }
+        None
+    }
+
     /// Sort key for "most recent activity first".
     pub fn activity(&self) -> i64 {
         self.last_commit.as_ref().map(|c| c.when).unwrap_or(i64::MIN)
@@ -273,6 +301,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
         ahead: 0,
         behind: 0,
         upstream: None,
+        upstream_when: None,
         remote: None,
         local_branches: 0,
         stashes: 0,
@@ -337,6 +366,11 @@ pub fn inspect(path: &Path) -> RepoInfo {
         if let Ok(branch) = repo.find_branch(&info.head, BranchType::Local) {
             if let Ok(upstream) = branch.upstream() {
                 info.upstream = upstream.name().ok().flatten().map(|s| s.to_string());
+                info.upstream_when = upstream
+                    .get()
+                    .peel_to_commit()
+                    .ok()
+                    .map(|commit| commit.time().seconds());
                 let local = branch.get().target();
                 let remote = upstream.get().target();
                 if let (Some(local), Some(remote)) = (local, remote) {

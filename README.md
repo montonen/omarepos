@@ -6,6 +6,9 @@ A GTK4 / libadwaita desktop app with three views:
 
 - **Fleet** — one card per repository: current branch, working-tree state, how far
   ahead or behind its upstream it is, stashes, language mix, and the last commit.
+  A repository that is behind and cannot catch up on its own is marked **held
+  back**, with the reason on hover — being behind and being stuck look nothing
+  alike once you know which you are looking at.
 - **Commit graph** — the DAG of any one repository, with branch and tag labels.
 - **Contributions** — who committed what over the last week, across all of your
   repositories or just the ones you tick.
@@ -19,11 +22,11 @@ switch themes.
 ┌──────────────────────────────────────┐
 │ omarchy-plugins                   ⋮  │
 │ ~/code/omarchy-plugins               │
-│  main   ~3 ?2   ↑2                   │
+│  main   ~3 ?2   2 behind  held back  │
 │ github.com/you/omarchy-plugins       │
 │ ███████████▌▌▌▌▎▎                    │
 │ ● QML 54%  ● Shell 28%  ● Rust 11%   │
-│ 3 hours ago · a1b2c3d · you          │
+│ 3 hours ago · remote 1 hour ago · …  │
 │ fix bar widget repaint on theme swap │
 └──────────────────────────────────────┘
 ```
@@ -356,6 +359,9 @@ Everything shown comes from libgit2 against the on-disk repository. Reading
 never runs `git`, never writes to a repository and never talks to a remote.
 Ahead/behind counts compare your local branch to the *last fetched* state of its
 upstream, exactly like `git status` does; they go stale until something fetches.
+When a branch is behind, the card also gives the age of the upstream tip — the
+local commit's age alone reads as "nothing has happened here", which can be the
+opposite of the truth.
 
 The one exception is the background refresh below, which is off until you turn
 it on.

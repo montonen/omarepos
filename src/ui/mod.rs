@@ -39,15 +39,17 @@ pub fn relative_time(when: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
-    const WEEK: i64 = 7 * DAY;
+    const FORTNIGHT: i64 = 14 * DAY;
     const MONTH: i64 = 30 * DAY;
     const YEAR: i64 = 365 * DAY;
     let (n, unit) = match delta {
         d if d < MINUTE => return "just now".into(),
         d if d < HOUR => (d / MINUTE, "minute"),
         d if d < DAY => (d / HOUR, "hour"),
-        d if d < WEEK => (d / DAY, "day"),
-        d if d < MONTH => (d / WEEK, "week"),
+        // Days up to a fortnight: "1 week ago" for thirteen days throws away
+        // most of what the reader wanted to know.
+        d if d < FORTNIGHT => (d / DAY, "day"),
+        d if d < MONTH => (d / (7 * DAY), "week"),
         d if d < YEAR => (d / MONTH, "month"),
         d => (d / YEAR, "year"),
     };

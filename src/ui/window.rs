@@ -733,6 +733,10 @@ impl Ui {
         });
 
         *self.shown.borrow_mut() = repos.clone();
+        let auto_update = {
+            let cfg = self.cfg.borrow();
+            cfg.refresh.enabled() && cfg.refresh.fast_forward
+        };
         for info in &repos {
             let selected = self.selected.borrow().contains(&info.path);
             let tags = self.meta.borrow().tags_for(&info.path).to_vec();
@@ -740,6 +744,7 @@ impl Ui {
                 info,
                 &tags,
                 selected,
+                auto_update,
                 Rc::clone(&on_action),
                 Rc::clone(&on_select),
             ));

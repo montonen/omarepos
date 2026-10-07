@@ -16,6 +16,10 @@ pub fn build(
     info: &RepoInfo,
     tags: &[String],
     selected: bool,
+    // `auto_update`: whether the background refresh is set to fast-forward.
+    // Only then is it true to say a repository is being held back rather than
+    // merely behind.
+    auto_update: bool,
     on_action: Rc<dyn Fn(Action, &RepoInfo)>,
     on_select: Rc<dyn Fn(&RepoInfo, bool)>,
 ) -> gtk::Widget {
@@ -82,7 +86,7 @@ pub fn build(
     )));
     card.append(&path);
 
-    card.append(&pills(info));
+    card.append(&pills(info, auto_update));
 
     if !tags.is_empty() {
         card.append(&tag_row(tags));
@@ -160,7 +164,7 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-fn pills(info: &RepoInfo) -> gtk::Box {
+fn pills(info: &RepoInfo, auto_update: bool) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
 
     if let Some(err) = &info.error {
@@ -214,15 +218,39 @@ fn pills(info: &RepoInfo) -> gtk::Box {
         }
     }
 
+    // Spelled out rather than an arrow and a number: this is the thing people
+    // come to the grid to find out.
     if info.ahead > 0 {
-        let p = pill(&format!("↑{}", info.ahead), "ahead");
-        p.set_tooltip_text(Some("commits not pushed"));
+        let p = pill(&format!("{} ahead", info.ahead), "ahead");
+        p.set_tooltip_text(Some(&format!(
+            "{} commits here are not on {}",
+            info.ahead,
+            info.upstream.as_deref().unwrap_or("the upstream")
+        )));
         row.append(&p);
     }
     if info.behind > 0 {
-        let p = pill(&format!("↓{}", info.behind), "behind");
-        p.set_tooltip_text(Some("commits not pulled"));
+        let p = pill(&format!("{} behind", info.behind), "behind");
+        p.set_tooltip_text(Some(&format!(
+            "{} commits on {} are not here yet",
+            info.behind,
+            info.upstream.as_deref().unwrap_or("the upstream")
+        )));
         row.append(&p);
+
+        // Behind and unable to catch up are very different situations, and
+        // the grid showed them identically.
+        if auto_update {
+            if let Some(reason) = info.update_blocked_by() {
+                let held = pill("held back", "danger");
+                held.set_tooltip_text(Some(&format!(
+                    "These {} commits will not arrive on their own: {reason}.\n\
+                     The background refresh skips this repository until that is resolved.",
+                    info.behind
+                )));
+                row.append(&held);
+            }
+        }
     }
     if info.stashes > 0 {
         let p = pill(&format!("⌸{}", info.stashes), "");
@@ -310,11 +338,19 @@ fn footer(info: &RepoInfo) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     match &info.last_commit {
         Some(commit) => {
+            // When the branch is behind, the age of the local commit on its own
+            // reads as "nothing has happened here lately", which can be the
+            // opposite of the truth.
+            let age = match (info.behind > 0, info.upstream_when) {
+                (true, Some(upstream)) => format!(
+                    "{} · remote {}",
+                    relative_time(commit.when),
+                    relative_time(upstream)
+                ),
+                _ => relative_time(commit.when),
+            };
             let meta = gtk::Label::builder()
-                .label(format!(
-                    "{} · {} · {}",
-                    relative_time(commit.when), commit.short_id, commit.author
-                ))
+                .label(format!("{} · {} · {}", age, commit.short_id, commit.author))
                 .xalign(0.0)
                 .ellipsize(pango::EllipsizeMode::End)
                 .max_width_chars(36)
