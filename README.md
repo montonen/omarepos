@@ -144,9 +144,23 @@ tracked. Submodule paths are then excluded outright as well, so an unusual
 ignore configuration cannot let one in by accident. Below that first level the
 normal rule applies again — a clone's own submodules stay out of the grid.
 
-`tag` tags what is found there the first time each repository is seen, so thirty
-new cards do not drown the ones you had. The seeding is recorded, so a tag you
-delete stays deleted rather than reappearing on the next scan.
+`tag` tags what is found there, so thirty new cards do not drown the ones you
+had. It is reconciled on every scan — at startup, on `Ctrl+R`, and after any
+settings edit — and the root that applied each tag is recorded in `repos.toml`,
+which is what makes the following all behave:
+
+| You do this | What happens |
+| --- | --- |
+| Clone a new repo into the workspace | Tagged on the next scan |
+| Delete the tag from one repo | Stays deleted; the next scan will not put it back |
+| Rename the root's tag | Renamed in place — the old tag is removed, not left beside the new one |
+| Rename it on a repo whose tag you deleted | Nothing; a rename follows the tag, it does not resurrect one |
+| Clear the root's tag | The tag it applied is retired from every repo under it |
+| Tag a repo yourself | Never touched by any of the above |
+
+Entries are keyed by absolute path, and ones whose repository has gone are
+dropped after a scan — but only when the parent directory is still there, so an
+unmounted disk does not cost you its tags.
 
 `include_self` controls whether the wrapper repository gets a card of its own.
 It defaults to false for a workspace, since a repo that ignores everything has

@@ -474,16 +474,22 @@ impl Ui {
                         ui.expected.set(n);
                         ui.update_status();
                     }
-                    Event::Repo { info, seed_tag } => {
-                        if let Some(tag) = seed_tag {
-                            if ui.meta.borrow_mut().seed(&info.path, &tag) {
-                                seeded_any = true;
-                            }
+                    Event::Repo { info, seed } => {
+                        if let Some(seed) = seed {
+                            let changed = ui.meta.borrow_mut().apply_root_tag(
+                                &info.path,
+                                &seed.root,
+                                seed.tag.as_deref(),
+                            );
+                            seeded_any |= changed;
                         }
                         ui.repos.borrow_mut().push(info);
                         ui.rebuild();
                     }
                     Event::Done => {
+                        // Pruning after the scan, so a repository that was just
+                        // found is never a candidate for removal.
+                        seeded_any |= ui.meta.borrow_mut().prune() > 0;
                         if seeded_any {
                             if let Err(err) = ui.meta.borrow().save() {
                                 eprintln!("omarepos: could not write the tag file: {err}");

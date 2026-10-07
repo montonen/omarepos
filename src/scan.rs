@@ -8,15 +8,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::config::Root;
-use crate::git::{self, Found, RepoInfo};
+use crate::git::{self, Found, RepoInfo, Seed};
 
 pub enum Event {
     /// Discovery finished: this many repositories are on their way.
     Discovered(usize),
     Repo {
         info: RepoInfo,
-        /// Tag the root it was found under wants seeded on it.
-        seed_tag: Option<String>,
+        /// What the root it was found under wants tagged on it.
+        seed: Option<Seed>,
     },
     Done,
 }
@@ -45,7 +45,7 @@ pub fn spawn(
         for extra in extras {
             let canonical = extra.canonicalize().unwrap_or_else(|_| extra.clone());
             if !known.contains(&canonical) && canonical.join(".git").exists() {
-                paths.push(Found { path: canonical, seed_tag: None });
+                paths.push(Found { path: canonical, seed: None });
             }
         }
         paths.sort_by(|a, b| a.path.cmp(&b.path));
@@ -76,7 +76,7 @@ pub fn spawn(
                     let Some(found) = next else { return };
                     let event = Event::Repo {
                         info: git::inspect(&found.path),
-                        seed_tag: found.seed_tag,
+                        seed: found.seed,
                     };
                     if tx.send_blocking(event).is_err() {
                         return;

@@ -90,11 +90,21 @@ fn is_git_dir(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
-/// A repository found by discovery, with the tag its root wants seeded on it.
+/// What a root wants tagged on the repositories it finds. `tag` of `None`
+/// means it tags nothing, which retires whatever it applied before.
+#[derive(Debug, Clone)]
+pub struct Seed {
+    /// The root's absolute path, as the bookkeeping key.
+    pub root: String,
+    pub tag: Option<String>,
+}
+
+/// A repository found by discovery, and which root it came from.
 #[derive(Debug, Clone)]
 pub struct Found {
     pub path: PathBuf,
-    pub seed_tag: Option<String>,
+    /// Absent for an individually listed repository, which belongs to no root.
+    pub seed: Option<Seed>,
 }
 
 /// Walk `roots` looking for repositories, at most `max_depth` levels down.
@@ -136,7 +146,11 @@ pub fn discover(roots: &[Root], max_depth: usize) -> Vec<Found> {
 fn record(path: PathBuf, root: &Root, found: &mut Vec<Found>, seen: &mut HashSet<PathBuf>) {
     let key = path.canonicalize().unwrap_or_else(|_| path.clone());
     if seen.insert(key) {
-        found.push(Found { path, seed_tag: root.tag.clone() });
+        let seed = Seed {
+            root: root.path.display().to_string(),
+            tag: root.tag.clone(),
+        };
+        found.push(Found { path, seed: Some(seed) });
     }
 }
 

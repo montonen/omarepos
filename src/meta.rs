@@ -14,9 +14,22 @@ use crate::config::home;
 #[serde(default)]
 pub struct RepoMeta {
     pub tags: Vec<String>,
-    /// Tags a root applied automatically. Kept after the user deletes one, so
-    /// the next scan does not put it back.
-    pub seeded: Vec<String>,
+    /// Seeding records from before it was keyed by root. Read so a tag deleted
+    /// under the old scheme is not reapplied; written back only while it still
+    /// holds something.
+    #[serde(rename = "seeded", skip_serializing_if = "Vec::is_empty")]
+    pub seeded_legacy: Vec<String>,
+    /// The tag each root applied, keyed by the root's absolute path. Keyed
+    /// rather than listed so renaming a root's tag can retire the old one, and
+    /// kept after the user deletes a tag so it is not applied again.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub seeded_by: BTreeMap<String, String>,
+}
+
+impl RepoMeta {
+    fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.seeded_legacy.is_empty() && self.seeded_by.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -97,33 +110,109 @@ impl Meta {
         }
         // An entry with nothing but a seeding record still has to stay, or the
         // tag the user just removed would reappear on the next scan.
-        match self.repos.get_mut(&key) {
-            Some(meta) if !meta.seeded.is_empty() => meta.tags.clear(),
-            _ => {
+        if let Some(meta) = self.repos.get_mut(&key) {
+            meta.tags.clear();
+            if meta.is_empty() {
                 self.repos.remove(&key);
             }
         }
     }
 
-    /// Apply a root's tag the first time this repository is seen. Returns
-    /// whether anything changed, so a scan can save once at the end.
-    pub fn seed(&mut self, repo: &Path, tag: &str) -> bool {
-        let tag = tag.trim();
-        if tag.is_empty() {
-            return false;
-        }
+    /// Reconcile one repository with what `root` currently wants tagged on it.
+    /// `tag` of `None` means the root no longer tags anything, which retires
+    /// whatever it applied before. Returns whether anything changed, so a scan
+    /// can save once at the end.
+    ///
+    /// The root is the unit of bookkeeping: knowing that `~/work/acme` applied
+    /// `acme` is what lets a rename to `client-x` remove `acme` instead of leaving
+    /// both behind. A tag the user deleted stays deleted, because the record
+    /// survives the deletion.
+    pub fn apply_root_tag(&mut self, repo: &Path, root: &str, tag: Option<&str>) -> bool {
+        let tag = tag.map(str::trim).filter(|t| !t.is_empty());
         let key = Self::key(repo);
-        if let Some(meta) = self.repos.get(&key) {
-            if meta.seeded.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
-                return false;
+        let previous = self
+            .repos
+            .get(&key)
+            .and_then(|meta| meta.seeded_by.get(root))
+            .cloned();
+
+        match (&previous, tag) {
+            // Already carries this root's current tag.
+            (Some(before), Some(now)) if before.eq_ignore_ascii_case(now) => return false,
+            // Nothing applied before, nothing to apply now.
+            (None, None) => return false,
+            _ => {}
+        }
+
+        // Under the old flat scheme we cannot tell which root applied a tag,
+        // only that it was applied once. Honour that: record the root so future
+        // renames work, but do not re-add a tag the user has since deleted.
+        let offered_before = previous.is_none()
+            && tag.is_some_and(|t| {
+                self.repos.get(&key).is_some_and(|meta| {
+                    meta.seeded_legacy.iter().any(|seen| seen.eq_ignore_ascii_case(t))
+                })
+            });
+
+        // Renaming a root's tag renames it in place. If the old tag is already
+        // gone the user deleted it, and there is nothing to rename — handing
+        // them the new name would resurrect a tag they rejected.
+        let had_old = previous.as_ref().is_some_and(|before| {
+            self.repos.get(&key).is_some_and(|meta| {
+                meta.tags.iter().any(|t| t.eq_ignore_ascii_case(before))
+            })
+        });
+        let should_add = !offered_before && (previous.is_none() || had_old);
+
+        let entry = self.repos.entry(key.clone()).or_default();
+        if let Some(before) = &previous {
+            entry.tags.retain(|t| !t.eq_ignore_ascii_case(before));
+            if had_old {
+                // We just took that tag off ourselves, so any record saying it
+                // once went missing is ours too. Leaving it would make setting
+                // the same tag again silently do nothing. A record left behind
+                // when `had_old` is false is the real thing: the user removed
+                // the tag, and that still stands.
+                entry.seeded_legacy.retain(|t| !t.eq_ignore_ascii_case(before));
             }
         }
-        let meta = self.repos.entry(key).or_default();
-        meta.seeded.push(tag.to_string());
-        let mut tags = meta.tags.clone();
-        tags.push(tag.to_string());
-        meta.tags = normalize(tags);
+        match tag {
+            Some(tag) => {
+                entry.seeded_by.insert(root.to_string(), tag.to_string());
+                if should_add {
+                    let mut tags = entry.tags.clone();
+                    tags.push(tag.to_string());
+                    entry.tags = normalize(tags);
+                }
+            }
+            None => {
+                entry.seeded_by.remove(root);
+            }
+        }
+        if entry.is_empty() {
+            self.repos.remove(&key);
+        }
         true
+    }
+
+    /// Forget repositories that are gone. Only entries whose *parent* directory
+    /// still exists are dropped: a path that has vanished along with everything
+    /// around it is more likely an unmounted disk than a deleted repository, and
+    /// losing someone's tags to a disk that is merely offline is not worth the
+    /// tidiness. Returns how many entries were dropped.
+    pub fn prune(&mut self) -> usize {
+        let before = self.repos.len();
+        self.repos.retain(|key, _| {
+            let path = Path::new(key);
+            if path.exists() {
+                return true;
+            }
+            match path.parent() {
+                Some(parent) => !parent.exists(),
+                None => true,
+            }
+        });
+        before - self.repos.len()
     }
 
     /// Every tag in use, sorted, with how many repos carry it.
