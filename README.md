@@ -178,7 +178,10 @@ live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
   currently shown, so the filter box doubles as a bulk selector.
 - Editing several at once only replaces the tags they have *in common*; tags
   unique to one of them survive.
-- The **Tags** popover filters the grid. Several ticked tags is an OR. `tag:work`
+- With one or two tags they appear as toggle chips in the header — one click to
+  filter instead of three. From three tags on, the **Tags** popover takes over,
+  since more than that crowds out the title.
+- The popover filters the grid. Several ticked tags is an OR. `tag:work`
   typed in the filter box is an AND, and stacks with the rest of the query —
   `tag:work ruby` means tagged work *and* matching "ruby".
 - Tag colours are derived from the tag's own name, so a tag keeps its colour

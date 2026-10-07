@@ -264,7 +264,7 @@ fn lang_legend(info: &RepoInfo) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     for l in info.langs.iter().take(3) {
         let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        item.append(&dot(&l.color));
+        item.append(&crate::ui::color_dot(&l.color));
         let label = gtk::Label::builder()
             .label(format!("{} {:.0}%", l.name, (l.share * 100.0).round()))
             .ellipsize(pango::EllipsizeMode::End)
@@ -287,7 +287,7 @@ fn tag_row(tags: &[String]) -> gtk::Box {
     for tag in tags.iter().take(SHOWN) {
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         chip.add_css_class("om-tag");
-        chip.append(&dot(crate::ui::key_color(&tag.to_lowercase())));
+        chip.append(&crate::ui::color_dot(crate::ui::key_color(&tag.to_lowercase())));
         let label = gtk::Label::builder()
             .label(tag)
             .ellipsize(pango::EllipsizeMode::End)
@@ -304,24 +304,6 @@ fn tag_row(tags: &[String]) -> gtk::Box {
     }
     row.set_tooltip_text(Some(&tags.join(", ")));
     row
-}
-
-/// A small filled circle in an arbitrary colour. GTK4 has no inline styles, so
-/// per-language colours are drawn rather than set through CSS.
-fn dot(color: &str) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_width(8)
-        .content_height(8)
-        .valign(gtk::Align::Center)
-        .build();
-    let (r, g, b) = Palette::rgb(color);
-    area.set_draw_func(move |_, cr, width, height| {
-        let radius = (width.min(height) as f64) / 2.0;
-        cr.set_source_rgb(r, g, b);
-        cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, std::f64::consts::TAU);
-        let _ = cr.fill();
-    });
-    area
 }
 
 fn footer(info: &RepoInfo) -> gtk::Box {

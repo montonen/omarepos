@@ -270,6 +270,27 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
   color: @om_fg;
 }}
 
+.om-quick-tag {{
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background-color: alpha(@om_fg, 0.08);
+  color: @om_fg;
+  border: 1px solid transparent;
+  box-shadow: none;
+}}
+
+.om-quick-tag:hover {{
+  background-color: alpha(@om_fg, 0.16);
+}}
+
+.om-quick-tag:checked {{
+  background-color: mix(@om_raised, @om_accent, 0.40);
+  border-color: @om_accent;
+  color: @om_fg;
+}}
+
 .om-tag-chip {{
   font-size: 11px;
   border-radius: 999px;

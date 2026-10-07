@@ -57,7 +57,18 @@ struct Ui {
     search: gtk::SearchEntry,
     sort: gtk::DropDown,
     dirty_only: gtk::ToggleButton,
+    tags_button: gtk::MenuButton,
     tags_content: adw::ButtonContent,
+    /// Per-tag toggles shown in the header instead of the popover when there
+    /// are few enough tags to fit.
+    tag_quick: gtk::Box,
+    tag_quick_buttons: RefCell<Vec<(String, gtk::ToggleButton)>>,
+    /// The tag set the quick row was last built from, so it is only rebuilt
+    /// when the tags themselves change rather than on every grid rebuild.
+    tag_signature: RefCell<String>,
+    /// Set while the toggles are being synced, so programmatic changes do not
+    /// come back round as user toggles.
+    tag_syncing: Cell<bool>,
     scroller: gtk::ScrolledWindow,
     /// Lower-cased tags the grid is narrowed to; empty means no tag filter.
     tag_filter: RefCell<BTreeSet<String>>,
@@ -145,6 +156,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .has_frame(false)
         .build();
     header.pack_start(&tags_button);
+
+    let tag_quick = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    tag_quick.set_visible(false);
+    header.pack_start(&tag_quick);
 
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter repos…")
@@ -244,7 +259,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         search: search.clone(),
         sort: sort.clone(),
         dirty_only: dirty_only.clone(),
+        tags_button: tags_button.clone(),
         tags_content,
+        tag_quick: tag_quick.clone(),
+        tag_quick_buttons: RefCell::new(Vec::new()),
+        tag_signature: RefCell::new(String::new()),
+        tag_syncing: Cell::new(false),
         scroller: scroller.clone(),
         tag_filter: RefCell::new(BTreeSet::new()),
         untagged_only: Cell::new(false),
@@ -655,7 +675,7 @@ impl Ui {
             ));
         }
         self.update_selection_label();
-        self.update_tag_label();
+        self.sync_tag_controls();
 
         let scanning = self.spinner.is_visible();
         let page = if repos.is_empty() && !scanning { "empty" } else { "grid" };
@@ -883,13 +903,94 @@ impl Ui {
         });
     }
 
-    fn update_tag_label(&self) {
+    /// Keep the tag chrome in step with the tags that exist and the filter in
+    /// force. Below three tags they become toggles in the header, which is one
+    /// click instead of three; past that they would crowd out the title, so the
+    /// popover takes over.
+    fn sync_tag_controls(self: &Rc<Self>) {
+        const QUICK_LIMIT: usize = 3;
+
+        let tags = self.meta.borrow().all_tags();
+        let quick = !tags.is_empty() && tags.len() < QUICK_LIMIT;
+        let signature = tags
+            .iter()
+            .map(|(tag, count)| format!("{tag}\u{1f}{count}"))
+            .collect::<Vec<_>>()
+            .join("\u{1e}");
+
+        if signature != *self.tag_signature.borrow() {
+            *self.tag_signature.borrow_mut() = signature;
+            self.build_quick_tags(&tags, quick);
+        }
+
+        // Reflect the live filter without the writes bouncing back as toggles.
+        self.tag_syncing.set(true);
+        for (tag, button) in self.tag_quick_buttons.borrow().iter() {
+            button.set_active(self.tag_filter.borrow().contains(&tag.to_lowercase()));
+        }
+        self.tag_syncing.set(false);
+
+        self.tag_quick.set_visible(quick);
         let active = self.tag_filter.borrow().len() + usize::from(self.untagged_only.get());
-        self.tags_content.set_label(&if active > 0 {
+        self.tags_content.set_label(&if quick {
+            // The chips carry the filtering, so the button is only the menu.
+            String::new()
+        } else if active > 0 {
             format!("Tags ({active})")
         } else {
             "Tags".to_string()
         });
+        self.tags_button
+            .set_tooltip_text(Some(if quick {
+                "Tag the selected repos, or filter by untagged"
+            } else {
+                "Filter by tag, or tag the selected repos"
+            }));
+    }
+
+    fn build_quick_tags(self: &Rc<Self>, tags: &[(String, usize)], quick: bool) {
+        while let Some(child) = self.tag_quick.first_child() {
+            self.tag_quick.remove(&child);
+        }
+        self.tag_quick_buttons.borrow_mut().clear();
+        if !quick {
+            return;
+        }
+
+        for (tag, count) in tags {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            content.append(&ui::color_dot(ui::key_color(&tag.to_lowercase())));
+            content.append(&gtk::Label::new(Some(tag)));
+
+            let button = gtk::ToggleButton::builder().child(&content).build();
+            button.add_css_class("om-quick-tag");
+            button.set_tooltip_text(Some(&format!(
+                "{count} {}",
+                if *count == 1 { "repository" } else { "repositories" }
+            )));
+
+            let ui = Rc::clone(self);
+            let key = tag.to_lowercase();
+            button.connect_toggled(move |button| {
+                if ui.tag_syncing.get() {
+                    return;
+                }
+                {
+                    let mut filter = ui.tag_filter.borrow_mut();
+                    if button.is_active() {
+                        filter.insert(key.clone());
+                    } else {
+                        filter.remove(&key);
+                    }
+                }
+                ui.rebuild();
+            });
+
+            self.tag_quick.append(&button);
+            self.tag_quick_buttons
+                .borrow_mut()
+                .push((tag.clone(), button));
+        }
     }
 
     /// Rebuilt on every open, because the set of tags changes under it.
@@ -899,7 +1000,21 @@ impl Ui {
         body.set_width_request(230);
 
         let known = self.meta.borrow().all_tags();
-        if known.is_empty() {
+        let quick = !known.is_empty() && known.len() < 3;
+        if quick {
+            // The header chips already do the filtering; repeating it here
+            // would be two controls for one setting.
+            let untagged = gtk::CheckButton::builder()
+                .label("Untagged only")
+                .active(self.untagged_only.get())
+                .build();
+            let ui = Rc::clone(self);
+            untagged.connect_toggled(move |check| {
+                ui.untagged_only.set(check.is_active());
+                ui.rebuild();
+            });
+            body.append(&untagged);
+        } else if known.is_empty() {
             let hint = gtk::Label::builder()
                 .label("No tags yet.\n\nTick some repos, then\n“Tag selected…”.")
                 .justify(gtk::Justification::Center)

@@ -4,6 +4,8 @@ pub mod graph;
 pub mod stats;
 pub mod window;
 
+use gtk::prelude::*;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -107,6 +109,24 @@ fn spawn(cmd: &mut Command, what: &str) {
     if let Err(err) = result {
         eprintln!("omarepos: could not launch {what}: {err}");
     }
+}
+
+/// A small filled circle in an arbitrary colour. GTK4 has no inline styles, so
+/// per-language colours are drawn rather than set through CSS.
+pub fn color_dot(color: &str) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::builder()
+        .content_width(8)
+        .content_height(8)
+        .valign(gtk::Align::Center)
+        .build();
+    let (r, g, b) = crate::theme::Palette::rgb(color);
+    area.set_draw_func(move |_, cr, width, height| {
+        let radius = (width.min(height) as f64) / 2.0;
+        cr.set_source_rgb(r, g, b);
+        cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+    });
+    area
 }
 
 /// A fixed accent ramp for graph lanes and author colours. Deliberately not
