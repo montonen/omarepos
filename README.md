@@ -305,6 +305,9 @@ local calendar days, bucketed at local midnight.
 - Merge commits count as commits but not as lines — their diffs are their parents'
   work, already counted. The per-author tooltip breaks out how many were merges.
 - Per-day strips are scaled against the busiest author-day, so rows are comparable.
+- A row expands to the work itself: every commit, grouped by repository, with
+  its sha, churn and age. The newest 100 per repository are kept; past that the
+  group says how many older ones there were.
 
 Line counts come from diffing each commit against its first parent, which is the
 expensive part; a week across a dozen repos takes well under a second, but a

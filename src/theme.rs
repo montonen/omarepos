@@ -497,6 +497,28 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
   color: @om_fg;
 }}
 
+/* The author row's header is a button only so it can be opened from the
+   keyboard; it should not look like one. */
+button.om-stat-head {{
+  background: none;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+  outline: 0;
+}}
+
+button.om-stat-head:hover {{
+  background-color: transparent;
+}}
+
+button.om-stat-head:focus-visible {{
+  outline: 2px solid @om_fg;
+  outline-offset: 3px;
+}}
+
 .om-stat-row {{
   padding: 10px 14px;
 }}

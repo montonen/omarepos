@@ -9,7 +9,7 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
-use crate::stats::{self, Author, Contributions};
+use crate::stats::{self, Author, Contributions, RepoCommits};
 use crate::ui::{day_window, key_color, relative_time};
 
 const RANGES: [(&str, usize); 3] = [("Last 7 days", 7), ("Last 14 days", 14), ("Last 30 days", 30)];
@@ -269,12 +269,18 @@ fn big_number(value: &str, caption: &str) -> gtk::Box {
 }
 
 fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
-    row.add_css_class("om-card");
-    row.add_css_class("om-stat-row");
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("om-card");
+    card.add_css_class("om-stat-row");
+
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+
+    let chevron = gtk::Image::from_icon_name("pan-end-symbolic");
+    chevron.set_valign(gtk::Align::Center);
+    head.append(&chevron);
 
     let color = key_color(if author.email.is_empty() { &author.name } else { &author.email });
-    row.append(&swatch(color));
+    head.append(&swatch(color));
 
     let who = gtk::Box::new(gtk::Orientation::Vertical, 2);
     who.set_hexpand(true);
@@ -286,12 +292,16 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
     name.add_css_class("om-name");
     who.append(&name);
 
-    let mut repos: Vec<(&String, &usize)> = author.repos.iter().collect();
-    repos.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut repos: Vec<(&String, &RepoCommits)> = author.repos.iter().collect();
+    repos.sort_by(|a, b| {
+        b.1.total
+            .cmp(&a.1.total)
+            .then_with(|| a.0.cmp(b.0))
+    });
     let repo_line = repos
         .iter()
         .take(4)
-        .map(|(name, n)| format!("{name} {n}"))
+        .map(|(name, in_repo)| format!("{name} {}", in_repo.total))
         .collect::<Vec<_>>()
         .join("  ·  ");
     let extra = repos.len().saturating_sub(4);
@@ -318,7 +328,7 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
         .build();
     detail.add_css_class("om-meta");
     who.append(&detail);
-    row.append(&who);
+    head.append(&who);
 
     let counts = gtk::Box::new(gtk::Orientation::Vertical, 2);
     counts.set_halign(gtk::Align::End);
@@ -343,10 +353,38 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
         .build();
     churn.add_css_class("om-meta");
     counts.append(&churn);
-    row.append(&counts);
+    head.append(&counts);
 
-    row.append(&sparkline(author, result, color));
+    head.append(&sparkline(author, result, color));
 
+    // A button rather than a click gesture, so the row can be opened from the
+    // keyboard like anything else.
+    let toggle = gtk::Button::builder().child(&head).build();
+    toggle.add_css_class("om-stat-head");
+    toggle.set_tooltip_text(Some(&tooltip(author)));
+    card.append(&toggle);
+
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .transition_duration(160)
+        .child(&commit_list(&repos))
+        .build();
+    card.append(&revealer);
+
+    toggle.connect_clicked(move |_| {
+        let opening = !revealer.reveals_child();
+        revealer.set_reveal_child(opening);
+        chevron.set_icon_name(Some(if opening {
+            "pan-down-symbolic"
+        } else {
+            "pan-end-symbolic"
+        }));
+    });
+
+    card.upcast()
+}
+
+fn tooltip(author: &Author) -> String {
     let mut tip = format!(
         "{} <{}>\n{} commits",
         author.name,
@@ -364,9 +402,98 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
         thousands(author.files),
         relative_time(author.last_seen)
     ));
-    row.set_tooltip_text(Some(&tip));
+    tip
+}
 
-    row.upcast()
+/// The author's commits, grouped by repository, busiest first.
+fn commit_list(repos: &[(&String, &RepoCommits)]) -> gtk::Box {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    list.set_margin_top(12);
+    list.set_margin_start(26);
+
+    for (name, in_repo) in repos {
+        let group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        heading.append(&crate::ui::color_dot(key_color(name)));
+        let repo_name = gtk::Label::builder().label(*name).xalign(0.0).build();
+        repo_name.add_css_class("om-summary");
+        heading.append(&repo_name);
+        let count = gtk::Label::new(Some(&format!(
+            "{} {}",
+            in_repo.total,
+            plural(in_repo.total, "commit", "commits")
+        )));
+        count.add_css_class("om-meta");
+        heading.append(&count);
+        group.append(&heading);
+
+        let mut commits = in_repo.commits.clone();
+        commits.sort_by(|a, b| b.when.cmp(&a.when));
+        for commit in &commits {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.add_css_class("om-row");
+
+            let sha = gtk::Label::builder()
+                .label(&commit.short_id)
+                .xalign(0.0)
+                .width_chars(7)
+                .build();
+            sha.add_css_class("om-sha");
+            row.append(&sha);
+
+            let summary = gtk::Label::builder()
+                .label(&commit.summary)
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(pango::EllipsizeMode::End)
+                .build();
+            summary.add_css_class("om-summary");
+            row.append(&summary);
+
+            let churn = gtk::Label::builder()
+                .label(if commit.merge {
+                    "merge".to_string()
+                } else {
+                    format!("+{} −{}", thousands(commit.insertions), thousands(commit.deletions))
+                })
+                .xalign(1.0)
+                .width_chars(14)
+                .build();
+            churn.add_css_class("om-meta");
+            row.append(&churn);
+
+            let when = gtk::Label::builder()
+                .label(relative_time(commit.when))
+                .xalign(1.0)
+                .width_chars(13)
+                .build();
+            when.add_css_class("om-meta");
+            row.append(&when);
+
+            row.set_tooltip_text(Some(&format!(
+                "{}\n{}\n{}",
+                commit.short_id,
+                commit.summary,
+                crate::ui::absolute_time(commit.when)
+            )));
+            group.append(&row);
+        }
+
+        if in_repo.total > commits.len() {
+            let more = gtk::Label::builder()
+                .label(format!("+{} older", in_repo.total - commits.len()))
+                .xalign(0.0)
+                .build();
+            more.add_css_class("om-meta");
+            more.set_margin_start(8);
+            group.append(&more);
+        }
+
+        list.append(&group);
+    }
+
+    list
 }
 
 fn swatch(color: &'static str) -> gtk::DrawingArea {

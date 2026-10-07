@@ -39,6 +39,30 @@ impl Window {
     }
 }
 
+/// One commit, kept so an author's row can be expanded to show the work
+/// rather than only its total.
+#[derive(Debug, Clone)]
+pub struct Commit {
+    pub short_id: String,
+    pub summary: String,
+    pub when: i64,
+    pub insertions: usize,
+    pub deletions: usize,
+    pub merge: bool,
+}
+
+/// An author's commits in one repository. `total` counts them all; `commits`
+/// holds the newest few, so a month over a busy fleet does not keep every
+/// message in memory for a list nobody scrolls that far down.
+#[derive(Debug, Clone, Default)]
+pub struct RepoCommits {
+    pub commits: Vec<Commit>,
+    pub total: usize,
+}
+
+/// Past this, the list is no longer telling anyone anything new.
+pub const MAX_COMMITS_LISTED: usize = 100;
+
 #[derive(Debug, Clone)]
 pub struct Author {
     pub name: String,
@@ -49,8 +73,8 @@ pub struct Author {
     pub deletions: usize,
     pub files: usize,
     pub per_day: Vec<usize>,
-    /// Repository name -> commits in the window.
-    pub repos: BTreeMap<String, usize>,
+    /// Repository name -> what they did there.
+    pub repos: BTreeMap<String, RepoCommits>,
     pub last_seen: i64,
 }
 
@@ -237,7 +261,25 @@ fn collect(
         entry.deletions += deletions;
         entry.files += files;
         entry.per_day[day] += 1;
-        *entry.repos.entry(repo_name.to_string()).or_insert(0) += 1;
+
+        let in_repo = entry.repos.entry(repo_name.to_string()).or_default();
+        in_repo.total += 1;
+        if in_repo.commits.len() < MAX_COMMITS_LISTED {
+            in_repo.commits.push(Commit {
+                short_id: oid.to_string().chars().take(7).collect(),
+                summary: commit
+                    .summary()
+                    .ok()
+                    .flatten()
+                    .unwrap_or("(no message)")
+                    .trim()
+                    .to_string(),
+                when,
+                insertions,
+                deletions,
+                merge: is_merge,
+            });
+        }
         entry.last_seen = entry.last_seen.max(when);
 
         per_day_total[day] += 1;
