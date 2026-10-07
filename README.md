@@ -90,7 +90,7 @@ omarepos [options]
 | `Ctrl+R` / `F5` | Rescan (local only) |
 | `Ctrl+Shift+R` | Fetch now |
 | `Ctrl+L` | Jump to the grid |
-| `Ctrl+F` / `/` | Focus the filter box |
+| `Ctrl+F`, or `/` with the keyboard on a card | Focus the filter box |
 | `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Ctrl+A` | Select every repo shown; again to deselect |

@@ -298,6 +298,7 @@ pub fn page(
         let toasts_for_rows = toasts.clone();
         let load_detail = Rc::clone(&load_detail);
         let page_for_focus = page_for_focus.clone();
+        let detail_for_focus = detail.clone();
         let load_path_for_detail = load_path_for_detail.clone();
         let focus_handler = Rc::clone(&focus_handler);
         Rc::new(move |result: Result<Graph, String>| {
@@ -379,14 +380,22 @@ pub fn page(
                     (None, true) => 0,
                     (None, false) => offset,
                 };
-                if let Some(row) = rows_box.row_at_index(select_at as i32) {
-                    rows_box.select_row(Some(&row));
-                }
-
-                if let Some(index) = graph.target {
-                    let at = index - from + offset;
-                    if let Some(row) = rows_box.row_at_index(at as i32) {
+                let landing = rows_box.row_at_index(select_at as i32);
+                if let Some(row) = &landing {
+                    rows_box.select_row(Some(row));
+                    if graph.target.is_some() {
                         row.add_css_class("om-target");
+                    }
+                }
+                // The keyboard goes where the selection is. Every key this
+                // page answers to is bound on the list, and a page pushed
+                // while it was still loading had nothing to focus but the
+                // header bar: the top row looked chosen, and `l`, `p` and Tab
+                // did nothing until Down had been pressed once. Not when the
+                // keyboard is at work in the pane below, though. A reload
+                // after a commit must not pull it out of the message box.
+                if detail_for_focus.focus_child().is_none() {
+                    if let Some(row) = landing {
                         // Once the list has been laid out, focusing the row
                         // brings it into view; doing it immediately would
                         // scroll against a height the list does not have yet.

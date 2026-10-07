@@ -90,6 +90,9 @@ pub fn pane(
         .build();
     diff_view.add_css_class("om-diff");
     let buffer = diff_view.buffer();
+    // Nobody undoes a diff, and keeping the history of every insert is a cost
+    // paid on each line.
+    buffer.set_enable_undo(false);
     // Text tags are styled through properties rather than CSS, so the line
     // backgrounds are mixed from the theme's own colours here.
     let palette = crate::theme::Palette::load();
@@ -698,6 +701,14 @@ fn syntax_for<'a>(
 /// Paint a unified diff into the buffer: the file's own language highlighted,
 /// with added and removed lines marked by a line background rather than by
 /// colouring the text, so both facts are readable at once.
+/// A line longer than this goes in uncoloured. Highlighting is paid for per
+/// coloured span, by the highlighter and again by the text buffer, and a long
+/// line of minified code is thousands of spans.
+const HIGHLIGHT_MAX_LINE: usize = 2_000;
+/// And past this much text in one diff the rest goes in uncoloured too: four
+/// thousand lines each just under the limit above are still millions of spans.
+const HIGHLIGHT_BUDGET: usize = 256 * 1024;
+
 fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, dark: bool) {
     buffer.set_text("");
     if diff.binary {
@@ -722,6 +733,11 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
     let mut highlighter = theme.map(|theme| {
         syntect::easy::HighlightLines::new(syntax, theme)
     });
+    let mut highlighted = 0usize;
+    // Set when a line went in without the highlighter seeing it. Its idea of
+    // where it is in the syntax is then out of date, the same as after a hunk
+    // boundary, and it starts again.
+    let mut stale = false;
 
     for line in &diff.lines {
         let start = buffer.end_iter().offset();
@@ -743,13 +759,33 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
         let mut end = buffer.end_iter();
         buffer.insert(&mut end, prefix(line.origin));
 
-        let owned = format!("{}\n", line.text);
-        let spans = highlighter
-            .as_mut()
-            .and_then(|h| h.highlight_line(&owned, syntaxes).ok());
+        let spans = if line.text.len() > HIGHLIGHT_MAX_LINE || highlighted > HIGHLIGHT_BUDGET {
+            stale = true;
+            None
+        } else {
+            if stale {
+                if let Some(theme) = theme {
+                    highlighter = Some(syntect::easy::HighlightLines::new(syntax, theme));
+                }
+                stale = false;
+            }
+            highlighted += line.text.len();
+            let owned = format!("{}\n", line.text);
+            highlighter
+                .as_mut()
+                .and_then(|h| h.highlight_line(&owned, syntaxes).ok())
+                // The pieces borrow from `owned`, which does not outlive this
+                // block; keep them as text of their own.
+                .map(|spans| {
+                    spans
+                        .into_iter()
+                        .map(|(style, piece)| (style, piece.to_string()))
+                        .collect::<Vec<_>>()
+                })
+        };
         match spans {
             Some(spans) => {
-                for (style, piece) in spans {
+                for (style, piece) in &spans {
                     let piece = piece.trim_end_matches('\n');
                     if piece.is_empty() {
                         continue;

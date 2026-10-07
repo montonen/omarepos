@@ -405,6 +405,19 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
                 return glib::Propagation::Stop;
             }
 
+            // `/` for the filter, here for the same reason. Shift is allowed:
+            // on a Swedish layout a slash is Shift+7.
+            if key == gdk::Key::slash
+                && !state.intersects(
+                    gdk::ModifierType::CONTROL_MASK
+                        | gdk::ModifierType::ALT_MASK
+                        | gdk::ModifierType::SUPER_MASK,
+                )
+            {
+                nav.search.grab_focus();
+                return glib::Propagation::Stop;
+            }
+
             if key != gdk::Key::space {
                 return glib::Propagation::Proceed;
             }
@@ -555,13 +568,23 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     {
         let ui = Rc::clone(&ui);
         act_search.connect_activate(move |_, _| {
+            // The filter belongs to the grid. With another page in front it is
+            // out of sight, and focusing it would send the keyboard somewhere
+            // the user cannot see what they are typing.
+            if ui.nav.navigation_stack().n_items() > 1 {
+                return;
+            }
             ui.search.grab_focus();
         });
     }
     window.add_action(&act_search);
 
     app.set_accels_for_action("win.refresh", &["<Ctrl>r", "F5"]);
-    app.set_accels_for_action("win.search", &["<Ctrl>f", "slash"]);
+    // Not a bare `slash` as well. An accelerator runs ahead of whatever has
+    // the focus, so with `/` bound here one could not be typed anywhere in
+    // the application: not a path in a commit message, not a branch name in
+    // the commit search. It is handled by the grid, beside `?`.
+    app.set_accels_for_action("win.search", &["<Ctrl>f"]);
     app.set_accels_for_action("win.contributions", &["<Ctrl>g"]);
     app.set_accels_for_action("win.settings", &["<Ctrl>comma"]);
     app.set_accels_for_action("win.fetch", &["<Ctrl><Shift>r"]);

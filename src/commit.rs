@@ -296,10 +296,34 @@ pub struct FileDiff {
     pub lines: Vec<Line>,
     pub truncated: bool,
     pub binary: bool,
+    /// How much text `lines` holds, counted as it is collected.
+    bytes: usize,
 }
 
 /// Past this a diff is not being read, it is being scrolled past.
 const MAX_LINES: usize = 4_000;
+/// A line longer than this is a minified bundle or a one-line JSON file, not
+/// something anybody reads. It is cut here and says so. Shown whole, a single
+/// such line froze the window for the better part of a minute: what a text
+/// view does with a line grows with the square of its length.
+const MAX_LINE_BYTES: usize = 10_000;
+/// All the text one file's diff may hand to the view.
+const MAX_BYTES: usize = 2 << 20;
+
+/// A diff line as it will be shown: decoded, without its line ending, and cut
+/// if it is too long to be worth showing whole.
+fn shown(content: &[u8]) -> String {
+    let text = String::from_utf8_lossy(content);
+    let text = text.trim_end_matches('\n').trim_end_matches('\r');
+    if text.len() <= MAX_LINE_BYTES {
+        return text.to_string();
+    }
+    let mut cut = MAX_LINE_BYTES;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} … {} more bytes on this line", &text[..cut], text.len() - cut)
+}
 
 pub fn spawn_patch(
     repo: PathBuf,
@@ -468,18 +492,14 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
                 text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
             });
             for line_index in 0..lines_in_hunk {
-                if out.lines.len() >= MAX_LINES {
+                if out.lines.len() >= MAX_LINES || out.bytes >= MAX_BYTES {
                     out.truncated = true;
                     return Ok(out);
                 }
                 let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
-                out.lines.push(Line {
-                    origin: line.origin(),
-                    text: String::from_utf8_lossy(line.content())
-                        .trim_end_matches('\n')
-                        .trim_end_matches('\r')
-                        .to_string(),
-                });
+                let text = shown(line.content());
+                out.bytes += text.len();
+                out.lines.push(Line { origin: line.origin(), text });
             }
         }
     }
@@ -531,18 +551,14 @@ fn append_patch(diff: &Diff<'_>, out: &mut FileDiff) {
                 text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
             });
             for line_index in 0..lines_in_hunk {
-                if out.lines.len() >= MAX_LINES {
+                if out.lines.len() >= MAX_LINES || out.bytes >= MAX_BYTES {
                     out.truncated = true;
                     return;
                 }
                 let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
-                out.lines.push(Line {
-                    origin: line.origin(),
-                    text: String::from_utf8_lossy(line.content())
-                        .trim_end_matches('\n')
-                        .trim_end_matches('\r')
-                        .to_string(),
-                });
+                let text = shown(line.content());
+                out.bytes += text.len();
+                out.lines.push(Line { origin: line.origin(), text });
             }
         }
     }
@@ -942,6 +958,51 @@ mod tests {
 
     fn plan(f: &Fleet) -> Result<PushPlan, String> {
         push_plan(&Repository::open(&f.work).unwrap())
+    }
+
+    // ---- a diff the view can survive ---------------------------------------
+
+    /// A committed bundle: one line, most of a megabyte. libgit2 does not call
+    /// this binary, and shown whole it froze the window.
+    #[test]
+    fn a_very_long_line_is_cut_and_says_so() {
+        let _guard = isolate();
+        let dir = scratch("diff-long-line");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "bundle.min.js", &format!("var a={};\n", "x+".repeat(300_000)), "bundle");
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let diff = patch_for(&dir, &head, "bundle.min.js").unwrap();
+
+        let longest = diff.lines.iter().map(|line| line.text.len()).max().unwrap();
+        assert!(longest < MAX_LINE_BYTES + 100, "a line of {longest} bytes reached the view");
+        assert!(
+            diff.lines.iter().any(|line| line.text.ends_with("more bytes on this line")),
+            "a cut line has to say it was cut"
+        );
+
+        // The same file before it is committed takes the other path.
+        write(&dir.join("other.min.js"), &format!("var b={};\n", "y+".repeat(300_000)));
+        let untracked = patch_working(&dir, "other.min.js").unwrap();
+        let longest = untracked.lines.iter().map(|line| line.text.len()).max().unwrap();
+        assert!(longest < MAX_LINE_BYTES + 100, "{longest}");
+    }
+
+    #[test]
+    fn a_diff_stops_at_its_byte_budget_as_well_as_its_line_count() {
+        let _guard = isolate();
+        let dir = scratch("diff-budget");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        // Well under the line limit, several times over the byte budget.
+        let body: String = (0..1_000).map(|i| format!("{i}:{}\n", "z".repeat(8_000))).collect();
+        commit_file(&dir, "wide.txt", &body, "wide");
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let diff = patch_for(&dir, &head, "wide.txt").unwrap();
+
+        assert!(diff.truncated);
+        let total: usize = diff.lines.iter().map(|line| line.text.len()).sum();
+        assert!(total <= MAX_BYTES + MAX_LINE_BYTES, "{total} bytes reached the view");
     }
 
     // ---- the commit box: nothing it cannot finish ---------------------------
