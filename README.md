@@ -47,9 +47,26 @@ sudo pacman -S --needed gtk4 libadwaita rust base-devel
 
 ```bash
 cargo install --path .
+ln -sf ~/.cargo/bin/omarepos ~/.local/bin/omarepos
 install -Dm644 data/se.alphadev.Omarepos.desktop ~/.local/share/applications/se.alphadev.Omarepos.desktop
 install -Dm644 data/se.alphadev.Omarepos.svg ~/.local/share/icons/hicolor/scalable/apps/se.alphadev.Omarepos.svg
 ```
+
+The symlink matters on Omarchy: the Hyprland/uwsm session `PATH` carries
+`~/.local/bin` but not `~/.cargo/bin`, so without it the desktop entry and any
+keybinding both fail to find the binary even though your shell can run it.
+
+### Hyprland keybinding
+
+In `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + R", "Git repos (omarepos)", { launch = "omarepos" })
+```
+
+`launch` wraps the command in `uwsm-app`, which puts it in its own systemd
+scope. Check the key is free first with `omarchy menu keybindings --print`, and
+validate with `hyprctl reload && hyprctl configerrors`.
 
 ## Usage
 
