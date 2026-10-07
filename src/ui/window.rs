@@ -79,6 +79,9 @@ struct Ui {
     expected: Cell<usize>,
     /// Handle of the periodic refresh timer, so it can be rescheduled.
     refresh_source: RefCell<Option<glib::SourceId>>,
+    /// Interval the live timer was armed with, so an unrelated settings change
+    /// does not restart the countdown.
+    refresh_armed: Cell<u64>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -257,6 +260,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         generation: Cell::new(0),
         expected: Cell::new(0),
         refresh_source: RefCell::new(None),
+        refresh_armed: Cell::new(0),
         refreshing: Cell::new(false),
         refresh_progress: Cell::new((0, 0)),
         last_refresh: Cell::new(None),
@@ -727,10 +731,20 @@ impl Ui {
     /// (Re)arm the periodic refresh from the current settings. Called at
     /// startup and after every settings change.
     fn schedule_refresh(self: &Rc<Self>) {
+        let settings = self.cfg.borrow().refresh.clone();
+        let armed = self.refresh_armed.get();
+        if settings.every_minutes == armed
+            && (armed == 0 || self.refresh_source.borrow().is_some())
+        {
+            // Same interval, so leave the running countdown where it is.
+            self.update_status();
+            return;
+        }
+
         if let Some(source) = self.refresh_source.borrow_mut().take() {
             source.remove();
         }
-        let settings = self.cfg.borrow().refresh.clone();
+        self.refresh_armed.set(settings.every_minutes);
         if !settings.enabled() {
             self.update_status();
             return;
@@ -992,11 +1006,23 @@ impl Ui {
                 ui.start_scan();
             }) as Rc<dyn Fn()>
         };
+        let reschedule = {
+            let ui = Rc::clone(self);
+            // Refresh settings change nothing in the grid, so this re-arms the
+            // timer and updates the status line, and stops there.
+            Rc::new(move || ui.schedule_refresh()) as Rc<dyn Fn()>
+        };
         let restyle = {
             let ui = Rc::clone(self);
             Rc::new(move || ui.apply_theme()) as Rc<dyn Fn()>
         };
-        ui::dialogs::settings(&self.window, Rc::clone(&self.cfg), rescan, restyle);
+        ui::dialogs::settings(
+            &self.window,
+            Rc::clone(&self.cfg),
+            rescan,
+            reschedule,
+            restyle,
+        );
     }
 
     fn update_selection_label(&self) {

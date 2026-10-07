@@ -11,14 +11,20 @@ use crate::config::{Config, RootSpec, tildify};
 use crate::meta::{self, Meta};
 
 /// The settings dialog: where repositories are looked for, which tools to
-/// launch, and whether to follow the Omarchy theme. `on_change` runs after any
-/// edit that affects the grid; `on_restyle` after one that affects theming.
+/// launch, how often to refresh, and whether to follow the Omarchy theme.
+///
+/// The callbacks are separate because the costs are: `on_sources` means the
+/// grid's contents changed and a rescan is due, while `on_refresh` only
+/// re-arms a timer. Sharing one callback made flipping a refresh switch
+/// rescan every repository for nothing.
 pub fn settings(
     parent: &impl IsA<gtk::Widget>,
     cfg: Rc<RefCell<Config>>,
-    on_change: Rc<dyn Fn()>,
+    on_sources: Rc<dyn Fn()>,
+    on_refresh: Rc<dyn Fn()>,
     on_restyle: Rc<dyn Fn()>,
 ) {
+    let on_change = on_sources;
     let dialog = adw::PreferencesDialog::builder()
         .title("Settings")
         .content_width(540)
@@ -224,7 +230,7 @@ pub fn settings(
 
     {
         let cfg = Rc::clone(&cfg);
-        let on_change = Rc::clone(&on_change);
+        let on_change = Rc::clone(&on_refresh);
         every.connect_value_notify(move |row| {
             let value = row.value().round().max(0.0) as u64;
             if cfg.borrow().refresh.every_minutes == value {
@@ -237,7 +243,7 @@ pub fn settings(
     }
     {
         let cfg = Rc::clone(&cfg);
-        let on_change = Rc::clone(&on_change);
+        let on_change = Rc::clone(&on_refresh);
         let fast_forward = fast_forward.clone();
         fetch.connect_active_notify(move |switch| {
             let on = switch.is_active();
@@ -255,7 +261,7 @@ pub fn settings(
     }
     {
         let cfg = Rc::clone(&cfg);
-        let on_change = Rc::clone(&on_change);
+        let on_change = Rc::clone(&on_refresh);
         fast_forward.connect_active_notify(move |switch| {
             cfg.borrow_mut().refresh.fast_forward = switch.is_active();
             persist(&cfg);
@@ -264,7 +270,7 @@ pub fn settings(
     }
     {
         let cfg = Rc::clone(&cfg);
-        let on_change = Rc::clone(&on_change);
+        let on_change = Rc::clone(&on_refresh);
         scope.connect_apply(move |entry| {
             let tags = crate::meta::parse_list(&entry.text());
             entry.set_text(&tags.join(", "));
