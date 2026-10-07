@@ -241,15 +241,35 @@ repository is left alone, with the reason reported, when any of these hold:
 | Merge or rebase in progress | You are in the middle of something |
 | Bare, or no commits yet | Nothing to do |
 
-Cleanliness is checked twice — once before the fetch and again immediately
-before the fast-forward — because the fetch takes time and you may have started
-editing during it. The update then runs `git merge --ff-only`, which refuses
-anything that is not a fast-forward even if those checks were wrong. It never
-merges, rebases, stashes, resets, forces, or touches submodules, and it only
-moves the branch you have checked out.
+Cleanliness is checked after the fetch, immediately before the fast-forward,
+because the fetch takes time and you may have started editing during it. The
+update then runs `git merge --ff-only`, which refuses anything that is not a
+fast-forward even if that check was wrong. It never merges, rebases, stashes,
+resets, forces, or touches submodules, and it only moves the branch you have
+checked out.
 
 Untracked files do not block an update: a fast-forward cannot silently
-overwrite one, because git refuses rather than clobbering it.
+overwrite one, because git refuses rather than clobbering it. Ignored files are
+another matter — left to itself, git *does* overwrite an ignored file that is
+in the way of an incoming one, and says nothing. The fast-forward therefore
+runs with `--no-overwrite-ignore`, and git refuses for those too. When a file
+of yours is in the way the repository is fetched and left where it was; its
+card says "held back", and the tooltip quotes git naming the file.
+
+### What runs, and what does not
+
+A pass across the fleet — the timer, the catch-up at launch, and
+`Ctrl+Shift+R` — runs no git hooks, in any repository. A fast-forward would
+otherwise run `post-merge`, and where hooks live in the tree (`core.hooksPath`,
+husky) the hook that runs is the one the fast-forward has just written: code
+nobody has read yet, in a repository nobody is looking at. The same pass also
+switches off the fsmonitor command and the `ext::` transport, the other two
+ways a repository's own config commonly names a command to run.
+
+The cost is that a `post-merge` hook that reinstalls dependencies, or git-lfs's,
+does not fire on a background update. Press `p` on a repository to update it
+with your whole setup in force, hooks included, exactly as your own `git pull`
+would.
 
 ### Why it shells out to `git`
 

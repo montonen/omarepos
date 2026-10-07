@@ -75,20 +75,38 @@ fn explain(stderr: &str, stdout: &str) -> String {
     let lines: Vec<&str> = stderr
         .lines()
         .chain(stdout.lines())
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.trim().is_empty())
         .collect();
 
-    let complaint = lines.iter().find(|line| {
-        let lower = line.to_lowercase();
+    let complaint = lines.iter().position(|line| {
+        let lower = line.trim().to_lowercase();
         lower.starts_with("! ")
             || lower.starts_with("error:")
             || lower.starts_with("fatal:")
             || lower.contains("rejected")
     });
 
-    match complaint.or_else(|| lines.first()) {
-        Some(line) => line.trim_start_matches("! ").trim().to_string(),
-        None => "git failed".to_string(),
+    let Some(at) = complaint.or(if lines.is_empty() { None } else { Some(0) }) else {
+        return "git failed".to_string();
+    };
+    let mut said = lines[at].trim().trim_start_matches("! ").trim().to_string();
+
+    // "The following untracked working tree files would be overwritten by
+    // merge:" names them on the lines underneath, one to a line behind a tab.
+    // Without the names the sentence only says that something is in the way.
+    if said.ends_with(':') {
+        let named: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|line| line.starts_with('\t'))
+            .map(|line| line.trim())
+            .collect();
+        if !named.is_empty() {
+            said.push(' ');
+            said.push_str(&named.iter().take(3).copied().collect::<Vec<_>>().join(", "));
+            if named.len() > 3 {
+                said.push_str(&format!(" and {} more", named.len() - 3));
+            }
+        }
     }
+    said
 }

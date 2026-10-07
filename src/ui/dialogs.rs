@@ -241,7 +241,10 @@ pub fn settings(
 
     let fast_forward = adw::SwitchRow::builder()
         .title("Update the code when it is safe")
-        .subtitle("Fast-forward only, and only a clean tree with no commits of its own")
+        .subtitle(
+            "Fast-forward only, and only a clean tree with no commits of its own. \
+             Runs no git hooks.",
+        )
         .active(cfg.borrow().refresh.fast_forward)
         .sensitive(cfg.borrow().refresh.fetch)
         .build();

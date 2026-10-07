@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
@@ -185,21 +185,37 @@ pub fn last_refresh() -> Option<i64> {
         .and_then(|text| text.trim().parse().ok())
 }
 
-/// Repositories the last pass could not fetch. Kept with the refresh time, in
-/// the state directory: the failure outlives the session that discovered it,
-/// and a card that cannot say why it is stuck is the thing this exists to fix.
+/// What the last pass could not do for a repository.
+///
+/// The two are kept apart because they send the user to different places: a
+/// fetch that failed is about the network or the credentials, and an update
+/// git refused is about something in the working tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Trouble {
+    /// The fetch failed. A bare string on disk, which is all this file held
+    /// before refusals were recorded too.
+    Fetch(String),
+    /// Fetched, but git would not fast-forward.
+    Update { refused: String },
+}
+
+/// Repositories the last pass could not fetch or could not update. Kept with
+/// the refresh time, in the state directory: the failure outlives the session
+/// that discovered it, and a card that cannot say why it is stuck is the thing
+/// this exists to fix.
 pub fn fetch_errors_path() -> PathBuf {
     last_refresh_path().with_file_name("fetch-errors.toml")
 }
 
-pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
+pub fn load_fetch_errors() -> std::collections::BTreeMap<String, Trouble> {
     std::fs::read_to_string(fetch_errors_path())
         .ok()
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default()
 }
 
-pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, String>) {
+pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, Trouble>) {
     let path = fetch_errors_path();
     if errors.is_empty() {
         let _ = std::fs::remove_file(&path);
@@ -478,4 +494,45 @@ impl Config {
 fn which(bin: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::testkit::*;
+
+    #[test]
+    fn troubles_of_both_kinds_survive_being_written_and_read_back() {
+        let _guard = isolate();
+        let mut troubles = BTreeMap::new();
+        // A refusal sorts before a fetch failure here, which is the order a
+        // TOML writer has to be careful with: a table ahead of a plain value.
+        troubles.insert(
+            "/a/held-back".to_string(),
+            Trouble::Update { refused: "would be overwritten by merge: .env".to_string() },
+        );
+        troubles.insert(
+            "/b/unreachable".to_string(),
+            Trouble::Fetch("fatal: could not read from remote repository".to_string()),
+        );
+        save_fetch_errors(&troubles);
+        assert_eq!(load_fetch_errors(), troubles, "{}", read(&fetch_errors_path()));
+
+        save_fetch_errors(&BTreeMap::new());
+        assert!(!fetch_errors_path().exists(), "nothing wrong leaves no file behind");
+    }
+
+    #[test]
+    fn a_file_from_before_refusals_were_recorded_still_reads() {
+        let _guard = isolate();
+        write(&fetch_errors_path(), "\"/old/repo\" = \"timed out after 60s\"\n");
+        let read_back = load_fetch_errors();
+        assert_eq!(
+            read_back.get("/old/repo"),
+            Some(&Trouble::Fetch("timed out after 60s".to_string()))
+        );
+        save_fetch_errors(&BTreeMap::new());
+    }
 }

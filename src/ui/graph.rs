@@ -512,6 +512,7 @@ fn pull(
             fast_forward,
             max_parallel: 1,
             timeout: std::time::Duration::from_secs(120),
+            pass: crate::refresh::Pass::One,
         },
     );
     let toasts = toasts.clone();
@@ -532,6 +533,9 @@ fn pull(
                         }
                         crate::refresh::Outcome::Skipped(skip) => {
                             format!("Left alone: {}", skip.reason())
+                        }
+                        crate::refresh::Outcome::Refused(why) => {
+                            format!("Fetched, not updated. {why}")
                         }
                         crate::refresh::Outcome::Failed(err) => err.clone(),
                     };

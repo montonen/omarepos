@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gtk::pango;
 use gtk::prelude::*;
 
-use crate::config::tildify;
+use crate::config::{Trouble, tildify};
 use crate::git::RepoInfo;
 use crate::theme::Palette;
 use crate::ui::{Action, relative_time};
@@ -20,7 +20,7 @@ pub struct Context<'a> {
     /// What the last refresh pass said, when it had something to complain
     /// about. Otherwise the failure only reaches stderr, which under a desktop
     /// launcher nobody reads.
-    pub fetch_error: Option<&'a str>,
+    pub trouble: Option<&'a Trouble>,
 }
 
 /// Build the card widget. `on_action` is invoked with the repo the user acted
@@ -31,7 +31,7 @@ pub fn build(
     on_action: Rc<dyn Fn(Action, &RepoInfo)>,
     on_select: Rc<dyn Fn(&RepoInfo, bool)>,
 ) -> gtk::Widget {
-    let Context { tags, selected, auto_update, fetch_error } = *ctx;
+    let Context { tags, selected, auto_update, trouble } = *ctx;
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(7)
@@ -100,7 +100,7 @@ pub fn build(
     path.set_tooltip_text(Some(&where_tip));
     card.append(&path);
 
-    card.append(&pills(info, auto_update, fetch_error));
+    card.append(&pills(info, auto_update, trouble));
 
     if !tags.is_empty() {
         card.append(&tag_row(tags));
@@ -178,7 +178,7 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-fn pills(info: &RepoInfo, auto_update: bool, fetch_error: Option<&str>) -> gtk::Box {
+fn pills(info: &RepoInfo, auto_update: bool, trouble: Option<&Trouble>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
 
     if let Some(err) = &info.error {
@@ -254,21 +254,30 @@ fn pills(info: &RepoInfo, auto_update: bool, fetch_error: Option<&str>) -> gtk::
 
         // Behind and unable to catch up are very different situations, and
         // the grid showed them identically.
-        if auto_update {
-            if let Some(reason) = info.update_blocked_by() {
-                let held = pill("held back", "danger");
-                held.set_tooltip_text(Some(&format!(
-                    "These {} commits will not arrive on their own: {reason}.\n\
-                     The background refresh skips this repository until that is resolved.",
-                    info.behind
-                )));
-                row.append(&held);
-            }
+        let blocked = if auto_update { info.update_blocked_by() } else { None };
+        if let Some(reason) = blocked {
+            let held = pill("held back", "danger");
+            held.set_tooltip_text(Some(&format!(
+                "These {} commits will not arrive on their own: {reason}.\n\
+                 The background refresh skips this repository until that is resolved.",
+                info.behind
+            )));
+            row.append(&held);
+        } else if let Some(Trouble::Update { refused }) = trouble {
+            // Nothing the card can see is in the way, and git still said no:
+            // an untracked or ignored file where an incoming one wants to go,
+            // most often. Only git knows, so quote it.
+            let held = pill("held back", "danger");
+            held.set_tooltip_text(Some(&format!(
+                "The last refresh fetched this repository, but git would not \
+                 fast-forward it:\n{refused}\nNothing was changed."
+            )));
+            row.append(&held);
         }
     }
     // A fetch that failed leaves a repository looking merely out of date, and
     // the reason only in a log nobody opens.
-    if let Some(error) = fetch_error {
+    if let Some(Trouble::Fetch(error)) = trouble {
         let p = pill("fetch failed", "danger");
         p.set_tooltip_text(Some(&format!(
             "The last refresh could not fetch this repository:\n{error}"

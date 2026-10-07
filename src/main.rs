@@ -11,6 +11,8 @@ mod refresh;
 mod scan;
 mod search;
 mod stats;
+#[cfg(test)]
+mod testkit;
 mod theme;
 mod ui;
 

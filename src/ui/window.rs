@@ -10,7 +10,7 @@ use gtk::gio;
 use gtk::glib;
 use adw::prelude::*;
 
-use crate::config::Config;
+use crate::config::{Config, Trouble};
 use crate::meta::Meta;
 use crate::refresh::{self, Summary};
 use crate::git::RepoInfo;
@@ -103,9 +103,10 @@ struct Ui {
     refresh_armed: Cell<u64>,
     /// Whether the "is a refresh overdue" question has been asked this run.
     checked_overdue: Cell<bool>,
-    /// Repositories the last refresh could not fetch, and why. Keyed by the
-    /// path as a string so it can be written out and read back.
-    fetch_errors: RefCell<BTreeMap<String, String>>,
+    /// Repositories the last refresh could not fetch or could not update, and
+    /// why. Keyed by the path as a string so it can be written out and read
+    /// back.
+    fetch_errors: RefCell<BTreeMap<String, Trouble>>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -816,9 +817,7 @@ impl Ui {
                 tags: &tags,
                 selected: self.selected.borrow().contains(&info.path),
                 auto_update,
-                fetch_error: errors
-                    .get(&info.path.display().to_string())
-                    .map(String::as_str),
+                trouble: errors.get(&info.path.display().to_string()),
             };
             self.flow.append(&card::build(
                 info,
@@ -1029,6 +1028,9 @@ impl Ui {
                 fast_forward: settings.fast_forward,
                 max_parallel: settings.max_parallel,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
+                // Nobody picked these one by one, whether the timer started
+                // the pass or a key did.
+                pass: refresh::Pass::Fleet,
             },
         );
 
@@ -1042,13 +1044,24 @@ impl Ui {
                         done += 1;
                         ui.refresh_progress.set((done, total));
                         summary.add(&report.outcome);
+                        let key = report.path.display().to_string();
                         match &report.outcome {
                             refresh::Outcome::Failed(err) => {
                                 ui.fetch_errors
                                     .borrow_mut()
-                                    .insert(report.path.display().to_string(), err.clone());
+                                    .insert(key.clone(), Trouble::Fetch(err.clone()));
                                 eprintln!(
                                     "omarepos: {} failed: {err} ({})",
+                                    report.name,
+                                    report.path.display()
+                                );
+                            }
+                            refresh::Outcome::Refused(why) => {
+                                ui.fetch_errors
+                                    .borrow_mut()
+                                    .insert(key.clone(), Trouble::Update { refused: why.clone() });
+                                eprintln!(
+                                    "omarepos: {} fetched but not updated: {why} ({})",
                                     report.name,
                                     report.path.display()
                                 );
@@ -1070,10 +1083,11 @@ impl Ui {
                             }
                             _ => {}
                         }
-                        if !matches!(report.outcome, refresh::Outcome::Failed(_)) {
-                            ui.fetch_errors
-                                .borrow_mut()
-                                .remove(&report.path.display().to_string());
+                        if !matches!(
+                            report.outcome,
+                            refresh::Outcome::Failed(_) | refresh::Outcome::Refused(_)
+                        ) {
+                            ui.fetch_errors.borrow_mut().remove(&key);
                         }
                         ui.update_status();
                     }
@@ -1088,7 +1102,7 @@ impl Ui {
             ui.last_refresh.set(Some(finished));
             crate::config::record_refresh(finished);
             crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
-            if manual || summary.updated > 0 || summary.failed > 0 {
+            if manual || summary.updated > 0 || summary.failed > 0 || summary.refused > 0 {
                 ui.toasts.add_toast(adw::Toast::new(&summary.line()));
             }
             // Re-read local state so the cards show what the fetch changed.
@@ -1611,6 +1625,7 @@ impl Ui {
                 fast_forward,
                 max_parallel: 1,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
+                pass: refresh::Pass::One,
             },
         );
         let ui = Rc::clone(self);
@@ -1629,6 +1644,9 @@ impl Ui {
                             }
                             refresh::Outcome::Skipped(skip) => {
                                 format!("{name} left alone: {}", skip.reason())
+                            }
+                            refresh::Outcome::Refused(why) => {
+                                format!("{name}: fetched, not updated. {why}")
                             }
                             refresh::Outcome::Failed(err) => format!("{name}: {err}"),
                         };
