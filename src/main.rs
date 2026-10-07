@@ -68,7 +68,7 @@ fn main() -> glib::ExitCode {
         }
     }
     if !roots.is_empty() {
-        cfg.roots = roots;
+        cfg.roots = roots.into_iter().map(config::RootSpec::Simple).collect();
     }
     let cfg = Rc::new(RefCell::new(cfg));
 

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 
-use crate::config::{Config, tildify};
+use crate::config::{Config, RootSpec, tildify};
 use crate::meta::{self, Meta};
 
 /// The settings dialog: where repositories are looked for, which tools to
@@ -49,7 +49,7 @@ pub fn settings(
 
     // Both lists are rebuilt wholesale after each edit; they are short, and it
     // keeps add and remove from needing to agree about row identity.
-    let listed: Rc<RefCell<Vec<(adw::PreferencesGroup, adw::ActionRow)>>> =
+    let listed: Rc<RefCell<Vec<(adw::PreferencesGroup, gtk::Widget)>>> =
         Rc::new(RefCell::new(Vec::new()));
     // The row builders need to call themselves after an edit.
     let rebuild: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
@@ -78,16 +78,16 @@ pub fn settings(
                     .subtitle("Nothing will be scanned until you add a folder.")
                     .build();
                 roots_group.add(&row);
-                added.push((roots_group.clone(), row));
+                added.push((roots_group.clone(), row.upcast()));
             }
-            for entry in roots {
-                let row = removable_row(&entry, "Remove this root", {
+            for spec in roots {
+                let row = root_row(&spec, Rc::clone(&cfg), Rc::clone(&on_change), {
                     let cfg = Rc::clone(&cfg);
                     let rebuild = Rc::clone(&rebuild);
                     let on_change = Rc::clone(&on_change);
-                    let entry = entry.clone();
+                    let path = crate::config::expand(spec.path_str());
                     move || {
-                        cfg.borrow_mut().remove_root(&crate::config::expand(&entry));
+                        cfg.borrow_mut().remove_root(&path);
                         persist(&cfg);
                         if let Some(f) = rebuild.borrow().clone() {
                             f();
@@ -96,7 +96,7 @@ pub fn settings(
                     }
                 });
                 roots_group.add(&row);
-                added.push((roots_group.clone(), row));
+                added.push((roots_group.clone(), row.upcast()));
             }
 
             for entry in extras {
@@ -116,7 +116,7 @@ pub fn settings(
                     }
                 });
                 repos_group.add(&row);
-                added.push((repos_group.clone(), row));
+                added.push((repos_group.clone(), row.upcast()));
             }
 
             *listed.borrow_mut() = added;
@@ -271,6 +271,139 @@ fn add_button(label: &str) -> gtk::Button {
                 .build(),
         )
         .build()
+}
+
+/// One scan root, with its options behind an expander. Options are written
+/// straight through on change; only add and remove rebuild the list, so
+/// toggling a switch does not collapse the row under the pointer.
+fn root_row(
+    spec: &RootSpec,
+    cfg: Rc<RefCell<Config>>,
+    on_change: Rc<dyn Fn()>,
+    on_remove: impl Fn() + 'static,
+) -> adw::ExpanderRow {
+    let resolved = spec.resolve();
+    let path = resolved.path.clone();
+
+    let row = adw::ExpanderRow::builder()
+        .title(spec.path_str())
+        .subtitle(root_summary(&resolved))
+        .build();
+
+    let remove = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove this root")
+        .valign(gtk::Align::Center)
+        .build();
+    remove.add_css_class("flat");
+    remove.connect_clicked(move |_| on_remove());
+    row.add_suffix(&remove);
+
+    let nested = adw::SwitchRow::builder()
+        .title("Look inside repositories")
+        .subtitle("Follow the clones this folder's own repository ignores")
+        .active(resolved.nested)
+        .build();
+    let tag = adw::EntryRow::builder()
+        .title("Tag what is found here")
+        .show_apply_button(true)
+        .build();
+    tag.set_text(resolved.tag.as_deref().unwrap_or(""));
+    let include_self = adw::SwitchRow::builder()
+        .title("Show the containing repository")
+        .active(resolved.include_self)
+        .sensitive(resolved.nested)
+        .build();
+
+    row.add_row(&nested);
+    row.add_row(&tag);
+    row.add_row(&include_self);
+
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        let path = path.clone();
+        let row = row.clone();
+        let include_self = include_self.clone();
+        nested.connect_active_notify(move |switch| {
+            let on = switch.is_active();
+            cfg.borrow_mut().update_root(&path, |entry| {
+                entry.nested = on;
+                // The default flips with `nested`, so an untouched switch
+                // should keep following the default rather than freeze.
+                if !on {
+                    entry.include_self = None;
+                }
+            });
+            include_self.set_sensitive(on);
+            if !on {
+                include_self.set_active(true);
+            }
+            persist(&cfg);
+            refresh_summary(&cfg, &path, &row);
+            on_change();
+        });
+    }
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        let path = path.clone();
+        let row = row.clone();
+        tag.connect_apply(move |entry| {
+            let value = entry.text().trim().to_string();
+            cfg.borrow_mut().update_root(&path, |root| {
+                root.tag = if value.is_empty() { None } else { Some(value.clone()) };
+            });
+            persist(&cfg);
+            refresh_summary(&cfg, &path, &row);
+            on_change();
+        });
+    }
+    {
+        let cfg = Rc::clone(&cfg);
+        let on_change = Rc::clone(&on_change);
+        let path = path.clone();
+        let row = row.clone();
+        include_self.connect_active_notify(move |switch| {
+            let on = switch.is_active();
+            cfg.borrow_mut().update_root(&path, |entry| {
+                entry.include_self = Some(on);
+            });
+            persist(&cfg);
+            refresh_summary(&cfg, &path, &row);
+            on_change();
+        });
+    }
+
+    row
+}
+
+fn root_summary(root: &crate::config::Root) -> String {
+    let mut parts = Vec::new();
+    if !root.path.exists() {
+        parts.push("missing".to_string());
+    }
+    if root.nested {
+        parts.push("workspace".to_string());
+        if !root.include_self {
+            parts.push("container hidden".to_string());
+        }
+    }
+    if let Some(tag) = &root.tag {
+        parts.push(format!("tagged {tag}"));
+    }
+    parts.join(" · ")
+}
+
+fn refresh_summary(cfg: &Rc<RefCell<Config>>, path: &std::path::Path, row: &adw::ExpanderRow) {
+    let cfg = cfg.borrow();
+    if let Some(spec) = cfg
+        .roots
+        .iter()
+        .find(|spec| crate::config::expand(spec.path_str()) == path)
+    {
+        row.set_subtitle(&root_summary(&spec.resolve()));
+    }
 }
 
 fn removable_row(

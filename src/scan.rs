@@ -7,12 +7,17 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::git::{self, RepoInfo};
+use crate::config::Root;
+use crate::git::{self, Found, RepoInfo};
 
 pub enum Event {
     /// Discovery finished: this many repositories are on their way.
     Discovered(usize),
-    Repo(RepoInfo),
+    Repo {
+        info: RepoInfo,
+        /// Tag the root it was found under wants seeded on it.
+        seed_tag: Option<String>,
+    },
     Done,
 }
 
@@ -20,7 +25,7 @@ pub enum Event {
 /// `Repo` per repository, then `Done`. `extras` are individually added
 /// repositories, included whether or not they sit under a root.
 pub fn spawn(
-    roots: Vec<PathBuf>,
+    roots: Vec<Root>,
     extras: Vec<PathBuf>,
     max_depth: usize,
 ) -> async_channel::Receiver<Event> {
@@ -30,16 +35,20 @@ pub fn spawn(
         let mut paths = git::discover(&roots, max_depth);
         let known: std::collections::HashSet<PathBuf> = paths
             .iter()
-            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .map(|found| {
+                found
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| found.path.clone())
+            })
             .collect();
         for extra in extras {
             let canonical = extra.canonicalize().unwrap_or_else(|_| extra.clone());
             if !known.contains(&canonical) && canonical.join(".git").exists() {
-                paths.push(canonical);
+                paths.push(Found { path: canonical, seed_tag: None });
             }
         }
-        paths.sort();
-        paths.dedup();
+        paths.sort_by(|a, b| a.path.cmp(&b.path));
         if tx.send_blocking(Event::Discovered(paths.len())).is_err() {
             return;
         }
@@ -64,8 +73,12 @@ pub fn spawn(
                         };
                         guard.next()
                     };
-                    let Some(path) = next else { return };
-                    if tx.send_blocking(Event::Repo(git::inspect(&path))).is_err() {
+                    let Some(found) = next else { return };
+                    let event = Event::Repo {
+                        info: git::inspect(&found.path),
+                        seed_tag: found.seed_tag,
+                    };
+                    if tx.send_blocking(event).is_err() {
                         return;
                     }
                 }

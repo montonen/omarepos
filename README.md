@@ -108,8 +108,10 @@ Three ways, in order of convenience:
 
 1. **Settings** (`Ctrl+,` or the gear in the header) — add a scan root with a
    folder picker, add a single repository that lives anywhere, or change how deep
-   the scan goes. Edits are written to the config file immediately and the grid
-   rescans.
+   the scan goes. Each root expands to its own options: whether to look inside
+   repositories, a tag to apply to what it finds, and whether the containing
+   repository itself gets a card. Edits are written to the config file
+   immediately and the grid rescans.
 2. **The config file**, `~/.config/omarepos/config.toml`: `roots` for folders to
    search, `extra_repos` for individual repositories outside them.
 3. **`--root <PATH>`** on the command line, repeatable, for a one-off look at
@@ -120,11 +122,42 @@ repository it finds, so `~/code` picks up `~/code/foo` and `~/code/plugins/bar`
 without ever walking into their contents. `extra_repos` entries are included
 whatever their depth, which is the escape hatch for a repo in an awkward place.
 
+### Workspace repositories
+
+Some folders are themselves a repository that holds nothing but other people's
+clones — a `.gitignore` of `*`, a README, and thirty checkouts beside them.
+Stopping at the first `.git` finds the wrapper and misses everything in it.
+
+Mark such a root as a *workspace*, in settings or in the config file:
+
+```toml
+roots = [
+  "~/code",
+  { path = "~/work/acme", nested = true, tag = "acme" },
+]
+```
+
+`nested` lifts the stop-at-`.git` rule for that folder, and **only** for the
+subdirectories the folder's own repository *ignores*. That is the whole test,
+and it is the right one: a parked clone is ignored, while a submodule is
+tracked. Submodule paths are then excluded outright as well, so an unusual
+ignore configuration cannot let one in by accident. Below that first level the
+normal rule applies again — a clone's own submodules stay out of the grid.
+
+`tag` tags what is found there the first time each repository is seen, so thirty
+new cards do not drown the ones you had. The seeding is recorded, so a tag you
+delete stays deleted rather than reappearing on the next scan.
+
+`include_self` controls whether the wrapper repository gets a card of its own.
+It defaults to false for a workspace, since a repo that ignores everything has
+nothing to report.
+
 ## Tags
 
 Tags are omarepos's own metadata — nothing is written into your repositories. They
 live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
 
+- A root can tag what it discovers — see *Workspace repositories* above.
 - Tag one repo from its `⋮` menu, or several at once: tick their checkboxes, then
   **Tags → Tag N selected…**. With nothing ticked, that button tags everything
   currently shown, so the filter box doubles as a bulk selector.
@@ -180,8 +213,12 @@ Everything here is also editable from the settings dialog, which rewrites this
 file (and drops your comments when it does).
 
 ```toml
-# Directories to scan. `~` is expanded.
-roots = ["~/code", "~/work"]
+# Directories to scan. `~` is expanded. A root is either a bare path, or a
+# table when it needs options.
+roots = [
+  "~/code",
+  { path = "~/work/acme", nested = true, tag = "acme", include_self = false },
+]
 
 # Individual repositories, included wherever they live.
 extra_repos = ["~/.config/omarchy"]

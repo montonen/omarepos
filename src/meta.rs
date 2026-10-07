@@ -14,6 +14,9 @@ use crate::config::home;
 #[serde(default)]
 pub struct RepoMeta {
     pub tags: Vec<String>,
+    /// Tags a root applied automatically. Kept after the user deletes one, so
+    /// the next scan does not put it back.
+    pub seeded: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,11 +91,39 @@ impl Meta {
     pub fn set_tags(&mut self, repo: &Path, tags: Vec<String>) {
         let tags = normalize(tags);
         let key = Self::key(repo);
-        if tags.is_empty() {
-            self.repos.remove(&key);
-        } else {
+        if !tags.is_empty() {
             self.repos.entry(key).or_default().tags = tags;
+            return;
         }
+        // An entry with nothing but a seeding record still has to stay, or the
+        // tag the user just removed would reappear on the next scan.
+        match self.repos.get_mut(&key) {
+            Some(meta) if !meta.seeded.is_empty() => meta.tags.clear(),
+            _ => {
+                self.repos.remove(&key);
+            }
+        }
+    }
+
+    /// Apply a root's tag the first time this repository is seen. Returns
+    /// whether anything changed, so a scan can save once at the end.
+    pub fn seed(&mut self, repo: &Path, tag: &str) -> bool {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            return false;
+        }
+        let key = Self::key(repo);
+        if let Some(meta) = self.repos.get(&key) {
+            if meta.seeded.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                return false;
+            }
+        }
+        let meta = self.repos.entry(key).or_default();
+        meta.seeded.push(tag.to_string());
+        let mut tags = meta.tags.clone();
+        tags.push(tag.to_string());
+        meta.tags = normalize(tags);
+        true
     }
 
     /// Every tag in use, sorted, with how many repos carry it.

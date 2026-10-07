@@ -1,6 +1,15 @@
 # Copy to ~/.config/omarepos/config.toml and edit. Every key is optional.
 
-roots = ["~/code"]
+# A root is a bare path, or a table when it needs options.
+roots = [
+  "~/code",
+
+  # A "workspace": a repository that holds nothing but other clones. `nested`
+  # follows the subdirectories this folder's own repository ignores — which
+  # admits parked clones and excludes submodules, since those are tracked.
+  # `tag` tags what is found, once, so you can filter it back out of the grid.
+  # { path = "~/work/acme", nested = true, tag = "acme", include_self = false },
+]
 
 # Individual repositories outside the roots above.
 extra_repos = []

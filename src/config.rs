@@ -34,11 +34,110 @@ pub fn tildify(path: &Path) -> String {
     }
 }
 
+
+/// A configured scan root. Written either as a bare path, or as a table when
+/// it needs options:
+///
+/// ```toml
+/// roots = ["~/code", { path = "~/work/acme", nested = true, tag = "acme" }]
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RootSpec {
+    Simple(String),
+    Detailed(RootEntry),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootEntry {
+    pub path: String,
+    /// Look inside repositories found here, rather than stopping at the first
+    /// `.git`. Only the subdirectories the containing repository *ignores* are
+    /// followed, which admits a workspace full of clones but not submodules.
+    #[serde(default)]
+    pub nested: bool,
+    /// Tag applied to repositories discovered here, the first time each is seen.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Whether the containing repository itself appears in the grid. Defaults
+    /// to false for a nested root, true otherwise.
+    #[serde(default)]
+    pub include_self: Option<bool>,
+}
+
+impl RootEntry {
+    /// True when nothing but the path is set, so it can be written as a string.
+    fn is_plain(&self) -> bool {
+        !self.nested && self.tag.is_none() && self.include_self.is_none()
+    }
+}
+
+impl RootSpec {
+    pub fn path_str(&self) -> &str {
+        match self {
+            RootSpec::Simple(path) => path,
+            RootSpec::Detailed(entry) => &entry.path,
+        }
+    }
+
+    fn to_entry(&self) -> RootEntry {
+        match self {
+            RootSpec::Simple(path) => RootEntry {
+                path: path.clone(),
+                nested: false,
+                tag: None,
+                include_self: None,
+            },
+            RootSpec::Detailed(entry) => entry.clone(),
+        }
+    }
+
+    /// Resolved form, with `~` expanded and the defaults filled in.
+    pub fn resolve(&self) -> Root {
+        let entry = self.to_entry();
+        Root {
+            path: expand(&entry.path),
+            include_self: entry.include_self.unwrap_or(!entry.nested),
+            nested: entry.nested,
+            tag: entry.tag.filter(|t| !t.trim().is_empty()),
+        }
+    }
+
+    fn to_toml(&self) -> String {
+        match self {
+            RootSpec::Simple(path) => format!("{path:?}"),
+            RootSpec::Detailed(entry) => {
+                let mut parts = vec![format!("path = {:?}", entry.path)];
+                if entry.nested {
+                    parts.push("nested = true".to_string());
+                }
+                if let Some(tag) = &entry.tag {
+                    parts.push(format!("tag = {tag:?}"));
+                }
+                if let Some(include) = entry.include_self {
+                    parts.push(format!("include_self = {include}"));
+                }
+                format!("{{ {} }}", parts.join(", "))
+            }
+        }
+    }
+}
+
+/// A scan root with everything resolved, as discovery wants it.
+#[derive(Debug, Clone)]
+pub struct Root {
+    pub path: PathBuf,
+    pub nested: bool,
+    pub tag: Option<String>,
+    pub include_self: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Directories to scan for repositories.
-    pub roots: Vec<String>,
+    pub roots: Vec<RootSpec>,
     /// Individual repositories to include regardless of where they live.
     pub extra_repos: Vec<String>,
     /// How many directory levels below each root to look for a `.git`.
@@ -54,7 +153,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            roots: vec!["~/code".to_string()],
+            roots: vec![RootSpec::Simple("~/code".to_string())],
             extra_repos: Vec::new(),
             max_depth: 3,
             terminal: None,
@@ -93,8 +192,8 @@ impl Config {
         }
     }
 
-    pub fn roots(&self) -> Vec<PathBuf> {
-        self.roots.iter().map(|r| expand(r)).collect()
+    pub fn roots(&self) -> Vec<Root> {
+        self.roots.iter().map(RootSpec::resolve).collect()
     }
 
     pub fn extra_repos(&self) -> Vec<PathBuf> {
@@ -108,16 +207,38 @@ impl Config {
 
     /// Returns false when the root was already listed.
     pub fn add_root(&mut self, path: &Path) -> bool {
-        let candidate = Self::store(path);
-        if self.roots.iter().any(|r| expand(r) == path) {
+        if self.roots.iter().any(|r| expand(r.path_str()) == path) {
             return false;
         }
-        self.roots.push(candidate);
+        self.roots.push(RootSpec::Simple(Self::store(path)));
         true
     }
 
     pub fn remove_root(&mut self, path: &Path) {
-        self.roots.retain(|r| expand(r) != path);
+        self.roots.retain(|r| expand(r.path_str()) != path);
+    }
+
+    /// Edit one root's options, collapsing it back to a bare string when the
+    /// edit leaves nothing but the path.
+    pub fn update_root(&mut self, path: &Path, mutate: impl FnOnce(&mut RootEntry)) {
+        for spec in self.roots.iter_mut() {
+            if expand(spec.path_str()) != path {
+                continue;
+            }
+            let mut entry = spec.to_entry();
+            mutate(&mut entry);
+            if let Some(tag) = &entry.tag {
+                if tag.trim().is_empty() {
+                    entry.tag = None;
+                }
+            }
+            *spec = if entry.is_plain() {
+                RootSpec::Simple(entry.path)
+            } else {
+                RootSpec::Detailed(entry)
+            };
+            return;
+        }
     }
 
     pub fn add_extra_repo(&mut self, path: &Path) -> bool {
@@ -148,8 +269,14 @@ impl Config {
                 .join(", ")
         };
         let mut out = String::from("# omarepos configuration — written by the app.\n\n");
-        out.push_str("# Directories scanned for repositories.\n");
-        out.push_str(&format!("roots = [{}]\n\n", list(&self.roots)));
+        out.push_str("# Directories scanned for repositories. A root can be a bare path, or a\n");
+        out.push_str("# table: { path = \"...\", nested = true, tag = \"...\", include_self = false }.\n");
+        out.push_str("# `nested` looks inside a repository for the clones it ignores.\n");
+        out.push_str("roots = [\n");
+        for spec in &self.roots {
+            out.push_str(&format!("    {},\n", spec.to_toml()));
+        }
+        out.push_str("]\n\n");
         out.push_str("# Individual repositories included wherever they live.\n");
         out.push_str(&format!("extra_repos = [{}]\n\n", list(&self.extra_repos)));
         out.push_str("# Levels below each root to search for a `.git`.\n");

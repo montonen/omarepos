@@ -417,7 +417,7 @@ impl Ui {
             .borrow()
             .roots
             .iter()
-            .map(|r| r.trim().to_string())
+            .map(|r| r.path_str().trim().to_string())
             .collect::<Vec<_>>()
             .join("  ");
         self.subtitle
@@ -462,6 +462,9 @@ impl Ui {
         let rx = scan::spawn(roots, extras, depth);
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
+            // Roots that seed a tag write to the metadata store as repos come
+            // in; saving once at the end keeps it to a single write.
+            let mut seeded_any = false;
             while let Ok(event) = rx.recv().await {
                 if ui.generation.get() != generation {
                     break;
@@ -471,11 +474,21 @@ impl Ui {
                         ui.expected.set(n);
                         ui.update_status();
                     }
-                    Event::Repo(info) => {
+                    Event::Repo { info, seed_tag } => {
+                        if let Some(tag) = seed_tag {
+                            if ui.meta.borrow_mut().seed(&info.path, &tag) {
+                                seeded_any = true;
+                            }
+                        }
                         ui.repos.borrow_mut().push(info);
                         ui.rebuild();
                     }
                     Event::Done => {
+                        if seeded_any {
+                            if let Err(err) = ui.meta.borrow().save() {
+                                eprintln!("omarepos: could not write the tag file: {err}");
+                            }
+                        }
                         ui.spinner.stop();
                         ui.spinner.set_visible(false);
                         ui.rebuild();

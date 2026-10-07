@@ -1,10 +1,11 @@
 //! Repository discovery and inspection via libgit2.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository, StatusOptions};
 
+use crate::config::Root;
 use crate::lang;
 
 #[derive(Debug, Clone)]
@@ -89,38 +90,62 @@ fn is_git_dir(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
+/// A repository found by discovery, with the tag its root wants seeded on it.
+#[derive(Debug, Clone)]
+pub struct Found {
+    pub path: PathBuf,
+    pub seed_tag: Option<String>,
+}
+
 /// Walk `roots` looking for repositories, at most `max_depth` levels down.
-/// Once a directory is recognised as a repository we stop descending into it,
-/// so vendored checkouts inside `node_modules` or `vendor/` stay out of sight.
-pub fn discover(roots: &[PathBuf], max_depth: usize) -> Vec<PathBuf> {
+///
+/// A repository normally ends the descent, so vendored checkouts and
+/// submodules inside a project stay out of sight. A root marked `nested` lifts
+/// that for its own directory only: the repository there is opened and the
+/// subdirectories it *ignores* are followed, which is exactly the shape of a
+/// workspace full of independent clones. Submodules are tracked rather than
+/// ignored, so they are still skipped. Below that first level the normal rule
+/// applies again.
+pub fn discover(roots: &[Root], max_depth: usize) -> Vec<Found> {
     let mut found = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
+
     for root in roots {
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if is_git_dir(&root) && seen.insert(root.clone()) {
-            found.push(root);
+        let base = root.path.canonicalize().unwrap_or_else(|_| root.path.clone());
+
+        if !is_git_dir(&base) {
+            walk(&base, 1, max_depth, root, &mut found, &mut seen);
             continue;
         }
-        walk(&root, 1, max_depth, &mut found, &mut seen);
+
+        if !root.nested {
+            record(base, root, &mut found, &mut seen);
+            continue;
+        }
+
+        if root.include_self {
+            record(base.clone(), root, &mut found, &mut seen);
+        }
+        descend_workspace(&base, root, max_depth, &mut found, &mut seen);
     }
-    found.sort();
+
+    found.sort_by(|a, b| a.path.cmp(&b.path));
     found
 }
 
-fn walk(
-    dir: &Path,
-    depth: usize,
-    max_depth: usize,
-    found: &mut Vec<PathBuf>,
-    seen: &mut std::collections::HashSet<PathBuf>,
-) {
-    if depth > max_depth {
-        return;
+fn record(path: PathBuf, root: &Root, found: &mut Vec<Found>, seen: &mut HashSet<PathBuf>) {
+    let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if seen.insert(key) {
+        found.push(Found { path, seed_tag: root.tag.clone() });
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+}
+
+/// Directories worth looking at inside `dir`: no dotfiles, and none of the
+/// places a checkout is vendored rather than worked on.
+fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut children = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_dir() {
             continue;
@@ -130,17 +155,80 @@ fn walk(
         if name.starts_with('.') || matches!(name.as_ref(), "node_modules" | "vendor" | "target") {
             continue;
         }
-        children.push(path);
+        children.push(entry.path());
     }
-    for path in children {
-        if is_git_dir(&path) {
-            let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-            if seen.insert(key) {
-                found.push(path);
-            }
+    children
+}
+
+/// Follow the children a workspace repository disclaims.
+fn descend_workspace(
+    base: &Path,
+    root: &Root,
+    max_depth: usize,
+    found: &mut Vec<Found>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    let repo = Repository::open(base).ok();
+    let submodules = submodule_paths(repo.as_ref());
+    for child in child_dirs(base) {
+        if !disclaimed(repo.as_ref(), base, &child, &submodules) {
             continue;
         }
-        walk(&path, depth + 1, max_depth, found, seen);
+        if is_git_dir(&child) {
+            record(child, root, found, seen);
+        } else {
+            // Not a repository itself, but the workspace does not own it
+            // either — a grouping folder. Carry on under the normal rule.
+            walk(&child, 2, max_depth, root, found, seen);
+        }
+    }
+}
+
+/// Does `repo` ignore `child`? A directory it ignores is not part of it, which
+/// is what separates a parked clone from a submodule.
+///
+/// The path is tested exactly as it is, with no trailing separator: a
+/// `.gitignore` of `*` matches `sub/` on the rules alone, and only the
+/// slash-free form makes libgit2 consult the index and report a tracked
+/// submodule as not ignored. Submodule paths are then excluded outright, so an
+/// unusual ignore configuration cannot let one through either.
+fn disclaimed(
+    repo: Option<&Repository>,
+    base: &Path,
+    child: &Path,
+    submodules: &HashSet<PathBuf>,
+) -> bool {
+    let Some(repo) = repo else { return false };
+    let Ok(relative) = child.strip_prefix(base) else { return false };
+    if submodules.contains(relative) {
+        return false;
+    }
+    repo.is_path_ignored(relative).unwrap_or(false)
+}
+
+fn submodule_paths(repo: Option<&Repository>) -> HashSet<PathBuf> {
+    repo.and_then(|repo| repo.submodules().ok())
+        .map(|modules| modules.iter().map(|m| m.path().to_path_buf()).collect())
+        .unwrap_or_default()
+}
+
+fn walk(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    root: &Root,
+    found: &mut Vec<Found>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    for path in child_dirs(dir) {
+        if is_git_dir(&path) {
+            record(path, root, found, seen);
+            continue;
+        }
+        walk(&path, depth + 1, max_depth, root, found, seen);
     }
 }
 
