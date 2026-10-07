@@ -74,11 +74,13 @@ omarepos [options]
 | `Alt+←` | Back to the grid |
 | `Ctrl+Q` | Quit |
 | Click a card, or `Enter` on a focused one | Open its commit graph |
+| `Space` on a focused card | Tick it for the contributions scope |
 
 The filter matches repo name, path, branch, remote and language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind, or
-unreadable. Each card's checkbox adds it to the contributions scope; the `⋮`
-menu holds the terminal, editor and clipboard actions.
+unreadable. Each card's checkbox adds it to the contributions scope — once
+anything is ticked the rest of the grid dims, so the selection stays visible
+while you scroll. The `⋮` menu holds the terminal, editor and clipboard actions.
 
 ## Adding repositories
 

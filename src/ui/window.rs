@@ -774,6 +774,11 @@ impl Ui {
 
     fn update_selection_label(&self) {
         let selected = self.selected.borrow().len();
+        if selected > 0 {
+            self.flow.add_css_class("om-has-selection");
+        } else {
+            self.flow.remove_css_class("om-has-selection");
+        }
         self.contrib_content.set_label(&if selected > 0 {
             format!("Contributions ({selected})")
         } else {

@@ -238,12 +238,22 @@ dropdown.om-sort > button {{
 
 .om-card.om-selected {{
   border-color: @om_accent;
-  background-color: mix(@om_raised, @om_accent, 0.14);
-  box-shadow: inset 0 0 0 1px @om_accent;
+  background-color: mix(@om_raised, @om_accent, 0.22);
+  box-shadow: inset 0 0 0 2px @om_accent;
 }}
 
 .om-card.om-selected:hover {{
-  background-color: mix(@om_raised, @om_accent, 0.22);
+  background-color: mix(@om_raised, @om_accent, 0.30);
+}}
+
+/* A muted theme accent cannot carry the highlight on its own, so once
+   anything is selected the rest of the grid steps back. */
+flowbox.om-flow.om-has-selection .om-card:not(.om-selected) {{
+  opacity: 0.42;
+}}
+
+flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
+  opacity: 0.85;
 }}
 
 .om-card.om-selected checkbutton check {{
