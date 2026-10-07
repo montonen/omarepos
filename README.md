@@ -304,11 +304,33 @@ they actually did.
   at it.
 - Pills are refs — the current branch, other local branches, tags, remote branches.
 - Activating a row — `Enter` or a click — copies its full sha.
+- The pane below shows what the selected commit changed, and follows the cursor
+  as you walk the history. `Ctrl+D` or the header button hides it, and that
+  choice is remembered.
 - The newest 500 commits are shown; the status bar says so when there are more.
   Lanes past the sixteenth are clipped rather than squeezed.
 
 Every branch is walked, not just the one checked out, so a commit that only exists
 on a side branch still appears.
+
+### What a commit changed
+
+The pane below the graph lists the files, as a tree rather than a flat list —
+ten paths sharing `src/Orders.Api.Application/Checkout/` are a wall of
+identical prefixes otherwise. A chain of folders holding one thing each
+collapses into a single row.
+
+Each file carries its status (added, modified, deleted, renamed), and `+`/`−`.
+Renames are detected, so a moved file reads as one fact rather than a delete and
+an add. Binary files say so instead of claiming no lines changed.
+
+A merge is diffed **against its first parent**, which shows what the merge
+brought in rather than everything on both sides; the totals line says so.
+
+Reading a diff costs more than reading a commit header, and the pane reloads
+whenever the cursor moves, so it runs off the main thread, waits for the cursor
+to settle, and abandons a read the moment you move on. Holding `Down` through a
+history does not queue a hundred diffs.
 
 ## Contributions
 

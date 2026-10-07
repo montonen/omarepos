@@ -1,4 +1,5 @@
 pub mod card;
+pub mod commit;
 pub mod dialogs;
 pub mod graph;
 pub mod search;

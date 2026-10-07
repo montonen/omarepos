@@ -204,6 +204,9 @@ pub struct Config {
     pub terminal_runs: Option<String>,
     /// Follow the active Omarchy theme and restyle when it changes.
     pub follow_omarchy_theme: bool,
+    /// Keep the commit detail pane open below the graph. A graph read for its
+    /// shape rather than its contents wants the full height.
+    pub commit_detail: bool,
     /// Background refresh settings.
     pub refresh: Refresh,
 }
@@ -218,6 +221,7 @@ impl Default for Config {
             editor: None,
             terminal_runs: None,
             follow_omarchy_theme: true,
+            commit_detail: true,
             refresh: Refresh::default(),
         }
     }
@@ -359,6 +363,7 @@ impl Config {
             "\nfollow_omarchy_theme = {}\n",
             self.follow_omarchy_theme
         ));
+        out.push_str(&format!("commit_detail = {}\n", self.commit_detail));
 
         // A table has to come after every bare key, so this stays last.
         let refresh = &self.refresh;

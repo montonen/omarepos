@@ -455,6 +455,44 @@ listbox.om-results > row {{
 
 /* The commit you followed a search result to. It has to be findable at a
    glance in a list of three hundred near-identical rows. */
+.om-detail {{
+  background-color: @om_sunken;
+  border-top: 1px solid @om_border;
+}}
+
+.om-status {{
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: 700;
+  min-width: 14px;
+  color: @om_dim;
+}}
+
+.om-status.added {{
+  color: {green};
+}}
+
+.om-status.deleted {{
+  color: {red};
+}}
+
+.om-status.renamed {{
+  color: {cyan};
+}}
+
+.om-status.modified {{
+  color: {yellow};
+}}
+
+paned > separator {{
+  background-color: @om_border;
+  min-height: 2px;
+}}
+
+listbox.om-results > row:selected {{
+  background-color: alpha(@om_fg, 0.10);
+}}
+
 listbox.om-results > row.om-target {{
   background-color: mix(@om_raised, @om_accent, 0.38);
   box-shadow: inset 3px 0 0 0 @om_accent;

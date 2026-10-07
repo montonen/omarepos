@@ -1,5 +1,6 @@
 //! omarepos — an Omarchy-styled overview of every git repo on your machine.
 
+mod commit;
 mod config;
 mod git;
 mod graph;

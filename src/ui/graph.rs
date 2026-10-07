@@ -35,6 +35,8 @@ pub fn page(
     path: &Path,
     name: &str,
     target: Option<String>,
+    detail_open: bool,
+    on_detail_toggled: Rc<dyn Fn(bool)>,
     on_contributions: Rc<dyn Fn(PathBuf)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new(name, &tildify(path));
@@ -52,6 +54,14 @@ pub fn page(
     }
     header.pack_end(&contributions);
 
+    let detail_toggle = gtk::ToggleButton::builder()
+        .icon_name("view-paged-symbolic")
+        .tooltip_text("Show what each commit changed (Ctrl+D)")
+        .has_frame(false)
+        .active(detail_open)
+        .build();
+    header.pack_end(&detail_toggle);
+
     let spinner = gtk::Spinner::new();
     spinner.start();
     let loading = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -63,9 +73,10 @@ pub fn page(
     loading.append(&loading_label);
 
     // A list box so rows take focus, arrow keys walk them, and Enter means
-    // the same thing a click does.
+    // the same thing a click does. Browse selection makes the selection follow
+    // the cursor, which is what drives the detail pane below.
     let rows_box = gtk::ListBox::new();
-    rows_box.set_selection_mode(gtk::SelectionMode::None);
+    rows_box.set_selection_mode(gtk::SelectionMode::Browse);
     rows_box.add_css_class("om-results");
     rows_box.set_margin_top(8);
     rows_box.set_margin_bottom(12);
@@ -85,9 +96,46 @@ pub fn page(
         .description("This repository has no history yet.")
         .build();
 
+    // The detail goes *below* the graph rather than beside it: the window is
+    // often half a tiled screen, where a vertical split leaves neither half
+    // usable, and height is the one thing such a window has to spare.
+    let (detail, load_detail) = crate::ui::commit::pane();
+    let split = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .start_child(&scroller)
+        .end_child(&detail)
+        .resize_start_child(true)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .build();
+    detail.set_visible(detail_open);
+
+    {
+        // A fixed split is wrong at both ends — cramped on a short window,
+        // wasteful on a tall one. Take a share of the height once, the first
+        // time there is a height to take a share of, then leave it to the user.
+        // Rc, not a bare Cell: cloning a Cell copies the value, so the flag
+        // would never actually stick and a later map would undo the user's drag.
+        let placed = Rc::new(std::cell::Cell::new(false));
+        split.connect_map(move |split| {
+            if placed.get() {
+                return;
+            }
+            let split = split.clone();
+            let placed_flag = Rc::clone(&placed);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                let height = split.height();
+                if height > 0 && !placed_flag.get() {
+                    split.set_position((height as f64 * 0.62) as i32);
+                    placed_flag.set(true);
+                }
+            });
+        });
+    }
+
     let stack = gtk::Stack::new();
     stack.add_named(&loading, Some("loading"));
-    stack.add_named(&scroller, Some("graph"));
+    stack.add_named(&split, Some("graph"));
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
@@ -113,9 +161,32 @@ pub fn page(
         .child(&view)
         .build();
 
+    {
+        let detail = detail.clone();
+        detail_toggle.connect_toggled(move |button| {
+            detail.set_visible(button.is_active());
+            on_detail_toggled(button.is_active());
+        });
+    }
+    {
+        // Ctrl+D, scoped to this page rather than the window, so it means
+        // nothing anywhere else.
+        let detail_toggle = detail_toggle.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if key == gtk::gdk::Key::d && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                detail_toggle.set_active(!detail_toggle.is_active());
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        page.add_controller(keys);
+    }
+
     // Loading happens off the main thread; a big repo takes a moment.
     let (tx, rx) = async_channel::bounded(1);
     let load_path = path.to_path_buf();
+    let load_path_for_detail = path.to_path_buf();
     let wanted = target.clone();
     std::thread::spawn(move || {
         let _ = tx.send_blocking(graph::build(
@@ -153,6 +224,11 @@ pub fn page(
                     rows_box.append(&row_widget(row, width));
                 }
 
+                let select_at = graph.target.map(|index| index - from).unwrap_or(0);
+                if let Some(row) = rows_box.row_at_index(select_at as i32) {
+                    rows_box.select_row(Some(&row));
+                }
+
                 if let Some(index) = graph.target {
                     let at = index - from;
                     if let Some(row) = rows_box.row_at_index(at as i32) {
@@ -168,6 +244,24 @@ pub fn page(
                         );
                     }
                 }
+                {
+                    // The pane follows the cursor: walking history and seeing
+                    // what each commit touched is the point of having it.
+                    let ids = ids.clone();
+                    let repo = load_path_for_detail.clone();
+                    let load_detail = Rc::clone(&load_detail);
+                    rows_box.connect_row_selected(move |_, row| {
+                        let Some(row) = row else { return };
+                        let index = row.index();
+                        if index < 0 {
+                            return;
+                        }
+                        if let Some(id) = ids.get(index as usize) {
+                            load_detail(repo.clone(), id.clone());
+                        }
+                    });
+                }
+
                 rows_box.connect_row_activated(move |_, row| {
                     let index = row.index();
                     if index < 0 {

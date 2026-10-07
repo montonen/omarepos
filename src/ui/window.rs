@@ -1392,7 +1392,24 @@ impl Ui {
         (repos, scope)
     }
 
-    fn open_graph(&self, info: &RepoInfo) {
+    /// Remembering whether the detail pane is open, so it is not re-opened on
+    /// every graph after being closed once.
+    fn detail_prefs(self: &Rc<Self>) -> (bool, Rc<dyn Fn(bool)>) {
+        let open = self.cfg.borrow().commit_detail;
+        let ui = Rc::clone(self);
+        let remember: Rc<dyn Fn(bool)> = Rc::new(move |open| {
+            if ui.cfg.borrow().commit_detail == open {
+                return;
+            }
+            ui.cfg.borrow_mut().commit_detail = open;
+            if let Err(err) = ui.cfg.borrow().save() {
+                eprintln!("omarepos: could not write the config file: {err}");
+            }
+        });
+        (open, remember)
+    }
+
+    fn open_graph(self: &Rc<Self>, info: &RepoInfo) {
         if let Some(err) = &info.error {
             self.toasts
                 .add_toast(adw::Toast::new(&format!("{}: {err}", info.name)));
@@ -1406,8 +1423,15 @@ impl Ui {
                 .unwrap_or_else(|| path.display().to_string());
             nav.push(&ui::stats::page(vec![path], name));
         });
-        self.nav
-            .push(&ui::graph::page(&info.path, &info.name, None, on_contributions));
+        let (open, remember) = self.detail_prefs();
+        self.nav.push(&ui::graph::page(
+            &info.path,
+            &info.name,
+            None,
+            open,
+            remember,
+            on_contributions,
+        ));
     }
 
     /// Search commits across the ticked repositories, or everything shown.
@@ -1419,6 +1443,7 @@ impl Ui {
             return;
         }
         let nav = self.nav.clone();
+        let (open, remember) = self.detail_prefs();
         let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
             Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
             let nav_inner = nav.clone();
@@ -1429,7 +1454,14 @@ impl Ui {
                     .unwrap_or_else(|| path.display().to_string());
                 nav_inner.push(&ui::stats::page(vec![path], name));
             });
-                nav.push(&ui::graph::page(&path, &name, commit, on_contributions));
+                nav.push(&ui::graph::page(
+                    &path,
+                    &name,
+                    commit,
+                    open,
+                    Rc::clone(&remember),
+                    on_contributions,
+                ));
             });
         self.nav.push(&ui::search::page(repos, scope, on_open));
     }
