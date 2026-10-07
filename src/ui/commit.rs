@@ -8,7 +8,7 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
-use crate::commit::{self, Cancel, Detail, Group, Node, Target};
+use crate::commit::{self, Cancel, Detail, Group, Node, Target, Write};
 use crate::ui::{absolute_time, relative_time};
 
 /// Holding Down through a graph walks a commit per frame. Waiting for the
@@ -17,7 +17,9 @@ const SETTLE_MS: u64 = 120;
 
 /// Build the pane. The returned closure loads a commit into it; calling it
 /// again abandons whatever was still loading.
-pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
+/// `on_changed` fires after a write: `true` when a commit was made, which means
+/// the history the caller is showing is now out of date.
+pub fn pane(on_changed: Rc<dyn Fn(bool)>) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
     let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
     header.set_margin_top(10);
     header.set_margin_start(14);
@@ -109,7 +111,6 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
     // the outer one could not.
     let inner = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .start_child(&scroller)
         .end_child(&diff_scroller)
         .resize_start_child(false)
         .shrink_start_child(false)
@@ -121,6 +122,25 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
         .ellipsize(pango::EllipsizeMode::End)
         .build();
     totals.add_css_class("om-statusbar");
+
+    // The message box belongs with the files it commits, not with the diff.
+    let message = gtk::Entry::builder()
+        .placeholder_text("Commit message…")
+        .hexpand(true)
+        .build();
+    message.add_css_class("om-search");
+    let commit_button = gtk::Button::with_label("Commit");
+    commit_button.add_css_class("suggested-action");
+    let commit_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    commit_box.add_css_class("om-commit");
+    commit_box.append(&message);
+    commit_box.append(&commit_button);
+    commit_box.set_visible(false);
+
+    let left = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    left.append(&scroller);
+    left.append(&commit_box);
+    inner.set_start_child(Some(&left));
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("om-detail");
@@ -135,6 +155,54 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
     let showing: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
     let patching: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     let patch_generation = Rc::new(RefCell::new(0u64));
+    let staged_count = Rc::new(std::cell::Cell::new(0usize));
+
+    // Reloading after a write: the same path the pane already uses, so there is
+    // one way for its contents to arrive.
+    let reload: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
+    {
+        let showing = Rc::clone(&showing);
+        let staged_count = Rc::clone(&staged_count);
+        let reload = Rc::clone(&reload);
+        let message = message.clone();
+        let totals = totals.clone();
+        let on_changed = Rc::clone(&on_changed);
+        commit_button.connect_clicked(move |button| {
+            let Some((repo, Target::Working)) = showing.borrow().clone() else { return };
+            let text = message.text().to_string();
+            if let Some(reason) = commit::why_not_commit(&repo, staged_count.get(), &text) {
+                totals.set_label(&reason);
+                return;
+            }
+            button.set_sensitive(false);
+            totals.set_label("Committing…");
+
+            let rx = commit::spawn_commit(repo, text);
+            let button = button.clone();
+            let message = message.clone();
+            let totals = totals.clone();
+            let reload = Rc::clone(&reload);
+            let on_changed = Rc::clone(&on_changed);
+            glib::spawn_future_local(async move {
+                let result = rx.recv().await;
+                button.set_sensitive(true);
+                match result {
+                    Ok(Ok(sha)) => {
+                        message.set_text("");
+                        totals.set_label(&format!("Committed {sha}"));
+                        if let Some(reload) = reload.borrow().clone() {
+                            reload();
+                        }
+                        on_changed(true);
+                    }
+                    // A hook that refuses is quoted rather than paraphrased.
+                    Ok(Err(err)) => totals.set_label(&err),
+                    Err(_) => totals.set_label("The commit could not be started"),
+                }
+            });
+        });
+    }
 
     {
         let showing = Rc::clone(&showing);
@@ -181,6 +249,10 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
     let load: Rc<dyn Fn(PathBuf, Target)> = {
         let generation = Rc::clone(&generation);
         let running = Rc::clone(&running);
+        let showing = Rc::clone(&showing);
+        let reload = Rc::clone(&reload);
+        let staged_count = Rc::clone(&staged_count);
+        let on_changed = Rc::clone(&on_changed);
         Rc::new(move |repo: PathBuf, target: Target| {
             let mine = {
                 let mut counter = generation.borrow_mut();
@@ -201,6 +273,10 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
             let totals = totals.clone();
             let showing = Rc::clone(&showing);
             let buffer = buffer.clone();
+            let commit_box = commit_box.clone();
+            let staged_count = Rc::clone(&staged_count);
+            let reload = Rc::clone(&reload);
+            let on_changed = Rc::clone(&on_changed);
 
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
@@ -219,8 +295,40 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
                 files.remove_all();
                 buffer.set_text("");
 
+                let working = matches!(*showing.borrow(), Some((_, Target::Working)));
+                commit_box.set_visible(working);
+                // Staging only exists for the working tree; a commit's files
+                // are already committed.
+                let writer: Option<Rc<dyn Fn(Write, String)>> = working.then(|| {
+                    let showing = Rc::clone(&showing);
+                    let reload = Rc::clone(&reload);
+                    let on_changed = Rc::clone(&on_changed);
+                    let totals = totals.clone();
+                    Rc::new(move |what: Write, file: String| {
+                        let Some((repo, _)) = showing.borrow().clone() else { return };
+                        let rx = commit::spawn_write(repo, what, vec![file]);
+                        let reload = Rc::clone(&reload);
+                        let on_changed = Rc::clone(&on_changed);
+                        let totals = totals.clone();
+                        glib::spawn_future_local(async move {
+                            match rx.recv().await {
+                                Ok(Ok(())) => {
+                                    if let Some(reload) = reload.borrow().clone() {
+                                        reload();
+                                    }
+                                    on_changed(false);
+                                }
+                                Ok(Err(err)) => totals.set_label(&err),
+                                Err(_) => {}
+                            }
+                        });
+                    }) as Rc<dyn Fn(Write, String)>
+                });
+
                 match result {
                     Ok(detail) => {
+                        staged_count
+                            .set(detail.files.iter().filter(|f| f.group == Group::Staged).count());
                         subject.set_label(&detail.summary);
                         subject.set_tooltip_text(Some(&format!(
                             "{}\n{} <{}>\n{}",
@@ -248,7 +356,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
                             }
                             let mut members = Vec::new();
                             for node in commit::tree(&in_group) {
-                                let row = row(&node);
+                                let row = row(&node, writer.as_ref());
                                 members.push(row.clone());
                                 files.append(&row);
                             }
@@ -304,6 +412,19 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>) {
             });
         })
     };
+
+    {
+        // Reloading is just loading again, so there is one way for the pane's
+        // contents to arrive.
+        let load = Rc::clone(&load);
+        let showing = Rc::clone(&showing);
+        *reload.borrow_mut() = Some(Rc::new(move || {
+            let current = showing.borrow().clone();
+            if let Some((repo, target)) = current {
+                load(repo, target);
+            }
+        }));
+    }
 
     (root.upcast(), load)
 }
@@ -597,7 +718,7 @@ fn prefix(origin: char) -> &'static str {
     }
 }
 
-fn row(node: &Node) -> gtk::ListBoxRow {
+fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBoxRow {
     match node {
         Node::Dir { name, depth } => {
             let label = gtk::Label::builder()
@@ -647,6 +768,30 @@ fn row(node: &Node) -> gtk::ListBoxRow {
                 .build();
             churn.add_css_class("om-meta");
             line.append(&churn);
+
+            if let Some(on_write) = on_write {
+                // Whole files only. Staging a hunk is a different tool.
+                let staged = file.group == Group::Staged;
+                let button = gtk::Button::builder()
+                    .icon_name(if staged {
+                        "list-remove-symbolic"
+                    } else {
+                        "list-add-symbolic"
+                    })
+                    .tooltip_text(if staged { "Unstage this file" } else { "Stage this file" })
+                    .has_frame(false)
+                    .valign(gtk::Align::Center)
+                    .build();
+                let on_write = Rc::clone(on_write);
+                let path = file.path.clone();
+                button.connect_clicked(move |_| {
+                    on_write(
+                        if staged { Write::Unstage } else { Write::Stage },
+                        path.clone(),
+                    );
+                });
+                line.append(&button);
+            }
 
             let mut tip = file.path.clone();
             if let Some(from) = &file.from {

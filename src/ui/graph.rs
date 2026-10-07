@@ -100,7 +100,21 @@ pub fn page(
     // The detail goes *below* the graph rather than beside it: the window is
     // often half a tiled screen, where a vertical split leaves neither half
     // usable, and height is the one thing such a window has to spare.
-    let (detail, load_detail) = crate::ui::commit::pane();
+    // A write in the pane can change the history this page is drawing, so the
+    // page reloads rather than quietly going stale under the user.
+    let reload_page: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_changed: Rc<dyn Fn(bool)> = {
+        let reload_page = Rc::clone(&reload_page);
+        Rc::new(move |committed: bool| {
+            if !committed {
+                return;
+            }
+            if let Some(reload) = reload_page.borrow().clone() {
+                reload();
+            }
+        })
+    };
+    let (detail, load_detail) = crate::ui::commit::pane(on_changed);
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
         .start_child(&scroller)
@@ -185,23 +199,28 @@ pub fn page(
     }
 
     // Loading happens off the main thread; a big repo takes a moment.
-    let (tx, rx) = async_channel::bounded(1);
     let load_path = path.to_path_buf();
     let load_path_for_detail = path.to_path_buf();
     let page_for_focus = page.clone();
     let wanted = target.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send_blocking(graph::build(
-            &load_path,
-            COMMIT_LIMIT,
-            wanted.as_deref(),
-        ));
-    });
+    // One handler slot for the focus watcher: reloading must replace it rather
+    // than stack another one on the window.
+    let focus_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
 
-    let toasts_for_rows = toasts.clone();
-    glib::spawn_future_local(async move {
-        let Ok(result) = rx.recv().await else { return };
-        match result {
+    // Populating is separate from loading, so a commit can ask for it again.
+    let populate: Rc<dyn Fn(Result<Graph, String>)> = {
+        let rows_box = rows_box.clone();
+        let stack = stack.clone();
+        let status = status.clone();
+        let empty = empty.clone();
+        let toasts_for_rows = toasts.clone();
+        let load_detail = Rc::clone(&load_detail);
+        let page_for_focus = page_for_focus.clone();
+        let load_path_for_detail = load_path_for_detail.clone();
+        let focus_handler = Rc::clone(&focus_handler);
+        Rc::new(move |result: Result<Graph, String>| {
+            rows_box.remove_all();
+            match result {
             Ok(graph) if graph.rows.is_empty() => {
                 stack.set_visible_child_name("empty");
                 status.set_label("no commits");
@@ -297,6 +316,7 @@ pub fn page(
                         );
                     }
                 }
+                let toasts_for_rows = toasts_for_rows.clone();
                 rows_box.connect_row_activated(move |_, row| {
                     let index = row.index();
                     if index < 0 {
@@ -318,6 +338,7 @@ pub fn page(
                     &working,
                     &working_count,
                     Rc::clone(&load_detail),
+                    Rc::clone(&focus_handler),
                 );
 
                 stack.set_visible_child_name("graph");
@@ -330,7 +351,30 @@ pub fn page(
                 status.set_label(&err);
             }
         }
-    });
+        })
+    };
+
+    let start_load: Rc<dyn Fn()> = {
+        let populate = Rc::clone(&populate);
+        let load_path = load_path.clone();
+        let wanted = wanted.clone();
+        Rc::new(move || {
+            let (tx, rx) = async_channel::bounded(1);
+            let path = load_path.clone();
+            let target = wanted.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(graph::build(&path, COMMIT_LIMIT, target.as_deref()));
+            });
+            let populate = Rc::clone(&populate);
+            glib::spawn_future_local(async move {
+                if let Ok(result) = rx.recv().await {
+                    populate(result);
+                }
+            });
+        })
+    };
+    *reload_page.borrow_mut() = Some(Rc::clone(&start_load));
+    start_load();
 
     page
 }
@@ -372,10 +416,15 @@ fn watch_working_tree(
     working: &gtk::ListBoxRow,
     count_label: &gtk::Label,
     load_detail: Rc<dyn Fn(PathBuf, crate::commit::Target)>,
+    handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
 ) {
     let Some(window) = page.root().and_downcast::<gtk::Window>() else { return };
 
-    let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+    // A reload populates the page again; without this the window would collect
+    // one handler per commit, each holding widgets that no longer exist.
+    if let Some(previous) = handler.borrow_mut().take() {
+        window.disconnect(previous);
+    }
     {
         let repo = repo.to_path_buf();
         let rows = rows.clone();

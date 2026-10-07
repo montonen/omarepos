@@ -3,6 +3,7 @@
 mod commit;
 mod config;
 mod git;
+mod gitcmd;
 mod graph;
 mod lang;
 mod meta;

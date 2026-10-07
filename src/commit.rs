@@ -613,3 +613,70 @@ pub fn tree(files: &[FileChange]) -> Vec<Node> {
     walk(&root, String::new(), 0, &mut out);
     out
 }
+
+/// How long a `git` write is given. Generous, because a `pre-commit` hook can
+/// be a test suite.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a commit was refused for, as a sentence rather than a subprocess error.
+pub fn why_not_commit(path: &Path, staged: usize, message: &str) -> Option<String> {
+    if message.trim().is_empty() {
+        return Some("Write a commit message first.".into());
+    }
+    if staged == 0 {
+        return Some("Nothing is staged. Stage a file to commit it.".into());
+    }
+    let state = Repository::open(path).map(|r| r.state()).ok()?;
+    if state != git2::RepositoryState::Clean {
+        // omarepos has no conflict story and must not pretend otherwise.
+        return Some(format!(
+            "This repository is in the middle of something ({state:?}). Finish or abort it in a terminal."
+        ));
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Write {
+    Stage,
+    Unstage,
+}
+
+/// Stage or unstage whole files. Never a hunk: see ADR-0004 — hunk staging is
+/// the heart of a committing tool, and this is not one.
+pub fn spawn_write(
+    repo: PathBuf,
+    what: Write,
+    files: Vec<String>,
+) -> async_channel::Receiver<Result<(), String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let mut args: Vec<&str> = match what {
+            Write::Stage => vec!["add", "--"],
+            // `restore --staged` leaves the working tree alone; `reset` would
+            // be the older spelling of the same thing.
+            Write::Unstage => vec!["restore", "--staged", "--"],
+        };
+        args.extend(files.iter().map(String::as_str));
+        let _ = tx.send_blocking(crate::gitcmd::run(&repo, &args, WRITE_TIMEOUT).map(|_| ()));
+    });
+    rx
+}
+
+/// Commit what is staged. `-m` only: no `-a`, no `--amend`, nothing that could
+/// take in work the user has not looked at or rewrite what is already there.
+pub fn spawn_commit(
+    repo: PathBuf,
+    message: String,
+) -> async_channel::Receiver<Result<String, String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let result = crate::gitcmd::run(&repo, &["commit", "-m", &message], WRITE_TIMEOUT)
+            .and_then(|_| {
+                crate::gitcmd::run(&repo, &["rev-parse", "--short=8", "HEAD"], WRITE_TIMEOUT)
+            })
+            .map(|sha| sha.trim().to_string());
+        let _ = tx.send_blocking(result);
+    });
+    rx
+}

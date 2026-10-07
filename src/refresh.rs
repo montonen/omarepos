@@ -14,9 +14,8 @@
 //! merge --ff-only` refuses anything else even if the checks here were wrong.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use git2::{BranchType, Repository, RepositoryState, StatusOptions};
 
@@ -138,7 +137,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(skip));
     }
 
-    if let Err(err) = run_git(path, &["fetch", "--quiet"], options.timeout) {
+    if let Err(err) = crate::gitcmd::run(path, &["fetch", "--quiet"], options.timeout) {
         return report(Outcome::Failed(err));
     }
 
@@ -168,8 +167,8 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(Skip::Dirty));
     }
 
-    match run_git(path, &["merge", "--ff-only", "--quiet", "@{u}"], options.timeout) {
-        Ok(()) => report(Outcome::FastForwarded(behind)),
+    match crate::gitcmd::run(path, &["merge", "--ff-only", "--quiet", "@{u}"], options.timeout) {
+        Ok(_) => report(Outcome::FastForwarded(behind)),
         Err(err) => report(Outcome::Failed(err)),
     }
 }
@@ -232,58 +231,6 @@ fn is_dirty(repo: &Repository) -> bool {
         }),
         // Unreadable status is not a licence to proceed.
         Err(_) => true,
-    }
-}
-
-/// Run git in `dir`, refusing to block on a prompt and giving up after
-/// `timeout`. Returns git's own stderr on failure.
-fn run_git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
-    let mut command = Command::new("git");
-    command
-        .current_dir(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // Without this a repository needing credentials parks on a prompt that
-        // nobody can answer, and the worker thread is gone for good.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10");
-    }
-
-    let mut child = command.spawn().map_err(|err| format!("git: {err}"))?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return Ok(());
-                }
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
-                let first = stderr
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("git failed")
-                    .trim()
-                    .to_string();
-                return Err(first);
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("timed out after {}s", timeout.as_secs()));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(err) => return Err(format!("git: {err}")),
-        }
     }
 }
 

@@ -327,6 +327,16 @@ fills the same pane with everything uncommitted, grouped:
 Each group folds. Untracked starts folded past ten files, where it stops being
 information and starts being noise.
 
+The `+` beside a file stages it, `−` unstages it, and the box below commits what
+is staged. Whole files only — staging a hunk is the heart of a committing tool
+and omarepos is not one; `Open in terminal` starts lazygit for that. The commit
+is refused, with the reason, when nothing is staged, the message is empty, or
+the repository is mid-merge or mid-rebase.
+
+All of it runs through `git` rather than libgit2, so hooks run, commits are
+signed if you sign them, and the identity is whichever `includeIf gitdir:`
+resolves for that directory.
+
 That split is the point. Untracked files never stop a fast-forward — git refuses
 rather than overwriting one — so they are shown stepped back and labelled,
 rather than padding the same list as the changes that really are holding a
@@ -428,6 +438,11 @@ follow_omarchy_theme = true
 
 Everything shown comes from libgit2 against the on-disk repository. Reading
 never runs `git`, never writes to a repository and never talks to a remote.
+
+Writing is narrow and deliberate. omarepos can stage a file, unstage a file,
+commit what is staged, and fast-forward a clean branch. It cannot discard an
+edit: there is no checkout, no reset, no clean, no amend. Everything it does is
+recoverable.
 Ahead/behind counts compare your local branch to the *last fetched* state of its
 upstream, exactly like `git status` does; they go stale until something fetches.
 When a branch is behind, the card also gives the age of the upstream tip — the

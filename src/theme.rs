@@ -473,6 +473,12 @@ listbox.om-results > row.om-aside {{
   opacity: 0.70;
 }}
 
+.om-commit {{
+  padding: 8px 10px;
+  border-top: 1px solid @om_border;
+  background-color: @om_bg;
+}}
+
 .om-status {{
   font-family: monospace;
   font-size: 11px;
