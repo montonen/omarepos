@@ -19,16 +19,22 @@ const DOT_R: f64 = 4.0;
 /// Past this many lanes the graph stops being readable; wider rows are clipped.
 const MAX_LANES: usize = 16;
 const COMMIT_LIMIT: usize = 500;
+/// Rows kept above a requested commit, for context.
+const WINDOW_BEFORE: usize = 120;
+/// Rows kept below it.
+const WINDOW_AFTER: usize = 180;
 
 fn lane_x(lane: usize) -> f64 {
     LANE_W * lane as f64 + LANE_W / 2.0 + 3.0
 }
 
 /// Build the page and start loading. `on_contributions` opens the stats page
-/// scoped to this repository.
+/// scoped to this repository. `target` is a commit to open on — it is sought
+/// out however far back it is, highlighted, and scrolled to.
 pub fn page(
     path: &Path,
     name: &str,
+    target: Option<String>,
     on_contributions: Rc<dyn Fn(PathBuf)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new(name, &tildify(path));
@@ -110,8 +116,13 @@ pub fn page(
     // Loading happens off the main thread; a big repo takes a moment.
     let (tx, rx) = async_channel::bounded(1);
     let load_path = path.to_path_buf();
+    let wanted = target.clone();
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(graph::build(&load_path, COMMIT_LIMIT));
+        let _ = tx.send_blocking(graph::build(
+            &load_path,
+            COMMIT_LIMIT,
+            wanted.as_deref(),
+        ));
     });
 
     let toasts_for_rows = toasts.clone();
@@ -124,9 +135,38 @@ pub fn page(
             }
             Ok(graph) => {
                 let width = lanes_width(graph.lanes);
-                let ids: Vec<String> = graph.rows.iter().map(|row| row.id.to_string()).collect();
-                for row in &graph.rows {
+                // With a commit to open on, the walk may have gone thousands of
+                // rows deep. Render a window around it rather than all of it —
+                // the lane state of every row is self-contained, so a slice
+                // draws correctly on its own.
+                let (from, to) = match graph.target {
+                    Some(index) => (
+                        index.saturating_sub(WINDOW_BEFORE),
+                        (index + WINDOW_AFTER).min(graph.rows.len()),
+                    ),
+                    None => (0, graph.rows.len().min(COMMIT_LIMIT)),
+                };
+                let slice = &graph.rows[from..to];
+                let ids: Vec<String> = slice.iter().map(|row| row.id.to_string()).collect();
+
+                for row in slice {
                     rows_box.append(&row_widget(row, width));
+                }
+
+                if let Some(index) = graph.target {
+                    let at = index - from;
+                    if let Some(row) = rows_box.row_at_index(at as i32) {
+                        row.add_css_class("om-target");
+                        // Once the list has been laid out, focusing the row
+                        // brings it into view; doing it immediately would
+                        // scroll against a height the list does not have yet.
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(50),
+                            move || {
+                                row.grab_focus();
+                            },
+                        );
+                    }
                 }
                 rows_box.connect_row_activated(move |_, row| {
                     let index = row.index();
@@ -141,7 +181,7 @@ pub fn page(
                     )));
                 });
                 stack.set_visible_child_name("graph");
-                status.set_label(&summary(&graph));
+                status.set_label(&summary(&graph, from, to));
             }
             Err(err) => {
                 empty.set_title("Could not read this repository");
@@ -159,10 +199,14 @@ fn lanes_width(lanes: usize) -> i32 {
     (lane_x(lanes.clamp(1, MAX_LANES).saturating_sub(1)) + LANE_W) as i32
 }
 
-fn summary(graph: &Graph) -> String {
+fn summary(graph: &Graph, from: usize, to: usize) -> String {
     let mut parts = Vec::new();
-    parts.push(format!("{} commits", graph.rows.len()));
-    if graph.truncated {
+    parts.push(format!("{} commits", to - from));
+    if let Some(index) = graph.target {
+        parts.push(format!("around {} (#{})", graph.rows[index].short_id, index + 1));
+    } else if graph.target_missed {
+        parts.push("that commit is further back than the walk reached".to_string());
+    } else if graph.truncated {
         parts.push(format!("newest {COMMIT_LIMIT} shown"));
     }
     parts.push(format!("{} lanes", graph.lanes));

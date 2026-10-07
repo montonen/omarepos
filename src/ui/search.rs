@@ -20,11 +20,11 @@ const DEBOUNCE_MS: u64 = 350;
 /// were.
 const MAX_ROWS: usize = 500;
 
-/// `on_open` takes a repository path and name, and shows its commit graph.
+/// `on_open` takes a repository, its name and the commit to open on.
 pub fn page(
     repos: Vec<PathBuf>,
     scope: String,
-    on_open: Rc<dyn Fn(PathBuf, String)>,
+    on_open: Rc<dyn Fn(PathBuf, String, Option<String>)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new("Search commits", &scope);
     let header = adw::HeaderBar::new();
@@ -111,7 +111,7 @@ pub fn page(
             }
             let hit = listed.borrow().get(index as usize).cloned();
             if let Some(hit) = hit {
-                on_open(hit.path.clone(), hit.repo.clone());
+                on_open(hit.path.clone(), hit.repo.clone(), Some(hit.id.clone()));
             }
         });
     }

@@ -453,6 +453,13 @@ listbox.om-results > row {{
   border-radius: 6px;
 }}
 
+/* The commit you followed a search result to. It has to be findable at a
+   glance in a list of three hundred near-identical rows. */
+listbox.om-results > row.om-target {{
+  background-color: mix(@om_raised, @om_accent, 0.38);
+  box-shadow: inset 3px 0 0 0 @om_accent;
+}}
+
 listbox.om-results > row:focus-visible {{
   outline: 2px solid @om_fg;
   outline-offset: -2px;

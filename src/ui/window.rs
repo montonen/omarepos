@@ -1407,7 +1407,7 @@ impl Ui {
             nav.push(&ui::stats::page(vec![path], name));
         });
         self.nav
-            .push(&ui::graph::page(&info.path, &info.name, on_contributions));
+            .push(&ui::graph::page(&info.path, &info.name, None, on_contributions));
     }
 
     /// Search commits across the ticked repositories, or everything shown.
@@ -1419,7 +1419,8 @@ impl Ui {
             return;
         }
         let nav = self.nav.clone();
-        let on_open: Rc<dyn Fn(PathBuf, String)> = Rc::new(move |path: PathBuf, name: String| {
+        let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
+            Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
             let nav_inner = nav.clone();
             let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
                 let name = path
@@ -1428,8 +1429,8 @@ impl Ui {
                     .unwrap_or_else(|| path.display().to_string());
                 nav_inner.push(&ui::stats::page(vec![path], name));
             });
-            nav.push(&ui::graph::page(&path, &name, on_contributions));
-        });
+                nav.push(&ui::graph::page(&path, &name, commit, on_contributions));
+            });
         self.nav.push(&ui::search::page(repos, scope, on_open));
     }
 

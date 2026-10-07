@@ -55,11 +55,29 @@ pub struct Graph {
     /// More commits exist than `limit` allowed us to walk.
     pub truncated: bool,
     pub head: Option<String>,
+    /// Where the requested commit landed, if one was asked for and found.
+    pub target: Option<usize>,
+    /// True when a commit was asked for and the walk gave up before reaching it.
+    pub target_missed: bool,
 }
 
+/// How far the walk will go past `limit` to reach a commit it was asked for.
+/// A commit search reaches much further back than the graph normally draws, so
+/// without this, following a result would land on the newest commits instead of
+/// the one asked for.
+const HUNT_CAP: usize = 20_000;
+/// Rows to keep after the requested commit, for context below it.
+const CONTEXT_AFTER: usize = 150;
+
 /// Walk every local and remote branch, newest first, and lay the result out in
-/// lanes. Returns at most `limit` rows.
-pub fn build(path: &std::path::Path, limit: usize) -> Result<Graph, String> {
+/// lanes. Returns at most `limit` rows, unless `target` names a commit that is
+/// further back — then the walk continues until it is found, and stops shortly
+/// after.
+pub fn build(
+    path: &std::path::Path,
+    limit: usize,
+    target: Option<&str>,
+) -> Result<Graph, String> {
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
     let labels = ref_labels(&repo);
 
@@ -89,19 +107,47 @@ pub fn build(path: &std::path::Path, limit: usize) -> Result<Graph, String> {
     if pushed == 0 {
         // Unborn branch, or a repo with nothing but a detached HEAD.
         if walk.push_head().is_err() {
-            return Ok(Graph { rows: Vec::new(), lanes: 0, truncated: false, head });
+            return Ok(Graph {
+                rows: Vec::new(),
+                lanes: 0,
+                truncated: false,
+                head,
+                target: None,
+                target_missed: target.is_some(),
+            });
         }
     }
 
     let mut rows: Vec<Row> = Vec::new();
     let mut state: Vec<Option<Oid>> = Vec::new();
     let mut truncated = false;
+    let mut found_at: Option<usize> = None;
 
     for oid in walk {
         let Ok(oid) = oid else { continue };
-        if rows.len() >= limit {
-            truncated = true;
-            break;
+        match found_at {
+            // Already past the commit we came for: take a little context below
+            // it and stop.
+            Some(index) => {
+                if rows.len() >= index + CONTEXT_AFTER {
+                    truncated = true;
+                    break;
+                }
+            }
+            // Still hunting: `limit` does not apply until it is found, but the
+            // hunt is not unbounded either.
+            None if target.is_some() => {
+                if rows.len() >= HUNT_CAP {
+                    truncated = true;
+                    break;
+                }
+            }
+            None => {
+                if rows.len() >= limit {
+                    truncated = true;
+                    break;
+                }
+            }
         }
         let Ok(commit) = repo.find_commit(oid) else { continue };
         let parents: Vec<Oid> = commit.parent_ids().collect();
@@ -175,6 +221,12 @@ pub fn build(path: &std::path::Path, limit: usize) -> Result<Graph, String> {
             outgoing: state.clone(),
             down,
         });
+
+        if let Some(wanted) = target {
+            if found_at.is_none() && oid.to_string().starts_with(wanted) {
+                found_at = Some(rows.len() - 1);
+            }
+        }
     }
 
     let lanes = rows
@@ -183,7 +235,14 @@ pub fn build(path: &std::path::Path, limit: usize) -> Result<Graph, String> {
         .max()
         .unwrap_or(0);
 
-    Ok(Graph { rows, lanes, truncated, head })
+    Ok(Graph {
+        rows,
+        lanes,
+        truncated,
+        head,
+        target: found_at,
+        target_missed: target.is_some() && found_at.is_none(),
+    })
 }
 
 fn alloc(state: &mut Vec<Option<Oid>>) -> usize {
