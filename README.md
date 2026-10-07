@@ -333,6 +333,10 @@ things" is what the card already says and this view exists to say which.
 An untracked file has nothing to diff against, so its contents are shown as
 added, the way `git diff --no-index` would.
 
+The working tree changes outside the app, so it is re-read whenever the window
+regains focus — edit in your editor, come back, and the list is current. A
+commit cannot change under you, so nothing else reloads.
+
 ### What a commit changed
 
 The pane below the graph lists the files, as a tree rather than a flat list —

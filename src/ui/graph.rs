@@ -188,6 +188,7 @@ pub fn page(
     let (tx, rx) = async_channel::bounded(1);
     let load_path = path.to_path_buf();
     let load_path_for_detail = path.to_path_buf();
+    let page_for_focus = page.clone();
     let wanted = target.clone();
     std::thread::spawn(move || {
         let _ = tx.send_blocking(graph::build(
@@ -251,9 +252,10 @@ pub fn page(
                 }
                 {
                     let mut targets = ids.borrow_mut();
-                    if has_working {
-                        targets.push(crate::commit::Target::Working);
-                    }
+                    // Always index zero, shown or not: hiding a row keeps its
+                    // place in the list, so the map from row to commit stays
+                    // put as the working tree comes and goes.
+                    targets.push(crate::commit::Target::Working);
                     targets.extend(
                         slice
                             .iter()
@@ -261,15 +263,21 @@ pub fn page(
                     );
                 }
 
-                if has_working {
-                    rows_box.append(&working_row(graph.working_changes, width));
-                }
+                let (working, working_count) = working_row(graph.working_changes, width);
+                working.set_visible(has_working);
+                rows_box.append(&working);
                 for row in slice {
                     rows_box.append(&row_widget(row, width));
                 }
 
-                let offset = usize::from(has_working);
-                let select_at = graph.target.map(|index| index - from + offset).unwrap_or(0);
+                let offset = 1;
+                // Land on the commit asked for, or on the working tree when
+                // there is one, or on the newest commit.
+                let select_at = match (graph.target, has_working) {
+                    (Some(index), _) => index - from + offset,
+                    (None, true) => 0,
+                    (None, false) => offset,
+                };
                 if let Some(row) = rows_box.row_at_index(select_at as i32) {
                     rows_box.select_row(Some(&row));
                 }
@@ -303,6 +311,15 @@ pub fn page(
                         &id[..7.min(id.len())]
                     )));
                 });
+                watch_working_tree(
+                    &page_for_focus,
+                    &load_path_for_detail,
+                    &rows_box,
+                    &working,
+                    &working_count,
+                    Rc::clone(&load_detail),
+                );
+
                 stack.set_visible_child_name("graph");
                 status.set_label(&summary(&graph, from, to));
             }
@@ -344,7 +361,67 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
 
 /// The row that stands for everything uncommitted, drawn where the next commit
 /// would go so the graph reads as continuing into the working tree.
-fn working_row(changes: usize, graph_width: i32) -> gtk::ListBoxRow {
+/// Re-read the working tree whenever the window regains focus. It changes
+/// outside the app — that is rather the point of it — and nothing else would
+/// notice. The handler lives only while this page is on screen; left connected
+/// it would fire for pages the user has already left, and keep them alive.
+fn watch_working_tree(
+    page: &adw::NavigationPage,
+    repo: &Path,
+    rows: &gtk::ListBox,
+    working: &gtk::ListBoxRow,
+    count_label: &gtk::Label,
+    load_detail: Rc<dyn Fn(PathBuf, crate::commit::Target)>,
+) {
+    let Some(window) = page.root().and_downcast::<gtk::Window>() else { return };
+
+    let handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+    {
+        let repo = repo.to_path_buf();
+        let rows = rows.clone();
+        let working = working.clone();
+        let count_label = count_label.clone();
+        let id = window.connect_is_active_notify(move |window| {
+            if !window.is_active() {
+                return;
+            }
+            let rx = crate::graph::spawn_working_count(repo.clone());
+            let repo = repo.clone();
+            let rows = rows.clone();
+            let working = working.clone();
+            let count_label = count_label.clone();
+            let load_detail = Rc::clone(&load_detail);
+            glib::spawn_future_local(async move {
+                let Ok(changes) = rx.recv().await else { return };
+                working.set_visible(changes > 0);
+                count_label.set_label(&entries(changes));
+                // Only re-read the pane when it is the working tree on show;
+                // a commit cannot have changed under us.
+                let on_working = rows
+                    .selected_row()
+                    .map(|row| row.index() == 0)
+                    .unwrap_or(false);
+                if on_working && changes > 0 {
+                    load_detail(repo, crate::commit::Target::Working);
+                }
+            });
+        });
+        *handler.borrow_mut() = Some(id);
+    }
+
+    let window = window.clone();
+    page.connect_hidden(move |_| {
+        if let Some(id) = handler.borrow_mut().take() {
+            window.disconnect(id);
+        }
+    });
+}
+
+fn entries(changes: usize) -> String {
+    format!("{changes} {}", if changes == 1 { "entry" } else { "entries" })
+}
+
+fn working_row(changes: usize, graph_width: i32) -> (gtk::ListBoxRow, gtk::Label) {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(ROW_H);
 
@@ -376,10 +453,7 @@ fn working_row(changes: usize, graph_width: i32) -> gtk::ListBoxRow {
     label.add_css_class("om-summary");
     line.append(&label);
 
-    let count = gtk::Label::new(Some(&format!(
-        "{changes} {}",
-        if changes == 1 { "entry" } else { "entries" }
-    )));
+    let count = gtk::Label::new(Some(&entries(changes)));
     count.add_css_class("om-meta");
     line.append(&count);
 
@@ -388,7 +462,7 @@ fn working_row(changes: usize, graph_width: i32) -> gtk::ListBoxRow {
     row.set_tooltip_text(Some(
         "Everything uncommitted, including untracked files.\nNot a commit — nothing to copy.",
     ));
-    row
+    (row, count)
 }
 
 fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {

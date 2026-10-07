@@ -250,6 +250,18 @@ pub fn build(
     })
 }
 
+/// Count the working tree off the main thread. The window asks for this every
+/// time it regains focus, and a repository with a large untracked tree can take
+/// long enough to be felt.
+pub fn spawn_working_count(path: std::path::PathBuf) -> async_channel::Receiver<usize> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let count = Repository::open(&path).map(|repo| working_changes(&repo)).unwrap_or(0);
+        let _ = tx.send_blocking(count);
+    });
+    rx
+}
+
 /// Entries in the working tree, untracked included but never ignored. Counted
 /// without recursing into untracked directories — this only decides whether to
 /// offer the row, and the pane does the detailed reading.
