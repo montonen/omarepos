@@ -426,8 +426,17 @@ pub fn pane(
                             detail.summary, detail.author, detail.email, detail.id
                         )));
                         meta.set_label(&describe(&detail));
-                        body_scroller.set_visible(!detail.body.is_empty());
-                        body.set_label(&detail.body);
+                        // A commit has its message here. The working tree has
+                        // none, and where its list is known to differ from
+                        // what git would say, this is the place that says so:
+                        // above the rows it is about.
+                        let said = if detail.body.is_empty() {
+                            detail.caveats.join("\n\n")
+                        } else {
+                            detail.body.clone()
+                        };
+                        body_scroller.set_visible(!said.is_empty());
+                        body.set_label(&said);
                         // A new commit's message starts at its top.
                         body_scroller.vadjustment().set_value(0.0);
                         let mut position = 0i32;

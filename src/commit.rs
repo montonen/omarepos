@@ -150,6 +150,10 @@ pub struct Detail {
     /// the cap. What the pane says about the tree, and what Commit will take,
     /// are read from here and not from the list, which may have been cut.
     pub counts: Counts,
+    /// For the working tree: where the list is known to differ from what
+    /// `git status` would say, as sentences. The list is libgit2's, and
+    /// libgit2 implements neither sparse checkouts nor the filters git runs.
+    pub caveats: Vec<String>,
 }
 
 /// Entries per kind in a working tree.
@@ -322,6 +326,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         unreadable: unread,
         boundary,
         counts: Counts::default(),
+        caveats: Vec::new(),
     })
 }
 
@@ -526,6 +531,7 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
             file.binary = looks_binary(&workdir.join(&file.path));
         }
     }
+    let caveats = caveats(&repo, &index, &files);
 
     Ok(Detail {
         id: String::new(),
@@ -545,7 +551,77 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         unreadable: unread,
         boundary: false,
         counts,
+        caveats,
     })
+}
+
+/// Where the working-tree list is libgit2's reading and known not to be
+/// git's, said in sentences.
+///
+/// The rows themselves are left as libgit2 gives them. The card, the count on
+/// the Local changes row and the refresher all take the same reading, and a
+/// pane that quietly disagreed with the three of them would be a fourth
+/// opinion. What it can do is say which rows not to believe.
+fn caveats(repo: &Repository, index: &git2::Index, files: &[FileChange]) -> Vec<String> {
+    let mut caveats = Vec::new();
+    let unstaged = |change: Change| {
+        files.iter().filter(move |file| file.group == Group::Unstaged && file.change == change)
+    };
+
+    // A sparse checkout marks what it leaves out in the index, and git then
+    // does not expect the file to be there. libgit2 has no notion of one: the
+    // file is missing, so it is deleted.
+    let outside = unstaged(Change::Deleted)
+        .filter(|file| {
+            index.get_path(Path::new(&file.path), 0).is_some_and(|entry| {
+                git2::IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended)
+                    .is_skip_worktree()
+            })
+        })
+        .count();
+    if outside > 0 {
+        caveats.push(format!(
+            "{outside} of the files listed as deleted {} outside this sparse checkout and {} \
+             not been deleted. omarepos reads the working tree through libgit2, which does not \
+             know about sparse checkouts; `git status` in a terminal has the true list.",
+            if outside == 1 { "is" } else { "are" },
+            if outside == 1 { "has" } else { "have" },
+        ));
+    }
+
+    // A filter (git-lfs, git-crypt) or a working-tree encoding: what is stored
+    // is not what is in the file, and git converts before it compares.
+    // libgit2 runs none of them, so when it has to compare content it
+    // compares the two forms, finds them different, and shows the difference.
+    let mut through: Vec<String> = Vec::new();
+    let mut filtered = 0usize;
+    for file in unstaged(Change::Modified) {
+        let attribute = |name: &str| {
+            let value = repo.get_attr(Path::new(&file.path), name, git2::AttrCheckFlags::default());
+            match git2::AttrValue::from_string(value.ok().flatten()) {
+                git2::AttrValue::String(driver) => Some(driver.to_string()),
+                _ => None,
+            }
+        };
+        let Some(driver) = attribute("filter").or_else(|| attribute("working-tree-encoding")) else {
+            continue;
+        };
+        filtered += 1;
+        if !through.contains(&driver) {
+            through.push(driver);
+        }
+    }
+    if filtered > 0 {
+        caveats.push(format!(
+            "{filtered} of the files listed as modified {} converted by git on the way in and \
+             out ({}), which libgit2 does not do: {} may be unchanged, and the diff shown may \
+             be of the stored form against the file. `git status` in a terminal settles it.",
+            if filtered == 1 { "is" } else { "are" },
+            through.join(", "),
+            if filtered == 1 { "it" } else { "they" },
+        ));
+    }
+    caveats
 }
 
 /// What building one delta's patch found out.
@@ -1576,6 +1652,64 @@ mod tests {
         assert_eq!(identity(&f.work), Ok("Fixture <fixture@example.invalid>".to_string()));
         git(&f.work, &["config", "author.name", "Somebody Else"]);
         assert_eq!(identity(&f.work), Ok("Somebody Else <fixture@example.invalid>".to_string()));
+    }
+
+    // ---- where the list is libgit2's and not git's, it says so ----------------
+
+    /// A sparse checkout: `git status` is clean, and libgit2, which has never
+    /// heard of one, reports every file outside it as deleted. The card, the
+    /// row count and the refresher take the same reading, so the rows stay;
+    /// what the pane can do is say that they are not what they look like.
+    #[test]
+    fn a_sparse_checkout_is_told_that_its_deletions_are_not_deletions() {
+        let _guard = isolate();
+        let f = fleet("cm-sparse");
+        f.remote_commits("two services", |seed| {
+            write(&seed.join("services/api/a.txt"), "a\n");
+            write(&seed.join("services/web/w.txt"), "w\n");
+            write(&seed.join("services/web/x.txt"), "x\n");
+        });
+        git(&f.work, &["pull", "-q", "--ff-only"]);
+        let ordinary = load_working(&f.work, &Cancel::default()).unwrap();
+        assert!(ordinary.files.is_empty() && ordinary.caveats.is_empty(), "{:?}", ordinary.caveats);
+
+        git(&f.work, &["sparse-checkout", "set", "--cone", "services/api"]);
+        assert_eq!(git(&f.work, &["status", "--porcelain"]), "", "git calls it clean");
+        // And one deletion that is real.
+        std::fs::remove_file(f.work.join("services/api/a.txt")).unwrap();
+
+        let listed = load_working(&f.work, &Cancel::default()).unwrap();
+        assert_eq!(listed.counts.unstaged, 3, "libgit2's reading, which the card shares");
+        assert_eq!(listed.caveats.len(), 1, "{:?}", listed.caveats);
+        assert!(listed.caveats[0].starts_with("2 of the files listed as deleted"), "{}", listed.caveats[0]);
+        assert!(listed.caveats[0].contains("sparse checkout"), "{}", listed.caveats[0]);
+    }
+
+    /// A stand-in for git-lfs or git-crypt: what is stored is not what is in
+    /// the file. git runs the filter before comparing and libgit2 does not,
+    /// so libgit2 can call a file modified that git calls clean.
+    #[test]
+    fn a_file_behind_a_filter_is_told_that_it_may_not_be_modified() {
+        let _guard = isolate();
+        let dir = scratch("cm-filter");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["config", "filter.standin.clean", "tr a-z A-Z"]);
+        git(&dir, &["config", "filter.standin.smudge", "tr A-Z a-z"]);
+        write(&dir.join(".gitattributes"), "*.dat filter=standin\n");
+        write(&dir.join("asset.dat"), "hello asset\n");
+        write(&dir.join("plain.txt"), "one\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "first"]);
+        assert_eq!(git(&dir, &["show", "HEAD:asset.dat"]), "HELLO ASSET", "stored in another form");
+
+        write(&dir.join("plain.txt"), "one\ntwo\n");
+        let listed = load_working(&dir, &Cancel::default()).unwrap();
+        assert!(listed.caveats.is_empty(), "nothing filtered is listed: {:?}", listed.caveats);
+
+        write(&dir.join("asset.dat"), "hello asset, edited\n");
+        let listed = load_working(&dir, &Cancel::default()).unwrap();
+        assert_eq!(listed.caveats.len(), 1, "{:?}", listed.caveats);
+        assert!(listed.caveats[0].contains("standin"), "{}", listed.caveats[0]);
     }
 
     // ---- a write lands in the repository on screen, or nowhere ---------------
