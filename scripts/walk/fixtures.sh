@@ -5,6 +5,9 @@
 set -e
 HERE=$(dirname "$(readlink -f "$0")")
 W=${OMAREPOS_WALK_DIR:-$(dirname "$(dirname "$HERE")")/target/walk}
+# Nothing may be running on what is about to be deleted: a window from an
+# earlier walk, or the display it was on, whose pid is kept in there.
+python3 "$HERE/drive.py" stop 2>/dev/null || true
 chmod -R u+rwx "$W" 2>/dev/null || true
 rm -rf "$W"
 mkdir -p "$W/fleet" "$W/remotes" "$W/config/omarepos" "$W/config/gtk-4.0" "$W/state"

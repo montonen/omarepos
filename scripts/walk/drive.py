@@ -7,6 +7,7 @@ D-Bus to the actions `src/ui/debug.rs` adds: nothing passes through the
 compositor, so the desktop it runs on is not disturbed.
 
     drive.py start | stop | alive
+    drive.py start-offscreen    on a display of its own instead (see below)
     drive.py keys KEY...        e.g. keys ctrl+f Return shift+question
     drive.py type TEXT
     drive.py press LABEL        "!LABEL" reaches a button that is not on screen
@@ -17,7 +18,14 @@ compositor, so the desktop it runs on is not disturbed.
     drive.py paint              run every draw function on screen
     drive.py dump [FILTER]      what is on screen, as text
     drive.py dump-all [FILTER]  everything, on screen or not
+    drive.py resize WxH         offscreen only: a tiling compositor decides for itself
     drive.py act NAME [ARG]     any window action
+
+A hidden workspace sends a window no frames, so nothing there is laid out or
+drawn unless asked, and a change of width never finishes. `start-offscreen`
+runs the window on GTK's Broadway display instead, with its own daemon and no
+port open: frames arrive, sizes are real and can be chosen, and Hyprland is
+not involved at all. Everything else is driven the same way.
 """
 import contextlib, io, json, os, subprocess, sys, time
 
@@ -27,6 +35,12 @@ W = os.environ.get('OMAREPOS_WALK_DIR', os.path.join(REPO, 'target', 'walk'))
 BIN = os.path.join(REPO, 'target', 'debug', 'omarepos')
 PIDFILE = os.path.join(W, 'pid')
 OBJECT = '/se/alphadev/Omarepos/window/1'
+# Offscreen, GTK does not put the window on the bus. The application is there
+# on any display, and a debug build's `app.window` passes an action on.
+APP_OBJECT = '/se/alphadev/Omarepos'
+OFFSCREEN = os.path.join(W, 'offscreen')
+DAEMON_PID = os.path.join(W, 'broadway.pid')
+DISPLAY = ':9'
 
 # The window's accelerators are actions, and are activated as such.
 ACCELS = {'ctrl+r': 'refresh', 'F5': 'refresh', 'ctrl+shift+r': 'fetch', 'Escape': 'escape',
@@ -65,6 +79,60 @@ def stop_all():
     for name in os.listdir('/proc'):
         if name.isdigit() and ours(int(name)):
             os.kill(int(name), 15)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(OFFSCREEN)
+
+
+def daemon():
+    """The pid of this walk's display daemon, if it is running: by what it was started
+    with, like the window."""
+    try:
+        pid = int(open(DAEMON_PID).read())
+        cmdline = open(f'/proc/{pid}/cmdline').read()
+    except (OSError, ValueError):
+        return None
+    return pid if 'gtk4-broadwayd' in cmdline and W in cmdline else None
+
+
+def stop_daemon():
+    pid = daemon()
+    if pid:
+        os.kill(pid, 15)
+        # It leaves the socket windows reach it by behind: display N is N + 1 there.
+        runtime = os.environ.get('XDG_RUNTIME_DIR')
+        if runtime:
+            with contextlib.suppress(OSError):
+                os.remove(os.path.join(runtime, 'broadway%d.socket' % (int(DISPLAY[1:]) + 1)))
+
+
+def start_offscreen():
+    stop_all()
+    time.sleep(0.4)
+    if not daemon():
+        # Reached over a socket under target/, so no port is opened for it.
+        http = os.path.join(W, 'broadway-http.sock')
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(http)
+        server = subprocess.Popen(['gtk4-broadwayd', '--unixsocket', http, DISPLAY],
+                                  stdout=open(os.path.join(W, 'broadway.log'), 'w'),
+                                  stderr=subprocess.STDOUT, start_new_session=True)
+        open(DAEMON_PID, 'w').write(str(server.pid))
+        time.sleep(0.6)
+    env = dict(os.environ, GDK_BACKEND='broadway', BROADWAY_DISPLAY=DISPLAY,
+               XDG_CONFIG_HOME=f'{W}/config', XDG_STATE_HOME=f'{W}/state',
+               GIT_CONFIG_GLOBAL=f'{W}/gitconfig', GIT_CONFIG_NOSYSTEM='1',
+               GDK_DEBUG='no-portals', OMAREPOS_DUMP=f'{W}/dump.txt')
+    app = subprocess.Popen([BIN, '--root', f'{W}/fleet'], env=env, start_new_session=True,
+                           stdout=open(os.path.join(W, 'app.log'), 'w'), stderr=subprocess.STDOUT)
+    open(PIDFILE, 'w').write(str(app.pid))
+    open(OFFSCREEN, 'w').write(DISPLAY)
+    for _ in range(50):
+        time.sleep(0.2)
+        with contextlib.suppress(SystemExit):
+            bus()
+            settle()
+            return
+    raise SystemExit('did not start')
 
 
 def start():
@@ -115,9 +183,15 @@ def bus():
 
 
 def act(name, arg=None):
-    param = '[]' if arg is None else "[<'%s'>]" % arg.replace("\\", "\\\\").replace("'", "\\'")
-    done = sh('gdbus', 'call', '--session', '--dest', bus(), '--object-path', OBJECT,
-              '--method', 'org.gtk.Actions.Activate', name, param, '{}')
+    quoted = None if arg is None else "'%s'" % arg.replace("\\", "\\\\").replace("'", "\\'")
+    if os.path.exists(OFFSCREEN):
+        path, action = APP_OBJECT, 'window'
+        param = "[<['%s'%s]>]" % (name, '' if quoted is None else ', ' + quoted)
+    else:
+        path, action = OBJECT, name
+        param = '[]' if quoted is None else '[<%s>]' % quoted
+    done = sh('gdbus', 'call', '--session', '--dest', bus(), '--object-path', path,
+              '--method', 'org.gtk.Actions.Activate', action, param, '{}')
     if done.stdout.strip() != '()':
         print(done.stdout.strip() or done.stderr.strip())
 
@@ -154,8 +228,11 @@ def main(argv):
     first = rest[0] if rest else None
     if cmd == 'start':
         start()
+    elif cmd == 'start-offscreen':
+        start_offscreen()
     elif cmd == 'stop':
         stop_all()
+        stop_daemon()
     elif cmd == 'alive':
         print('alive', mine())
     elif cmd == 'keys':
@@ -166,7 +243,7 @@ def main(argv):
         dump(first, everything=True)
     elif cmd == 'act':
         act(*rest[:2])
-    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press'):
+    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize'):
         act(cmd, first)
     elif cmd == 'paint':
         act('paint')

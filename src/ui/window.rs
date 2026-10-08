@@ -133,6 +133,10 @@ struct Ui {
     /// wrote to them from another page. Read again when the grid is next in
     /// front.
     stale: RefCell<BTreeSet<PathBuf>>,
+    /// What the keyboard is to be given back to: the widget it was on when
+    /// the content left the screen, until the content is back. See
+    /// `note_keyboard`.
+    owed: glib::WeakRef<gtk::Widget>,
     /// The repository whose page was opened last, which is the card the
     /// keyboard goes back to when that page is left.
     opened: RefCell<Option<PathBuf>>,
@@ -378,6 +382,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         generation: Cell::new(0),
         scanning: Cell::new(false),
         stale: RefCell::new(BTreeSet::new()),
+        owed: glib::WeakRef::new(),
         opened: RefCell::new(None),
         handed: RefCell::new(BTreeSet::new()),
         expected: Cell::new(0),
@@ -845,6 +850,15 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         });
     }
     window.add_breakpoint(cramped);
+
+    if let Some(content) = window.content() {
+        // The content is what a change of breakpoint takes off screen and
+        // puts back, and the keyboard is seen across that by hand.
+        let leaving = Rc::clone(&ui);
+        content.connect_unmap(move |_| leaving.note_keyboard());
+        let back = Rc::clone(&ui);
+        content.connect_map(move |_| back.give_keyboard_back());
+    }
 
     let act_updated = gio::SimpleAction::new("updated-on-disk", None);
     {
@@ -2250,12 +2264,89 @@ impl Ui {
         }
     }
 
+    /// What has the keyboard: the window's focus, or, while a change of
+    /// width has taken it, the widget it is about to be given back to.
+    fn keyboard(&self) -> Option<gtk::Widget> {
+        gtk::prelude::GtkWindowExt::focus(&self.window)
+            .or_else(|| self.owed.upgrade().filter(|had| had.is_ancestor(&self.window)))
+    }
+
+    /// The content is leaving the screen: note what has the keyboard, so
+    /// that it can be given back when the content returns.
+    ///
+    /// A change of breakpoint takes the whole content off screen for a
+    /// frame, and GTK moves the keyboard off a widget that leaves the
+    /// screen. libadwaita notes what had it and means to give it back, but
+    /// GTK's move reaches it as a request for the keyboard, which it takes
+    /// to be somebody's wish and honours instead: when the content comes
+    /// back, the keyboard is on a button in the header. So any
+    /// resize across one of the two widths, which on a tiling desktop is
+    /// what opening a window beside this one does, took the keyboard out of
+    /// the filter or off the card it was on, and no key did what it should
+    /// until it had been put back by hand.
+    ///
+    /// GTK moves it at the end of the frame, so here it is still where the
+    /// person left it.
+    fn note_keyboard(&self) {
+        // A second change of width can begin before the first has been made
+        // good, with the keyboard on that button. The first note stands.
+        if self.owed.upgrade().is_none() {
+            self.owed.set(gtk::prelude::GtkWindowExt::focus(&self.window).as_ref());
+        }
+    }
+
+    /// The content is back on screen: give the keyboard back to what
+    /// `note_keyboard` noted.
+    ///
+    /// A moment later, not now. libadwaita puts the content back and then
+    /// hands the keyboard to that button, in one go, and this is called in
+    /// the middle of it. Ahead of anything typed, though, so that no key
+    /// reaches the button.
+    fn give_keyboard_back(self: &Rc<Self>) {
+        if self.owed.upgrade().is_none() {
+            return;
+        }
+        let ui = Rc::clone(self);
+        glib::idle_add_local_full(glib::Priority::HIGH, move || {
+            // Off screen again already, by another change of width: the
+            // note is kept for when it comes back from that one.
+            if !ui.window.content().is_some_and(|content| content.is_mapped()) {
+                return glib::ControlFlow::Break;
+            }
+            let had = ui.owed.upgrade();
+            ui.owed.set(None::<&gtk::Widget>);
+            // Not if it has gone meanwhile, or is on a page that has been
+            // left: the keyboard stays where GTK put it.
+            let Some(had) = had.filter(|had| had.is_mapped()) else {
+                return glib::ControlFlow::Break;
+            };
+            if gtk::prelude::GtkWindowExt::focus(&ui.window).as_ref() == Some(&had) {
+                return glib::ControlFlow::Break;
+            }
+            // Not `grab_focus` for a text field. That selects what is in
+            // it, and the next key typed would replace a filter that was
+            // only being added to.
+            match had.downcast_ref::<gtk::Text>() {
+                Some(text) => {
+                    text.grab_focus_without_selecting();
+                }
+                None => {
+                    had.grab_focus();
+                }
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
     /// Put the keyboard in the grid. `force` takes focus even from a text
     /// field, which is what Ctrl+L is for; without it the grid is only claimed
     /// when nothing else holds the focus, so a scan finishing mid-sentence
     /// does not swallow what is being typed.
     fn focus_grid(&self, force: bool) {
-        let current = gtk::prelude::GtkWindowExt::focus(&self.window);
+        // Not only the window's focus: a keyboard that has just been taken
+        // from the filter by a change of width is still the filter's, and is
+        // about to be given back to it.
+        let current = self.keyboard();
         if !self.on_grid() {
             return;
         }

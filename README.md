@@ -83,7 +83,23 @@ and only when it is started with `OMAREPOS_DUMP=<file>` (`src/ui/debug.rs`).
 as text, `press` a button by what it says, hand the app a `key`, set a
 settings `row`, `pick` a list row, `paint`. A release build has none of it.
 
-Run the walk after changing anything a person can click.
+One thing a walk cannot see is what waits for a frame, because a window on a
+hidden workspace is sent none: a change of width across a breakpoint starts
+on one frame and ends on a later one. For that there is
+
+```bash
+scripts/walk/frames.sh
+```
+
+which runs the same build on a display of its own (GTK's Broadway, with its
+own daemon and no port open), gives the window widths either side of a
+breakpoint, and checks that the keyboard is where it was afterwards: in the
+filter with what was typed there, on a card, on a commit. About a minute,
+nothing on screen, and no compositor involved (`drive.py start-offscreen` and
+`resize` are the same by hand).
+
+Run the walk after changing anything a person can click, and `frames.sh` too
+after changing what has the keyboard or how the header is laid out.
 
 ## Install
 
@@ -840,7 +856,7 @@ counts.
 | `src/ui/commit.rs` | The pane under the graph: changed files, diff, stage and commit |
 | `src/ui/shortcuts.rs` | The keyboard, written down |
 | `src/ui/debug.rs` | Debug builds only: what `scripts/walk` drives the window through |
-| `scripts/walk/` | The walk: fixtures, the driver, and the script that uses everything once |
+| `scripts/walk/` | The walk: fixtures, the driver, the script that uses everything once, and the one that checks what needs frames |
 | `src/ui/stats.rs` | Contributions page |
 | `src/ui/search.rs` | Commit search page |
 | `src/ui/dialogs.rs` | Settings dialog and the tag editor |

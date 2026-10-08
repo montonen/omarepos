@@ -26,6 +26,25 @@ pub fn driven() -> bool {
 
 pub fn install(window: &adw::ApplicationWindow) {
     let Some(path) = std::env::var_os("OMAREPOS_DUMP") else { return };
+    // A window's actions are on the bus only where GTK puts them there,
+    // which is under Wayland and X11. The application's own are there on any
+    // display, so one of those passes a window action on: `app.window`,
+    // with the action's name and then its argument if it takes one. (A list
+    // of strings, since the bus has no way to say "a string or nothing".)
+    // It is what lets a window be driven on a display of its own, GTK's
+    // Broadway, which sends frames to a window nobody is looking at.
+    if let Some(app) = window.application() {
+        let pass = gio::SimpleAction::new("window", Some(gtk::glib::VariantTy::STRING_ARRAY));
+        let window_weak = window.downgrade();
+        pass.connect_activate(move |_, wanted| {
+            let Some(window) = window_weak.upgrade() else { return };
+            let words = wanted.and_then(|wanted| wanted.get::<Vec<String>>()).unwrap_or_default();
+            let Some(name) = words.first() else { return };
+            let argument = words.get(1).map(|argument| argument.to_variant());
+            gio::prelude::ActionGroupExt::activate_action(&window, name, argument.as_ref());
+        });
+        app.add_action(&pass);
+    }
     // `dump` writes what is on screen; `dump-all` everything there is, with
     // what is not on screen included, which is the only way to read a dialog
     // in a window that gets no frames.
@@ -228,6 +247,26 @@ pub fn install(window: &adw::ApplicationWindow) {
     });
     window.add_action(&paint);
 
+    // A size for the window, as "1000x700". Only a display that lets a
+    // window choose its own size obeys (GTK's Broadway does, a tiling
+    // compositor does not), and only one that sends frames finishes what a
+    // change of width starts: a breakpoint takes the content off screen
+    // until the next frame.
+    let resize = gio::SimpleAction::new("resize", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    resize.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let size = wanted
+            .and_then(|wanted| wanted.str())
+            .and_then(|wanted| wanted.split_once('x'))
+            .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)));
+        match size {
+            Some((width, height)) => window.set_default_size(width, height),
+            None => note!("omarepos: resize wants a size like 1000x700"),
+        }
+    });
+    window.add_action(&resize);
+
     // Text, into the field the keyboard is in.
     let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
@@ -254,8 +293,11 @@ pub fn install(window: &adw::ApplicationWindow) {
 fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everything: bool) {
     // A window nobody is looking at is sent no frames, and libadwaita
     // finishes a change of breakpoint on the next frame, keeping the
-    // content off screen until then. Here that frame never comes.
-    if let Some(content) = window.content().filter(|content| !content.is_child_visible()) {
+    // content off screen until then. Here that frame never comes. On a
+    // display of its own it does come, if slowly, and putting the content
+    // back by hand there gets in ahead of libadwaita doing it.
+    let frames_come = gtk::prelude::WidgetExt::display(window).type_().name() == "GdkBroadwayDisplay";
+    if let Some(content) = window.content().filter(|content| !frames_come && !content.is_child_visible()) {
         content.set_child_visible(true);
     }
     let mut out = String::new();
@@ -289,6 +331,12 @@ fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everythin
         None => out.push_str("keyboard: nowhere\n"),
     }
     out.push_str(&format!("dialog: {}\n", window.visible_dialog().is_some()));
+    // How many frames the display has asked this window for. A number that
+    // stands still is a window nobody is looking at, where nothing that
+    // waits for a frame (a change of breakpoint, an animation) ever ends.
+    if let Some(clock) = window.frame_clock() {
+        out.push_str(&format!("frames: {}\n", clock.frame_counter()));
+    }
     // How narrow the window can be made before something is cut off,
     // beside how wide it is.
     if let Some(content) = window.content() {
