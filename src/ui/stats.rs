@@ -207,6 +207,9 @@ fn status_line(result: &Contributions) -> String {
     if result.uncounted > 0 {
         parts.push(format!("{} without line counts", thousands(result.uncounted)));
     }
+    if result.future > 0 {
+        parts.push(format!("{} dated in the future", thousands(result.future)));
+    }
     parts.join("  ·  ")
 }
 
@@ -229,6 +232,13 @@ fn empty_state(result: &Contributions) -> (&'static str, String) {
         read,
         plural(read, "repository", "repositories"),
     );
+    if result.future > 0 {
+        description.push_str(&format!(
+            "\n\n{} {} dated in the future and not counted.",
+            thousands(result.future),
+            plural(result.future, "commit is", "commits are"),
+        ));
+    }
     if unread > 0 {
         description.push_str(&format!(
             "\n\n{unread} more could not be read:\n{}",
@@ -578,12 +588,15 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
             when.add_css_class("om-meta");
             row.append(&when);
 
-            let mut tip = format!(
-                "{}\n{}\n{}",
-                commit.short_id,
-                commit.summary,
-                crate::ui::absolute_time(commit.when)
-            );
+            let written = crate::ui::absolute_time(commit.when);
+            let mut tip = format!("{}\n{}\n{written}", commit.short_id, commit.summary);
+            // The row is dated by when the work was written. A rebase, an
+            // amend or a cherry-pick makes the commit itself newer than that,
+            // and the commit graph shows that other date.
+            let committed = crate::ui::absolute_time(commit.committed);
+            if committed != written {
+                tip.push_str(&format!("\ncommitted {committed}"));
+            }
             if commit.lines.is_none() {
                 tip.push_str(
                     "\nIts lines could not be counted: this clone does not hold \
@@ -719,6 +732,7 @@ mod tests {
             total_insertions: 0,
             total_deletions: 0,
             uncounted: 0,
+            future: 0,
             errors: errors.iter().map(|error| error.to_string()).collect(),
         }
     }
@@ -752,8 +766,12 @@ mod tests {
 
         let mut result = nothing_found(3, &["api: object not found"]);
         result.uncounted = 2;
+        result.future = 1;
         let line = status_line(&result);
         assert!(line.starts_with("1 unreadable  ·  0 commits"), "{line}");
-        assert!(line.ends_with("+0 −0  ·  2 without line counts"), "{line}");
+        assert!(line.ends_with("+0 −0  ·  2 without line counts  ·  1 dated in the future"), "{line}");
+
+        let (_, text) = empty_state(&result);
+        assert!(text.contains("\n\n1 commit is dated in the future and not counted."), "{text}");
     }
 }

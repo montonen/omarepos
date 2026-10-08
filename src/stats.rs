@@ -8,6 +8,11 @@
 //! its remote-tracking ref long after the change has landed. Walking every ref
 //! counted each of them.
 //!
+//! A commit belongs to the day it was written, by its author's clock, because
+//! it is its author who is credited with it. The committer's clock says when
+//! this copy of it was made, which after a rebase is another day and may be
+//! another person's doing.
+//!
 //! Authors are keyed by e-mail, so the same person with two spellings of their
 //! name still lands in one row. The same person with two addresses is two rows
 //! unless a mailmap says otherwise, and the one git reads is read here. Merge
@@ -40,8 +45,19 @@ impl Window {
         self.day_starts.len()
     }
 
+    /// Where the last day ends, and an hour over. The hour is for the one day
+    /// in the year that is twenty-five long, and on the others it lets a
+    /// commit from a clock that runs a little fast be today's.
+    ///
+    /// The window had no end. Anything dated after the last midnight was put
+    /// in the last day, so one commit from a machine with the wrong year was
+    /// in today's bar on every day until that year came round.
+    fn until(&self) -> i64 {
+        self.day_starts.last().map_or(0, |start| start + 25 * 3600)
+    }
+
     fn index_of(&self, when: i64) -> Option<usize> {
-        if when < self.since() {
+        if when < self.since() || when >= self.until() {
             return None;
         }
         let i = self.day_starts.partition_point(|start| *start <= when);
@@ -55,7 +71,12 @@ impl Window {
 pub struct Commit {
     pub short_id: String,
     pub summary: String,
+    /// When it was written, by its author's clock. This is the one that says
+    /// which day a commit belongs to and how old it is.
     pub when: i64,
+    /// When this copy of it was made, by its committer's clock: later than
+    /// `when` after a rebase, an amend or a cherry-pick.
+    pub committed: i64,
     /// Lines added and removed, or nothing where they could not be read: see
     /// [`diff_stats`]. A merge has none of its own and says `(0, 0)`.
     pub lines: Option<(usize, usize)>,
@@ -116,6 +137,9 @@ pub struct Contributions {
     /// Commits counted whose lines could not be read, and so are in neither
     /// total above.
     pub uncounted: usize,
+    /// Commits dated after the window ends, by a clock that was wrong. They
+    /// are in no figure and no day.
+    pub future: usize,
     /// One line for each repository that could not be read: what it is called
     /// and why. None of its commits are counted.
     pub errors: Vec<String>,
@@ -126,11 +150,6 @@ pub enum Event {
     Progress(String, usize, usize),
     Done(Box<Contributions>),
 }
-
-/// Walking the full history of a large repo is wasted work for a one-week
-/// window, but topological order means we cannot stop at the first old commit.
-/// Stop once this many consecutive out-of-window commits have gone by.
-const STALE_RUN: usize = 400;
 
 pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
@@ -145,7 +164,7 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
             // one that fails part of the way through is left out whole and
             // named, not counted as far as it got.
             match collect(path, &window, &tally.counted) {
-                Ok(seen) => tally.add(path, &name, seen),
+                Ok(found) => tally.add(path, &name, found),
                 Err(err) => errors.push(format!("{name}: {err}")),
             }
 
@@ -170,16 +189,18 @@ struct Tally {
     /// been met with the number of commits that carry it.
     authors: HashMap<String, (Author, Vec<(String, usize)>)>,
     per_day_total: Vec<usize>,
-    /// Every commit counted, in any repository. A linked worktree, a second
-    /// clone and a fork beside its upstream are each a card of their own and
-    /// hold the same commits; counted once per path, one repository with a
-    /// worktree and a spare clone tripled everything on the page.
+    /// Every commit counted or set aside, in any repository. A linked
+    /// worktree, a second clone and a fork beside its upstream are each a card
+    /// of their own and hold the same commits; counted once per path, one
+    /// repository with a worktree and a spare clone tripled everything on the
+    /// page.
     counted: HashSet<Oid>,
     repos_active: usize,
     total_commits: usize,
     total_insertions: usize,
     total_deletions: usize,
     uncounted: usize,
+    future: usize,
 }
 
 impl Tally {
@@ -194,15 +215,18 @@ impl Tally {
             total_insertions: 0,
             total_deletions: 0,
             uncounted: 0,
+            future: 0,
         }
     }
 
     /// Count what [`collect`] found in the repository at `path`.
-    fn add(&mut self, path: &Path, repo_name: &str, seen: Vec<Seen>) {
-        if !seen.is_empty() {
+    fn add(&mut self, path: &Path, repo_name: &str, found: Found) {
+        if !found.commits.is_empty() {
             self.repos_active += 1;
         }
-        for commit in seen {
+        self.future += found.future.len();
+        self.counted.extend(found.future);
+        for commit in found.commits {
             self.counted.insert(commit.oid);
 
             let key = if commit.email.is_empty() {
@@ -260,6 +284,7 @@ impl Tally {
                     short_id: commit.oid.to_string().chars().take(7).collect(),
                     summary: commit.summary,
                     when: commit.when,
+                    committed: commit.committed,
                     lines: commit.lines.map(|(insertions, deletions, _)| (insertions, deletions)),
                     merge: commit.merge,
                 });
@@ -305,6 +330,7 @@ impl Tally {
             total_insertions: self.total_insertions,
             total_deletions: self.total_deletions,
             uncounted: self.uncounted,
+            future: self.future,
             errors,
         }
     }
@@ -363,6 +389,7 @@ struct Seen {
     email: String,
     summary: String,
     when: i64,
+    committed: i64,
     day: usize,
     merge: bool,
     /// Insertions, deletions and files changed, or nothing where they could
@@ -370,9 +397,18 @@ struct Seen {
     lines: Option<(usize, usize, usize)>,
 }
 
-/// The commits of one repository that fall inside the window and are not in
-/// `counted`, newest first.
-fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<Seen>, String> {
+/// What one repository holds that is not in `counted` already.
+#[derive(Default)]
+struct Found {
+    /// Written inside the window, newest commit first.
+    commits: Vec<Seen>,
+    /// Dated after the window ends.
+    future: Vec<Oid>,
+}
+
+/// Read one repository to the end, counting nothing. The error is what libgit2
+/// said, for the page to show beside the repository's name.
+fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Found, String> {
     let said = |e: git2::Error| e.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
     let mut walk = repo.revwalk().map_err(said)?;
@@ -381,9 +417,15 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
     // HEAD and its upstream, and nothing else: see the top of the file. HEAD
     // used to be walked only when no branch could be, so a commit made on a
     // detached HEAD was counted nowhere.
+    let mut found = Found::default();
     let Some(head) = head_commit(&repo).map_err(said)? else {
-        return Ok(Vec::new());
+        return Ok(found);
     };
+    // A window of no days holds nothing, and has no end for a commit to be
+    // dated after.
+    if window.days() == 0 {
+        return Ok(found);
+    }
     walk.push(head).map_err(said)?;
     let mut rewritten = HashSet::new();
     if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
@@ -399,10 +441,6 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
     // and the one the forge commits under.
     let mailmap = repo.mailmap().ok();
 
-    let days = window.days();
-    let mut seen = Vec::new();
-    let mut stale = 0usize;
-
     for oid in walk {
         // A step that failed used to be skipped. A walk in time order reads
         // all of the history before it yields any of it, so one object missing
@@ -410,33 +448,39 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
         // out as having no commits at all, and the page said that nothing had
         // been committed.
         let oid = oid.map_err(said)?;
-        if rewritten.contains(&oid) {
-            continue;
-        }
         let commit = repo.find_commit(oid).map_err(said)?;
-        let when = commit.time().seconds();
 
-        let Some(day) = window.index_of(when) else {
-            stale += 1;
-            if stale >= STALE_RUN {
-                break;
-            }
-            continue;
-        };
-        stale = 0;
-        if day >= days {
-            // Committed with a clock ahead of ours; fold into today.
-            continue;
+        // The walk hands commits over in the order they were committed,
+        // newest first and whatever branch they are on, so the first one
+        // committed before the window is the end of it. A commit is committed
+        // no earlier than it is written; only a clock that jumped backwards
+        // between the two could hide one behind this.
+        let committed = commit.time().seconds();
+        if committed < window.since() {
+            break;
         }
-        if counted.contains(&oid) {
+        if rewritten.contains(&oid) || counted.contains(&oid) {
             continue;
         }
 
         let as_written = commit.author();
         let mapped = mailmap.as_ref().and_then(|map| commit.author_with_mailmap(map).ok());
         let author = mapped.as_ref().unwrap_or(&as_written);
+
+        // The author gets the credit, so the author's clock says when. The
+        // window used to be tested on the committer's: rebase or cherry-pick a
+        // branch written a month ago and its author was shown writing all of
+        // it today, in today's bar, "just now". The same went for one's own
+        // work after a `pull --rebase`.
+        let when = author.when().seconds();
+        if when >= window.until() {
+            found.future.push(oid);
+            continue;
+        }
+        let Some(day) = window.index_of(when) else { continue };
+
         let merge = commit.parent_count() > 1;
-        seen.push(Seen {
+        found.commits.push(Seen {
             oid,
             name: author.name().unwrap_or("unknown").to_string(),
             email: author.email().unwrap_or("").trim().to_lowercase(),
@@ -448,13 +492,17 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
                 .trim()
                 .to_string(),
             when,
+            committed,
             day,
             merge,
             lines: if merge { Some((0, 0, 0)) } else { diff_stats(&repo, &commit) },
         });
     }
 
-    Ok(seen)
+    // Newest first by the clock the page goes by: only the first hundred of
+    // an author's commits are listed, and the rest are called older.
+    found.commits.sort_by(|a, b| b.when.cmp(&a.when));
+    Ok(found)
 }
 
 /// The commit HEAD is on, or nothing in a repository that has no commit yet.
@@ -954,6 +1002,96 @@ mod tests {
         let result = contributions(&[&dir]);
         assert_eq!(by_author(&result), shortlog(&dir, &["HEAD"]));
         assert_eq!(by_author(&result).get(carol.1), Some(&2));
+    }
+
+    // ---- when a commit is counted ---------------------------------------------
+
+    /// Run git with both of a commit's clocks set.
+    fn git_at(dir: &Path, when: i64, args: &[&str]) {
+        let stamp = format!("@{when} +0000");
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_AUTHOR_DATE", &stamp)
+            .env("GIT_COMMITTER_DATE", &stamp)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Somebody's old branch, rebased today by somebody else. Each commit is
+    /// dated forty days ago by the author's clock and today by the
+    /// committer's. The window was tested on the second and the credit given
+    /// to the first, so the author was shown doing all of it today.
+    #[test]
+    fn work_is_counted_on_the_day_it_was_written_not_the_day_it_was_rebased() {
+        let _guard = isolate();
+        let f = fleet("stats-rebased-old");
+        git(&f.work, &["checkout", "-q", "-b", "old"]);
+        let (name, email) = (format!("user.name={}", BOB.0), format!("user.email={}", BOB.1));
+        for i in 0..4 {
+            write(&f.work.join(format!("o{i}.txt")), &lines(25));
+            git(&f.work, &["add", "."]);
+            let message = format!("old {i}");
+            let commit = ["-c", &name, "-c", &email, "commit", "-q", "-m", &message];
+            git_at(&f.work, now() - 40 * DAY + i, &commit);
+        }
+        assert_eq!(totals(&contributions(&[&f.work])), (1, 1, 0), "nothing of Bob's is recent");
+
+        f.remote_moves(1);
+        git(&f.work, &["fetch", "--quiet"]);
+        git(&f.work, &["rebase", "-q", "origin/main"]);
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result).get(BOB.1), None, "and a rebase does not make it so");
+        assert_eq!(totals(&result), (2, 2, 0));
+        // Where the page parts from `git shortlog --since`, and means to: that
+        // tests the committer's clock and credits the author.
+        assert_eq!(shortlog(&f.work, &["HEAD"]).get(BOB.1), Some(&4));
+    }
+
+    /// A commit from a machine whose clock is wrong sat in today's bar on
+    /// every day until its date came round.
+    #[test]
+    fn a_commit_dated_after_today_is_set_aside() {
+        let _guard = isolate();
+        let dir = scratch("stats-future");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", "a\n", "today");
+        for (file, ahead, message) in [
+            ("b.txt", 1800, "a clock half an hour fast"),
+            ("c.txt", 3 * DAY, "three days ahead"),
+            ("d.txt", 5 * 365 * DAY, "years ahead"),
+        ] {
+            write(&dir.join(file), "x\n");
+            git(&dir, &["add", "."]);
+            git_at(&dir, now() + ahead, &["commit", "-q", "-m", message]);
+        }
+
+        let result = contributions(&[&dir]);
+        assert_eq!(result.total_commits, 2, "today's, and the one that is nearly today's");
+        assert_eq!(result.per_day_total.iter().sum::<usize>(), 2);
+        assert_eq!(result.future, 2);
+
+        // And once, however many checkouts have it.
+        let copy = scratch("stats-future-copy");
+        git(&copy, &["clone", "-q", dir.to_str().unwrap(), "."]);
+        assert_eq!(contributions(&[&dir, &copy]).future, 2);
+    }
+
+    #[test]
+    fn the_window_ends_with_its_last_day() {
+        let window = Window {
+            day_starts: vec![0, DAY, 2 * DAY],
+            day_labels: Vec::new(),
+            day_titles: Vec::new(),
+        };
+        assert_eq!(window.index_of(-1), None);
+        assert_eq!(window.index_of(0), Some(0));
+        assert_eq!(window.index_of(DAY - 1), Some(0));
+        assert_eq!(window.index_of(2 * DAY), Some(2));
+        assert_eq!(window.index_of(3 * DAY + 3599), Some(2), "a clock a little fast");
+        assert_eq!(window.index_of(3 * DAY + 3600), None);
     }
 
     // ---- what could not be read ---------------------------------------------
