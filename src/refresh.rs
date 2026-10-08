@@ -85,6 +85,10 @@ pub enum Skip {
     /// out here. `git merge` moves the pointer and leaves the checkout where
     /// it was, and this module does not update submodules.
     Submodule,
+    /// The user moved the branch back along its upstream, and has not moved
+    /// it forward since. Only a pass across the fleet gives this: asking for
+    /// the repository by name is how it is moved forward again.
+    SteppedBack,
 }
 
 impl Skip {
@@ -100,6 +104,7 @@ impl Skip {
             Skip::Elsewhere => "its work tree is not this directory",
             Skip::Unseen => "new here, open it once",
             Skip::Submodule => "update moves a submodule",
+            Skip::SteppedBack => "moved back by hand",
         }
     }
 }
@@ -471,6 +476,11 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     if at.ahead > 0 {
         return report(Outcome::Skipped(Skip::Diverged));
     }
+    // Behind because the remote moved, or because the user moved back? The
+    // second is theirs to undo, by asking for this repository.
+    if options.pass == Pass::Fleet && stepped_back(&repo, &at) {
+        return report(Outcome::Skipped(Skip::SteppedBack));
+    }
 
     // Cleanliness is checked again here rather than before the fetch: the fetch
     // took time, and the user may have started editing during it.
@@ -735,6 +745,43 @@ fn is_dirty(repo: &Repository) -> bool {
         // Unreadable status is not a licence to proceed.
         Err(_) => true,
     }
+}
+
+/// Whether the last thing to move the checked-out branch was the user stepping
+/// it back along its upstream.
+///
+/// "Clean and strictly behind" is what a branch is when the remote has moved,
+/// and it is what a branch is after `git reset --hard` to an older commit. The
+/// pass could not tell them apart, so stepping back lasted one interval: to
+/// get away from an update that broke the build (`git reset --hard ORIG_HEAD`,
+/// which is how git-reset(1) says to undo a pull), to reproduce a bug on last
+/// week's code, the tree was moved forward again under whatever was running
+/// in it, and again after every further reset.
+///
+/// The branch's own log says which it is. Its newest entry is the last thing
+/// that moved it, and a step back has two marks: the branch went to an
+/// ancestor of where it was, and where it was is a commit the upstream has.
+/// The second is what keeps `git reset --hard HEAD~1` to throw away a commit
+/// of one's own from freezing the branch: that is stepping back onto the
+/// upstream, not along it.
+///
+/// It holds until the branch is moved again, by anything: `p` here, a pull in
+/// a terminal. Only a pass across the fleet asks.
+fn stepped_back(repo: &Repository, at: &Tracking) -> bool {
+    let Ok(log) = repo.reflog(&format!("refs/heads/{}", at.branch)) else {
+        return false;
+    };
+    let Some(last) = log.get(0) else { return false };
+    let (from, to) = (last.id_old(), last.id_new());
+    // A log that does not end where the branch is has missed something, and
+    // is not evidence of anything.
+    if from.is_zero() || to != at.local {
+        return false;
+    }
+    let behind_where_it_was = repo.graph_descendant_of(from, to).unwrap_or(false);
+    let upstream_has_it =
+        from == at.upstream || repo.graph_descendant_of(at.upstream, from).unwrap_or(false);
+    behind_where_it_was && upstream_has_it
 }
 
 /// Whether fast-forwarding would move the pointer of a submodule that is
@@ -1558,6 +1605,55 @@ mod tests {
             );
             assert!(report.fetched, "{pass:?}");
         }
+    }
+
+    // ---- a branch the user moved back ------------------------------------
+
+    /// "Clean and strictly behind" is what a branch is when the remote has
+    /// moved. It is also what a branch is after `git reset --hard` to an older
+    /// commit, and the timer could not tell: undoing its own update, the way
+    /// git-reset(1) says to undo a pull, lasted one interval.
+    #[test]
+    fn a_branch_stepped_back_by_hand_is_not_moved_forward_again_unasked() {
+        let _guard = isolate();
+        let f = fleet("rf-stepped-back");
+        f.remote_moves(2);
+        assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(2)));
+        git(&f.work, &["reset", "-q", "--hard", "ORIG_HEAD"]);
+        let chosen = f.head();
+
+        let got = fleet_pass(&f);
+        assert_eq!(f.head(), chosen, "{got:?}");
+        assert!(matches!(got, Outcome::Skipped(Skip::SteppedBack)), "{got:?}");
+
+        // More arriving upstream is no reason either.
+        f.remote_commits("more", |seed| write(&seed.join("more.txt"), "more\n"));
+        let report = refresh_one(&f.work, &options(true, Pass::Fleet));
+        assert!(matches!(report.outcome, Outcome::Skipped(Skip::SteppedBack)), "{report:?}");
+        assert!(report.fetched);
+        assert_eq!(f.head(), chosen);
+
+        // Asking for it by name is, and after that it is kept current again.
+        let got = asked_for(&f);
+        assert!(matches!(got, Outcome::FastForwarded(3)), "{got:?}");
+        f.remote_commits("and more", |seed| write(&seed.join("yet-more.txt"), "more\n"));
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// Only a step back along the upstream counts. Throwing away a commit of
+    /// one's own with the same command leaves a branch that should simply be
+    /// kept current.
+    #[test]
+    fn dropping_a_commit_of_ones_own_does_not_hold_the_branch_back() {
+        let _guard = isolate();
+        let f = fleet("rf-stepped-back-not");
+        commit_file(&f.work, "mine.txt", "mine\n", "an experiment");
+        git(&f.work, &["reset", "-q", "--hard", "HEAD~1"]);
+        f.remote_moves(1);
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
     }
 
     // ---- an upstream that was rewritten ----------------------------------
