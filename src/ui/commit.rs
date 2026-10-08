@@ -556,7 +556,13 @@ pub fn pane(
                 return glib::Propagation::Proceed;
             }
             if key == gtk::gdk::Key::c {
-                if message.get_visible() {
+                // Mapped, and not `get_visible()`: that reads the entry's own
+                // flag, which nothing ever clears. It is the box around the
+                // entry that is hidden, for every commit that is not the
+                // working tree, and GTK will give the focus to a widget it is
+                // not showing. `c` on an ordinary commit's files sent the
+                // keyboard into an entry nobody could see.
+                if message.is_mapped() {
                     message.grab_focus();
                     return glib::Propagation::Stop;
                 }
@@ -588,6 +594,13 @@ pub fn pane(
     let focus_files: Rc<dyn Fn()> = {
         let files = files_for_focus;
         Rc::new(move || {
+            // Not into a pane that is not on screen. The list is filled
+            // whether or not the pane is open, and a row in a hidden pane
+            // takes the focus as readily as any other: the focus ring
+            // vanished and the arrow keys moved a selection nobody could see.
+            if !files.is_mapped() {
+                return;
+            }
             // Browse selection keeps a row current, so focusing the list lands
             // on the file already being shown.
             if let Some(row) = files.selected_row() {
