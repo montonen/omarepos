@@ -570,6 +570,22 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         });
     }
     {
+        // Down from the filter moves into the grid, the way a launcher does:
+        // the filter is where the keyboard starts, and the cards must not be
+        // a Tab hunt away from it.
+        let ui = Rc::clone(&ui);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let down = key == gdk::Key::Down || key == gdk::Key::KP_Down;
+            if !down || !ui::unmodified(state) || ui.flow.child_at_index(0).is_none() {
+                return glib::Propagation::Proceed;
+            }
+            ui.focus_grid(true);
+            glib::Propagation::Stop
+        });
+        search.add_controller(keys);
+    }
+    {
         let ui = Rc::clone(&ui);
         sort.connect_selected_notify(move |_| ui.rebuild());
     }
@@ -875,6 +891,16 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_updated);
 
+    let act_launched = gio::SimpleAction::new("launched-again", None);
+    {
+        // Sent by every launch that found this window already open. Whoever
+        // pressed the launcher key is about to type a repository's name,
+        // and cannot tell from the key whether the window was there before.
+        let ui = Rc::clone(&ui);
+        act_launched.connect_activate(move |_, _| ui.focus_filter());
+    }
+    window.add_action(&act_launched);
+
     ui.sync_trouble();
     // A new window means the application is not closing after all.
     crate::gitcmd::wind_down(false);
@@ -915,6 +941,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     ui.watch_theme();
     ui.schedule_refresh();
     ui.start_scan();
+    // Before the window is shown: a window shown with nothing focused picks
+    // the first button in its header.
+    ui.focus_filter();
     window.present();
 }
 
@@ -1143,12 +1172,14 @@ impl Ui {
                         ui.spinner.set_visible(false);
                         ui.rebuild();
                         ui.read_again(false);
-                        // Arrow keys should work the moment the grid has
-                        // something in it, without hunting for it with Tab.
-                        // On a short scan this runs before the window is
-                        // mapped, where grab_focus does nothing and GTK then
-                        // hands focus to the header instead. A beat later the
-                        // grid is real and can take it.
+                        // The grid takes a keyboard that is nowhere in
+                        // use, so the arrow keys work without hunting for
+                        // the cards with Tab. Not at launch any more: the
+                        // filter has it then, and this stands back for a
+                        // text field. It is for the scans after that one,
+                        // which leave the keyboard on whatever button
+                        // started them. A beat later, because the grid has
+                        // to be real before it can take anything.
                         {
                             let ui = Rc::clone(&ui);
                             glib::timeout_add_local_once(
@@ -2336,6 +2367,24 @@ impl Ui {
             }
             glib::ControlFlow::Break
         });
+    }
+
+    /// Give the filter the keyboard, with whatever is in it selected, so
+    /// that what is typed next is the filter. This is where the keyboard
+    /// starts: the window is opened to find a repository, the way a launcher
+    /// is, and the letters that would name one mean other things on a card —
+    /// `p` updates the repository under the keyboard, `l` opens a terminal.
+    /// The grid is one Down away.
+    ///
+    /// Only with the grid in front and nothing over it. Behind a dialog or
+    /// another page the filter is out of sight, and the keyboard would go
+    /// where nobody can see what it types.
+    fn focus_filter(&self) {
+        if !self.on_grid() || self.window.visible_dialog().is_some() {
+            return;
+        }
+        self.search.grab_focus();
+        self.search.select_region(0, -1);
     }
 
     /// Put the keyboard in the grid. `force` takes focus even from a text

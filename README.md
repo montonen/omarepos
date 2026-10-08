@@ -141,6 +141,13 @@ omarepos [options]
   -V, --version       Show the version
 ```
 
+The filter has the keyboard when the window opens, so a repository is its
+name and `Enter` away: type, and the grid narrows; `Enter` opens the top hit.
+The launcher key does the same to a window that was already open, with what
+was left in the filter selected, so that what you type replaces it. (Only with
+the grid in front. A commit graph you left open keeps the keyboard.) `Down`
+moves from the filter into the cards.
+
 | Key | Action |
 | --- | --- |
 | `Ctrl+R` / `F5` | Rescan (local only). In a commit graph: read that repository again |
@@ -149,6 +156,7 @@ omarepos [options]
 | `Ctrl+F`, or `/` with the keyboard on a card | Focus the filter box |
 | `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
+| `Down` in the filter | Move into the cards |
 | `Ctrl+A` | Select every repo shown; again to deselect |
 | `Esc` | Back out: a dialog or menu, the filter you are typing in, then the page, then the selection, then the filter |
 | `Esc` in the commit message | Step out of the field. The message stays |

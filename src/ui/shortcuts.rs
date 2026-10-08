@@ -28,8 +28,9 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+A", "Tick everything shown, again to untick"),
             ("Ctrl+Shift+A", "Clear the selection"),
             ("Ctrl+L", "Put the keyboard back in the grid"),
-            ("Ctrl+F  or  /", "Filter — try tag:work or lang:rust"),
+            ("Ctrl+F  or  /", "Filter — try tag:work or lang:rust. It has the keyboard at launch"),
             ("Enter in the filter", "Open the top hit"),
+            ("↓ in the filter", "Into the repositories"),
         ],
     ),
     (

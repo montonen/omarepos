@@ -280,6 +280,8 @@ pub fn install(window: &adw::ApplicationWindow) {
             .or_else(|| first_entry(window.upcast_ref()).map(|entry| entry.upcast()));
         match field {
             Some(field) => {
+                // As a keyboard does it: what is selected is typed over.
+                field.delete_selection();
                 let mut at = field.position();
                 field.insert_text(text, &mut at);
                 field.set_position(at);

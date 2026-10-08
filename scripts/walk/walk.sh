@@ -51,6 +51,17 @@ tags() { : > "$W/config/omarepos/repos.toml"; local i=0 n; n=$(echo "$1" | wc -w
     printf '[repos."%s/fleet/%s"]\ntags = ["%s"]\n\n' "$W" "$r" "$t" >> "$W/config/omarepos/repos.toml"; done; }
 
 boot
+# ---- where the keyboard starts: in the filter, to be typed into at once
+keyboard() { X dump "keyboard:" | grep -q "$1" || { WRONG=$((WRONG+1)); echo "WRONG: $2"; }; }
+keyboard GtkText "the keyboard is not in the filter at launch"
+step "type a name at once" "X type widgets; sleep 0.4"
+step "Down into the cards" "X keys Down"
+keyboard GtkFlowBoxChild "Down from the filter did not reach a card"
+step "the launcher key, with the window open" "X act launched-again"
+keyboard GtkText "a second launch did not put the keyboard in the filter"
+step "type over what was there" "X type alpha; sleep 0.4"
+X dump | grep -q 'SearchEntry "alpha"' || { WRONG=$((WRONG+1)); echo "WRONG: a second launch did not select what was in the filter"; }
+step "clear it" "X keys Escape"
 # ---- the grid
 for n in 0 1 2 3 4; do step "sort order $n" "X choose $n"; done
 step "attention toggle on" 'X press "Show only repos needing attention"'

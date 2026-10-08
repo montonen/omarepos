@@ -119,6 +119,10 @@ fn main() -> glib::ExitCode {
         // timer, fetching the same repositories alongside it.
         if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
             window.present();
+            // The launcher key is pressed to find a repository, by someone
+            // who cannot see from the key whether a window was open already.
+            // The keyboard goes where it is at a first launch: in the filter.
+            let _ = WidgetExt::activate_action(&window, "win.launched-again", None);
             // The launcher key after a reinstall brings this window forward,
             // and this is the build from before. It looked exactly like the
             // new one having started.

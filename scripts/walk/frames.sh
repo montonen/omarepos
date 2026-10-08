@@ -33,14 +33,13 @@ keyboard() { X dump "keyboard:" | grep -q "$1" || wrong "$2 ($(X dump keyboard:)
 across() { for size in 900x700 1020x700; do X resize $size; sleep 3.5; done; }
 
 python3 "$HERE/drive.py" start-offscreen || exit 2
-X keys ctrl+f
-keyboard GtkText "Ctrl+F did not put the keyboard in the filter"
+keyboard GtkText "the keyboard is not in the filter at launch"
 
 # The first change of width since launch, with the keyboard somewhere other
 # than where it started: it must come back to where it was, not to there.
 X type mer; sleep 1.2
-X keys ctrl+l
-keyboard GtkFlowBoxChild "Ctrl+L did not put the keyboard on a card"
+X keys Down
+keyboard GtkFlowBoxChild "Down from the filter did not reach a card"
 across
 keyboard GtkFlowBoxChild "a card lost the keyboard to a change of width"
 
