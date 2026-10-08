@@ -468,7 +468,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // Type to narrow, Enter to open the top hit.
         let ui = Rc::clone(&ui);
         search.connect_activate(move |_| {
-            let info = ui.shown.borrow().first().cloned();
+            // Not `shown`. The grid follows the text through `search-changed`,
+            // which the entry holds back for 150 ms after the last keystroke;
+            // type a name and press Enter in one motion and the grid has not
+            // caught up, so its first card is whatever sorted first before
+            // the filter applied. Ask for the top hit of what is typed now.
+            let info = ui.visible().into_iter().next();
             if let Some(info) = info {
                 ui.open_graph(&info);
             }
@@ -540,7 +545,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     let act_focus_grid = gio::SimpleAction::new("focus-grid", None);
     {
         let ui = Rc::clone(&ui);
-        act_focus_grid.connect_activate(move |_, _| ui.focus_grid(true));
+        act_focus_grid.connect_activate(move |_, _| {
+            // Bring the grid up to what is typed before stepping into it, for
+            // the same reason Enter in the filter does not trust `shown`.
+            ui.rebuild();
+            ui.focus_grid(true);
+        });
     }
     window.add_action(&act_focus_grid);
 
@@ -920,7 +930,14 @@ impl Ui {
         if let Some(path) = focused {
             if let Some(index) = repos.iter().position(|repo| repo.path == path) {
                 if let Some(child) = self.flow.child_at_index(index as i32) {
-                    child.grab_focus();
+                    // Through the flow box's own focus path, not `grab_focus`.
+                    // The box keeps a cursor of its own, which is where the
+                    // arrow keys start from, and `grab_focus` on a card moves
+                    // the window's focus without moving that. The cursor went
+                    // on naming a card this rebuild had just removed, and the
+                    // next arrow key started from it: from the wrong place at
+                    // best, from freed memory at worst.
+                    child.child_focus(gtk::DirectionType::Down);
                 }
             }
         }
@@ -1578,7 +1595,11 @@ impl Ui {
             return;
         }
         if let Some(child) = self.flow.child_at_index(0) {
-            child.grab_focus();
+            // As in `rebuild`: through the box, so its cursor comes too. GTK
+            // leaves the cursor alone for a card that already holds the focus,
+            // so the focus is let go of first.
+            gtk::prelude::GtkWindowExt::set_focus(&self.window, gtk::Widget::NONE);
+            child.child_focus(gtk::DirectionType::Down);
         }
     }
 
