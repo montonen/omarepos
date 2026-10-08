@@ -203,6 +203,10 @@ pub fn pane(
     // whichever row it took for itself. Neither is the user's doing, and the
     // loader says what to show once it has put the selection back.
     let rebuilding = Rc::new(Cell::new(false));
+    // How many times the list has been rebuilt. What is put right a moment
+    // after a rebuild is dropped if another has happened since, and only
+    // then: a later read that changes nothing leaves this one's rows there.
+    let rebuilds = Rc::new(Cell::new(0u64));
     // Which groups are folded, for as long as the same commit is on show.
     let folds: Rc<RefCell<HashMap<Group, bool>>> = Rc::new(RefCell::new(HashMap::new()));
     // The adjustment the list scrolls to its focused row with, which GTK gives
@@ -256,6 +260,12 @@ pub fn pane(
                 button.set_sensitive(true);
                 files_for_commit.set_sensitive(true);
                 busy.set(false);
+                // Switching off the button that was pressed takes the
+                // keyboard away from it, and switching it on again does not
+                // give it back: after a refusal the keyboard was nowhere.
+                if button.root().is_some_and(|root| root.focus().is_none()) {
+                    button.grab_focus();
+                }
                 let reread = || {
                     if let Some(reload) = reload.borrow().clone() {
                         reload();
@@ -369,15 +379,19 @@ pub fn pane(
             let who = who.clone();
             let viewer = Rc::clone(&viewer);
             let rebuilding = Rc::clone(&rebuilding);
+            let rebuilds = Rc::clone(&rebuilds);
             let follows = Rc::clone(&follows);
             let folds = Rc::clone(&folds);
 
             glib::spawn_future_local(async move {
                 if !again {
                     glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
-                    if *generation.borrow() != mine {
-                        return;
-                    }
+                }
+                // Asked again since, whether or not there was a wait: this
+                // runs a turn of the main loop after it was asked for, and two
+                // requests in one turn would otherwise each start a read.
+                if *generation.borrow() != mine {
+                    return;
                 }
 
                 let (rx, cancel) = commit::spawn(repo.clone(), target.clone());
@@ -459,6 +473,8 @@ pub fn pane(
                     result: result.clone(),
                 });
                 rebuilding.set(true);
+                rebuilds.set(rebuilds.get() + 1);
+                let built = rebuilds.get();
                 files.remove_all();
                 commit_box.set_visible(working);
 
@@ -567,14 +583,28 @@ pub fn pane(
                                 continue;
                             }
                             let mut members = Vec::new();
+                            // The folders above the row being made, so that a
+                            // folder's row can be named by its whole path:
+                            // `src/ui` and `tests/ui` are both `ui`, and the
+                            // keyboard is put back on a row by its name.
+                            let mut above: Vec<String> = Vec::new();
                             for node in commit::tree(&in_group) {
-                                let row = row(&node, group, writer.as_ref());
+                                let row = row(&node, writer.as_ref());
                                 // The files of a group that holds nothing
                                 // back step back with its heading. Only the
                                 // heading did, which left the untracked files
                                 // drawn as loudly as the changes that matter.
                                 if group != Group::Committed && !group.blocks_update() {
                                     row.add_css_class("om-aside");
+                                }
+                                if let Node::Dir { name, depth } = &node {
+                                    above.truncate(*depth);
+                                    above.push(name.clone());
+                                    row.set_widget_name(&format!(
+                                        "dir:{}:{}",
+                                        side_token(group),
+                                        above.join("/")
+                                    ));
                                 }
                                 members.push(row.clone());
                                 files.append(&row);
@@ -607,6 +637,8 @@ pub fn pane(
                             let row = gtk::ListBoxRow::builder().child(&more).build();
                             row.set_selectable(false);
                             row.set_activatable(false);
+                            // The arrow keys stop here as well.
+                            row.set_widget_name("more:");
                             files.append(&row);
                         }
                         tell(&totals, &summary(detail));
@@ -637,6 +669,11 @@ pub fn pane(
                 // on, or the nearest to it of those that are left.
                 let rows: HashMap<String, gtk::ListBoxRow> = named_rows(&files).into_iter().collect();
                 let chosen = match &place {
+                    // Nothing selected because nothing could be: every group
+                    // folded, or a list that could not be read. That is not
+                    // the user choosing to have no selection, and the first
+                    // file to show up is selected as on a first load.
+                    Some(place) if !place.had_a_file => first_row(&files, is_shown_file),
                     Some(place) => place.back(place.selected, &rows, is_shown_file),
                     None => first_row(&files, is_shown_file),
                 };
@@ -698,15 +735,15 @@ pub fn pane(
                 // allows, and the row the keyboard is on is brought into view
                 // if that left it out.
                 if same {
-                    let generation = Rc::clone(&generation);
                     let follows = Rc::clone(&follows);
                     glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
                         files.set_adjustment(follows.get().and_then(Option::as_ref));
                         if let Some(viewport) = &viewport {
                             viewport.set_scroll_to_focus(true);
                         }
-                        // A later read has its own idea of where the list is.
-                        if *generation.borrow() != mine {
+                        // A later rebuild has its own idea of where the list
+                        // is, and its own turn at this.
+                        if rebuilds.get() != built {
                             return;
                         }
                         scroller.vadjustment().set_value(offset);
@@ -923,10 +960,10 @@ struct Listed {
     result: Result<Box<Detail>, String>,
 }
 
-/// One file's diff as it stands in the view.
+/// One file's diff as it stands in the view, or the reason there is none.
 struct Rendered {
     key: (PathBuf, Target, Option<Group>, String),
-    diff: Box<commit::FileDiff>,
+    diff: Result<Box<commit::FileDiff>, String>,
 }
 
 /// The diff view, and the reading of what goes into it.
@@ -995,28 +1032,28 @@ impl Viewer {
             if viewer.generation.get() != mine {
                 return;
             }
-            match result {
+            let same = viewer
+                .rendered
+                .borrow()
+                .as_ref()
+                .is_some_and(|rendered| rendered.key == key && rendered.diff == result);
+            if same {
+                return;
+            }
+            match &result {
                 Ok(diff) => {
-                    let same = viewer
-                        .rendered
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|rendered| rendered.key == key && rendered.diff == diff);
-                    if same {
-                        return;
-                    }
                     // The palette as it is now, and not as it was when the
                     // pane was built: the theme can be changed while a graph
                     // page is open, and the view's own background follows it.
                     let tints = Tints::of(&crate::theme::Palette::load());
-                    render_diff(&viewer.buffer, &diff, &path, &tints);
-                    *viewer.rendered.borrow_mut() = Some(Rendered { key, diff });
+                    render_diff(&viewer.buffer, diff, &path, &tints);
                 }
-                Err(err) => {
-                    viewer.buffer.set_text(&err);
-                    *viewer.rendered.borrow_mut() = None;
-                }
+                Err(err) => viewer.buffer.set_text(err),
             }
+            // Kept for an error too: the next read of the same file is then
+            // as quiet as any other, and does not blank the reason to show it
+            // again.
+            *viewer.rendered.borrow_mut() = Some(Rendered { key, diff: result });
         });
     }
 }
@@ -1025,11 +1062,14 @@ impl Viewer {
 /// so that they can be put back when it has been filled again.
 struct Place {
     /// Every row that can be found again, in order, by the name it was given:
-    /// files, folders and group headings.
+    /// files, folders, group headings and the line that counts what is not
+    /// listed.
     names: Vec<String>,
     selected: Option<usize>,
     /// The row the keyboard was on or in, if it was in the list at all.
     focused: Option<usize>,
+    /// Whether there was a file's row on show, to be selected or not.
+    had_a_file: bool,
 }
 
 impl Place {
@@ -1043,8 +1083,9 @@ impl Place {
                     .and_downcast::<gtk::ListBoxRow>()
             })
         });
-        let mut place = Place { names: Vec::new(), selected: None, focused: None };
+        let mut place = Place { names: Vec::new(), selected: None, focused: None, had_a_file: false };
         for (name, row) in named_rows(files) {
+            place.had_a_file |= is_shown_file(&row);
             if selected.as_ref() == Some(&row) {
                 place.selected = Some(place.names.len());
             }
@@ -1093,7 +1134,7 @@ fn named_rows(files: &gtk::ListBox) -> Vec<(String, gtk::ListBoxRow)> {
         .map_while(|index| files.row_at_index(index))
         .filter_map(|row| {
             let name = row.widget_name();
-            ["file:", "dir:", "group:"]
+            ["file:", "dir:", "group:", "more:"]
                 .iter()
                 .any(|kind| name.starts_with(kind))
                 .then(|| (name.to_string(), row))
@@ -1384,8 +1425,9 @@ fn contrast(a: Rgb, b: Rgb) -> f64 {
 
 /// `colour`, moved towards `fg` by as little as gives it a contrast of `floor`
 /// against every one of `surfaces`. Left alone when it has that already. When
-/// not even `fg` has it, `fg` is the answer: nothing drawn here should be
-/// harder to read than the theme's own text.
+/// not even `fg` has it, the answer is whichever of the two reads better:
+/// the theme's own text is as clear as this asks anything to be, and a colour
+/// that was clearer than that is not made worse.
 fn legible(colour: Rgb, surfaces: &[Rgb], fg: Rgb, floor: f64) -> Rgb {
     const STEPS: u32 = 16;
     let least = |colour: Rgb| {
@@ -1394,7 +1436,7 @@ fn legible(colour: Rgb, surfaces: &[Rgb], fg: Rgb, floor: f64) -> Rgb {
     (0..STEPS)
         .map(|step| mix(colour, fg, f64::from(step) / f64::from(STEPS)))
         .find(|mixed| least(*mixed) >= floor)
-        .unwrap_or(fg)
+        .unwrap_or(if least(fg) >= least(colour) { fg } else { colour })
 }
 
 /// A foreground tag for one colour, created once per colour and reused — a
@@ -1626,11 +1668,7 @@ fn prefix(origin: char) -> &'static str {
     }
 }
 
-fn row(
-    node: &Node,
-    group: Group,
-    on_write: Option<&Rc<dyn Fn(Write, String)>>,
-) -> gtk::ListBoxRow {
+fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBoxRow {
     match node {
         Node::Dir { name, depth } => {
             let label = gtk::Label::builder()
@@ -1644,9 +1682,6 @@ fn row(
             let row = gtk::ListBoxRow::builder().child(&label).build();
             row.set_selectable(false);
             row.set_activatable(false);
-            // The arrow keys stop on a folder's row too, and the keyboard is
-            // put back on it by name when the list is rebuilt.
-            row.set_widget_name(&format!("dir:{}:{depth}:{name}", side_token(group)));
             row
         }
         Node::File { file, display, depth } => {
@@ -1932,5 +1967,7 @@ mod tests {
         let (bg, fg) = (hex("#808080"), hex("#909090"));
         assert!(contrast(fg, bg) < LEGIBLE);
         assert_eq!(legible(hex("#858585"), &[bg], fg, LEGIBLE), fg);
+        // And a colour that was clearer than that text is not pulled down to it.
+        assert_eq!(legible(hex("#b0b0b0"), &[bg], fg, LEGIBLE), hex("#b0b0b0"));
     }
 }
