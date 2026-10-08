@@ -141,7 +141,8 @@ impl Palette {
     pub fn load() -> Self {
         let dir = state_dir();
         let name = std::fs::read_to_string(dir.join("theme.name"))
-            .map(|s| s.trim().to_string())
+            // The name goes into the header's label, which takes no NUL.
+            .map(|s| s.trim().replace('\0', ""))
             .ok()
             .filter(|s| !s.is_empty());
         let Ok(text) = std::fs::read_to_string(dir.join("theme/colors.toml")) else {

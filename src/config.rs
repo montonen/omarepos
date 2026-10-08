@@ -491,6 +491,28 @@ impl Config {
         if self.refresh.fast_forward {
             self.refresh.fetch = true;
         }
+        // Every string here ends up in a label or an entry, and those take no
+        // NUL. TOML will carry one (`"x\u0000y"`); it is dropped here, where
+        // both a first read and a re-read pass.
+        let clean = |text: &mut String| text.retain(|c| c != '\0');
+        for text in [&mut self.terminal, &mut self.editor, &mut self.terminal_runs] {
+            if let Some(text) = text {
+                clean(text);
+            }
+        }
+        self.extra_repos.iter_mut().for_each(clean);
+        self.refresh.only_tags.iter_mut().for_each(clean);
+        for root in &mut self.roots {
+            match root {
+                RootSpec::Simple(path) => clean(path),
+                RootSpec::Detailed(entry) => {
+                    clean(&mut entry.path);
+                    if let Some(tag) = &mut entry.tag {
+                        clean(tag);
+                    }
+                }
+            }
+        }
         self
     }
 
@@ -822,7 +844,9 @@ mod tests {
             "Cafe\u{301}",
             "a\u{a0}b",
             "soft\u{ad}hyphen",
-            "esc\u{1b}del\u{7f}nul\u{0}",
+            // No NUL here: one is dropped on the way in, by design, and has a
+            // test of its own.
+            "esc\u{1b}del\u{7f}",
             "quote \" and \\ backslash and 'single'",
             "two\nlines\tand a tab",
         ];
@@ -913,6 +937,28 @@ mod tests {
         assert_eq!(cfg.max_depth, 5);
         assert!(cfg.one_off(), "the command line's roots are kept across a re-read");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// TOML will carry a NUL in a string, and nothing that shows text takes
+    /// one.
+    #[test]
+    fn a_nul_written_into_the_file_does_not_reach_a_label() {
+        let _guard = isolate();
+        let path = Config::path();
+        write(
+            &path,
+            "roots = [\"~/co\\u0000de\", { path = \"~/work\\u0000\", tag = \"a\\u0000b\" }]\n\
+             extra_repos = [\"/srv/x\\u0000y\"]\nterminal = \"foot\\u0000\"\n\
+             [refresh]\nonly_tags = [\"w\\u0000ork\"]\n",
+        );
+        let cfg = Config::load();
+        assert_eq!(cfg.load_error, None);
+        assert_eq!(cfg.root_labels(), ["~/code", "~/work"]);
+        assert_eq!(cfg.roots()[1].tag.as_deref(), Some("ab"));
+        assert_eq!(cfg.extra_repos, ["/srv/xy"]);
+        assert_eq!(cfg.terminal.as_deref(), Some("foot"));
+        assert_eq!(cfg.refresh.only_tags, ["work"]);
         let _ = std::fs::remove_file(&path);
     }
 
