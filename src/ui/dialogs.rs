@@ -851,7 +851,13 @@ pub fn edit_tags_among(
     };
 
     let shared = meta.borrow().shared_tags(&repos);
-    let entry = adw::EntryRow::builder().title("Tags").build();
+    // Enter in the field presses Save. An entry row keeps Enter to itself
+    // unless told otherwise, so a tag typed and entered went nowhere, under a
+    // Save button drawn as the default.
+    let entry = adw::EntryRow::builder()
+        .title("Tags")
+        .activates_default(true)
+        .build();
     entry.set_text(&shared.join(", "));
 
     let group = adw::PreferencesGroup::new();
@@ -932,6 +938,24 @@ pub fn edit_tags_among(
         }
         on_change();
     });
+
+    // The keyboard starts in the field, after what is already there. Left to
+    // itself it can start on Save, where typing a tag does nothing and the
+    // first space closes the dialog. And GTK selects the whole of an entry it
+    // puts the keyboard in, so that the first key typed would replace the tags
+    // the repository has: hence the caret, put at the end once the dialog is
+    // up and has done its own focusing.
+    dialog.set_focus(Some(&entry));
+    {
+        let entry = entry.clone();
+        dialog.connect_map(move |_| {
+            let entry = entry.clone();
+            gtk::glib::idle_add_local_once(move || {
+                entry.grab_focus_without_selecting();
+                entry.set_position(-1);
+            });
+        });
+    }
 
     dialog.present(Some(parent.as_ref()));
 }
