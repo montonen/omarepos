@@ -1409,9 +1409,6 @@ impl Ui {
         self.update_status();
     }
 
-    /// Which repositories a refresh covers: everything found, narrowed to the
-    /// configured tags when there are any. Deliberately not the *filtered*
-    /// grid — what you are looking at should not change what gets fetched.
     /// Whether the user has seen this repository. Everything counts as seen
     /// until the first scan has recorded what was already on the grid.
     fn is_known(&self, path: &Path) -> bool {
@@ -1516,6 +1513,9 @@ impl Ui {
         }
     }
 
+    /// Which repositories a refresh covers: everything found, narrowed to the
+    /// configured tags when there are any. Deliberately not the *filtered*
+    /// grid — what you are looking at should not change what gets fetched.
     fn refresh_scope(&self) -> Vec<PathBuf> {
         let wanted: Vec<String> = self
             .cfg
@@ -1542,8 +1542,6 @@ impl Ui {
             .collect()
     }
 
-    /// Run a refresh pass. `manual` means the user asked, which fetches even
-    /// when the background setting is off and reports when nothing was done.
     /// A timer only runs while the window is open, and it first fires a whole
     /// interval after launch. An app opened for five minutes at a time would
     /// therefore never refresh at all — which is what happened. The last
@@ -1565,6 +1563,8 @@ impl Ui {
         }
     }
 
+    /// Run a refresh pass. `manual` means the user asked, which fetches even
+    /// when the background setting is off and reports when nothing was done.
     fn run_refresh(self: &Rc<Self>, manual: bool) {
         if self.refreshing.get() || self.scanning.get() {
             if manual {
@@ -1987,13 +1987,6 @@ impl Ui {
         );
     }
 
-    /// Tick every repository the grid is currently showing, or untick them all
-    /// when they are already ticked. Toggling means the selection can be
-    /// undone with the key that made it, without reaching for a chord.
-    ///
-    /// An accelerator fires ahead of the focused widget, so Ctrl+A in the
-    /// filter box would otherwise stop selecting its text. When the focus is
-    /// somewhere typable it keeps its usual meaning.
     fn enter_keyboard_nav(&self) {
         self.last_key.set(Some(std::time::Instant::now()));
         if !self.keyboard_nav.replace(true) {
@@ -2169,6 +2162,13 @@ impl Ui {
         }
     }
 
+    /// Tick every repository the grid is currently showing, or untick them all
+    /// when they are already ticked. Toggling means the selection can be
+    /// undone with the key that made it, without reaching for a chord.
+    ///
+    /// An accelerator fires ahead of the focused widget, so Ctrl+A in the
+    /// filter box would otherwise stop selecting its text. When the focus is
+    /// somewhere typable it keeps its usual meaning.
     fn select_all_shown(self: &Rc<Self>) {
         if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
