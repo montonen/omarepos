@@ -13,7 +13,7 @@
 //! of the line totals — their diffs are their parents' work, counted already.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use git2::{Oid, Repository, Sort};
 
@@ -64,6 +64,8 @@ pub struct Commit {
 /// message in memory for a list nobody scrolls that far down.
 #[derive(Debug, Clone, Default)]
 pub struct RepoCommits {
+    /// What to call the repository: see [`labels`].
+    pub name: String,
     pub commits: Vec<Commit>,
     pub total: usize,
 }
@@ -81,8 +83,11 @@ pub struct Author {
     pub deletions: usize,
     pub files: usize,
     pub per_day: Vec<usize>,
-    /// Repository name -> what they did there.
-    pub repos: BTreeMap<String, RepoCommits>,
+    /// Repository -> what they did there. Keyed by path: keyed by folder name,
+    /// two repositories called `api` under two roots were one group, with one
+    /// total, one list of both sets of commits and one cap of a hundred
+    /// between them.
+    pub repos: BTreeMap<PathBuf, RepoCommits>,
     pub last_seen: i64,
 }
 
@@ -129,14 +134,14 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
         let mut total_commits = 0usize;
         let mut total_insertions = 0usize;
         let mut total_deletions = 0usize;
+        // Every commit counted so far, in any repository. A linked worktree, a
+        // second clone and a fork beside its upstream are each a card of their
+        // own and hold the same commits; counted once per path, one repository
+        // with a worktree and a spare clone tripled everything on the page.
+        let mut counted: HashSet<Oid> = HashSet::new();
 
-        for (n, path) in repos.iter().enumerate() {
-            let name = path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
-
-            match collect(path, &name, &window, &mut acc, &mut per_day_total) {
+        for (n, (path, name)) in repos.iter().zip(labels(&repos)).enumerate() {
+            match collect(path, &name, &window, &mut acc, &mut per_day_total, &mut counted) {
                 Ok(found) => {
                     if found.commits > 0 {
                         repos_active += 1;
@@ -180,6 +185,52 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
     rx
 }
 
+/// What to call each repository on the page: its folder name, with as many of
+/// the folders above it in front as it takes to tell it from the others being
+/// read. `api` is `api` until there are two of them, and then they are
+/// `personal/api` and `client/api`.
+fn labels(paths: &[PathBuf]) -> Vec<String> {
+    let parts: Vec<Vec<String>> = paths
+        .iter()
+        .map(|path| {
+            path.components()
+                .filter_map(|part| match part {
+                    Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    let mut depth = vec![1usize; paths.len()];
+    loop {
+        let names: Vec<String> = (0..paths.len())
+            .map(|i| match parts[i].len().checked_sub(depth[i]) {
+                Some(from) => parts[i][from..].join("/"),
+                // `/` and the like: no folder to name it by.
+                None => paths[i].display().to_string(),
+            })
+            .collect();
+        // The same path listed twice is one repository, not two with one name.
+        let mut owner: HashMap<&str, &Path> = HashMap::new();
+        let mut shared: HashSet<&str> = HashSet::new();
+        for (name, path) in names.iter().zip(paths) {
+            if *owner.entry(name).or_insert(path) != path.as_path() {
+                shared.insert(name);
+            }
+        }
+        let mut grew = false;
+        for (i, name) in names.iter().enumerate() {
+            if shared.contains(name.as_str()) && depth[i] < parts[i].len() {
+                depth[i] += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            return names;
+        }
+    }
+}
+
 struct Found {
     commits: usize,
     insertions: usize,
@@ -187,11 +238,12 @@ struct Found {
 }
 
 fn collect(
-    path: &std::path::Path,
+    path: &Path,
     repo_name: &str,
     window: &Window,
     acc: &mut HashMap<String, Author>,
     per_day_total: &mut [usize],
+    counted: &mut HashSet<Oid>,
 ) -> Result<Found, String> {
     let said = |e: git2::Error| e.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
@@ -235,6 +287,9 @@ fn collect(
             // Committed with a clock ahead of ours; fold into today.
             continue;
         }
+        if !counted.insert(oid) {
+            continue;
+        }
 
         let author = commit.author();
         let name = author.name().unwrap_or("unknown").to_string();
@@ -269,7 +324,10 @@ fn collect(
         entry.files += files;
         entry.per_day[day] += 1;
 
-        let in_repo = entry.repos.entry(repo_name.to_string()).or_default();
+        let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
+            name: repo_name.to_string(),
+            ..RepoCommits::default()
+        });
         in_repo.total += 1;
         if in_repo.commits.len() < MAX_COMMITS_LISTED {
             in_repo.commits.push(Commit {
@@ -435,7 +493,6 @@ fn find_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
 mod tests {
     use super::*;
     use crate::testkit::*;
-    use std::path::Path;
 
     const DAY: i64 = 86_400;
 
@@ -675,6 +732,72 @@ mod tests {
         f.remote_moves(2);
         git(&f.work, &["fetch", "--quiet"]);
         assert_eq!(totals(&contributions(&[&f.work])), (3, 3, 0), "main is two behind");
+    }
+
+    // ---- more than one repository --------------------------------------------
+
+    /// A linked worktree and a second clone hold the same commits as the
+    /// repository they came from, and each is a card of its own on the grid.
+    #[test]
+    fn a_worktree_and_a_second_clone_do_not_multiply_the_totals() {
+        let _guard = isolate();
+        let f = fleet("stats-copies");
+        commit_file(&f.work, "a.txt", &lines(30), "in the main checkout");
+        let linked = f.root.join("linked");
+        git(&f.work, &["worktree", "add", "-q", "-b", "side", linked.to_str().unwrap()]);
+        // What only the worktree has is still counted: it is checked out there.
+        commit_file(&linked, "b.txt", &lines(5), "in the worktree");
+        git(&f.root, &["clone", "-q", f.work.to_str().unwrap(), "copy"]);
+        let copy = f.root.join("copy");
+
+        let result = contributions(&[&f.work, &linked, &copy]);
+        assert_eq!(totals(&result), (3, 36, 0));
+        assert_eq!(by_author(&result).get("fixture@example.invalid"), Some(&3));
+        assert_eq!(result.per_day_total.iter().sum::<usize>(), 3);
+        assert_eq!(
+            (result.repos_active, result.repos_scanned),
+            (2, 3),
+            "the copy holds nothing the other two did not"
+        );
+    }
+
+    #[test]
+    fn two_repositories_with_one_folder_name_stay_two() {
+        let _guard = isolate();
+        let root = scratch("stats-namesakes");
+        let (personal, client) = (root.join("personal/api"), root.join("client/api"));
+        for dir in [&personal, &client] {
+            std::fs::create_dir_all(dir).unwrap();
+            git(dir, &["init", "-q", "-b", "main"]);
+        }
+        commit_file(&personal, "a.txt", "a\n", "personal one");
+        commit_file(&personal, "b.txt", "b\n", "personal two");
+        commit_file(&client, "c.txt", "c\n", "client one");
+
+        let result = contributions(&[&personal, &client]);
+        let author = &result.authors[0];
+        assert_eq!(author.commits, 3);
+        assert_eq!(author.repos.len(), 2, "one group for each repository");
+        let groups: Vec<(&str, usize)> = [&personal, &client]
+            .map(|path| (author.repos[path].name.as_str(), author.repos[path].total))
+            .into();
+        assert_eq!(groups, [("personal/api", 2), ("client/api", 1)]);
+    }
+
+    #[test]
+    fn a_repository_is_called_by_as_much_of_its_path_as_tells_it_apart() {
+        let named = |paths: &[&str]| labels(&paths.iter().map(PathBuf::from).collect::<Vec<_>>());
+        assert_eq!(
+            named(&["/home/u/code/api", "/home/u/work/api", "/home/u/work/web"]),
+            ["code/api", "work/api", "web"]
+        );
+        assert_eq!(
+            named(&["/srv/a/team/api", "/srv/b/team/api", "/srv/b/docs"]),
+            ["a/team/api", "b/team/api", "docs"],
+            "one folder up is not always enough"
+        );
+        assert_eq!(named(&["/x/api", "/x/api"]), ["api", "api"], "the same one twice");
+        assert_eq!(named(&["/"]), ["/"]);
     }
 
     // ---- what a commit is counted as -----------------------------------------

@@ -301,16 +301,17 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
     name.add_css_class("om-name");
     who.append(&name);
 
-    let mut repos: Vec<(&String, &RepoCommits)> = author.repos.iter().collect();
+    let mut repos: Vec<(&PathBuf, &RepoCommits)> = author.repos.iter().collect();
     repos.sort_by(|a, b| {
         b.1.total
             .cmp(&a.1.total)
+            .then_with(|| a.1.name.cmp(&b.1.name))
             .then_with(|| a.0.cmp(b.0))
     });
     let repo_line = repos
         .iter()
         .take(4)
-        .map(|(name, in_repo)| format!("{name} {}", in_repo.total))
+        .map(|(_, in_repo)| format!("{} {}", in_repo.name, in_repo.total))
         .collect::<Vec<_>>()
         .join("  ·  ");
     let extra = repos.len().saturating_sub(4);
@@ -417,17 +418,20 @@ fn tooltip(author: &Author) -> String {
 }
 
 /// The author's commits, grouped by repository, busiest first.
-fn commit_list(repos: &[(&String, &RepoCommits)]) -> gtk::Box {
+fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
     list.set_margin_top(12);
     list.set_margin_start(26);
 
-    for (name, in_repo) in repos {
+    for (path, in_repo) in repos {
         let group = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
+        // The name is the folder's, lengthened where two repositories share
+        // one; the tooltip says where the repository is in any case.
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        heading.append(&crate::ui::color_dot(key_color(name)));
-        let repo_name = gtk::Label::builder().label(*name).xalign(0.0).build();
+        heading.set_tooltip_text(Some(&crate::config::tildify(path)));
+        heading.append(&crate::ui::color_dot(key_color(&in_repo.name)));
+        let repo_name = gtk::Label::builder().label(&in_repo.name).xalign(0.0).build();
         repo_name.add_css_class("om-summary");
         heading.append(&repo_name);
         let count = gtk::Label::new(Some(&format!(
