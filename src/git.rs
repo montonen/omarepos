@@ -100,9 +100,6 @@ pub struct RepoInfo {
     /// and a misconfigured rule is otherwise silent until something is pushed
     /// under the wrong name.
     pub identity: Option<String>,
-    /// The credential helper that will be used for the remote's host, which is
-    /// what decides *which account* a fetch authenticates as.
-    pub credentials: Option<String>,
     /// Set when libgit2 could not read the repository at all: it does not
     /// open, it is not this directory's, or HEAD or the commit it names cannot
     /// be read. A narrower failure has a field of its own, so that it does not
@@ -475,7 +472,6 @@ pub fn inspect(path: &Path) -> RepoInfo {
         langs: Vec::new(),
         last_commit: None,
         identity: None,
-        credentials: None,
         error: None,
     };
 
@@ -624,25 +620,14 @@ pub fn inspect(path: &Path) -> RepoInfo {
             (None, Some(email)) => Some(email),
             (None, None) => None,
         };
-
-        let host = info
-            .remote
-            .as_deref()
-            .and_then(|r| r.split('/').next())
-            .unwrap_or("github.com");
-        for key in [
-            format!("credential.https://{host}.helper"),
-            "credential.helper".to_string(),
-        ] {
-            if let Ok(helper) = config.get_str(&key) {
-                let helper = helper.trim().trim_start_matches('!').trim();
-                if !helper.is_empty() {
-                    info.credentials = Some(helper.to_string());
-                    break;
-                }
-            }
-        }
     }
+    // Nothing here says which credential helper a fetch will use. The card
+    // used to, from two exact config keys and a host cut out of the tidied-up
+    // remote, with github.com standing in when there was no remote. That named
+    // a helper for a repository with no remote and for one fetched over SSH,
+    // which asks none, and missed any helper set for a path, a user or a
+    // wildcard host. git asks every helper that matches, in order, and offers
+    // no way to list them short of running it.
 
     if !info.bare {
         let mut opts = StatusOptions::new();

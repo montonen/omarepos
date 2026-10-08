@@ -102,9 +102,6 @@ pub fn build(
     if let Some(identity) = &info.identity {
         where_tip.push_str(&format!("\n\nCommits as {identity}"));
     }
-    if let Some(credentials) = &info.credentials {
-        where_tip.push_str(&format!("\nFetches with {credentials}"));
-    }
     where_tip.push_str("\n\nClick the card for its commit graph.");
     path.set_tooltip_text(Some(&where_tip));
     card.append(&path);
