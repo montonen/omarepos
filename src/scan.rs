@@ -21,27 +21,17 @@ pub enum Event {
     Done,
 }
 
-/// Kick off a scan. The returned receiver yields one `Discovered`, then one
+/// Kick off a scan. The first receiver yields one `Discovered`, then one
 /// `Repo` per repository, then `Done`. `extras` are individually added
 /// repositories, included whether or not they sit under a root.
-pub fn spawn(
-    roots: Vec<Root>,
-    extras: Vec<PathBuf>,
-    max_depth: usize,
-) -> async_channel::Receiver<Event> {
-    spawn_reporting(roots, extras, max_depth).0
-}
-
-/// As [`spawn`], and also what each root came to: one report per root, in
-/// the order the roots were given.
 ///
-/// The events could only ever speak of repositories that were found, so a
-/// root that found none had no way to say so: its repositories were simply
-/// not on the grid. The reports come on a channel of their own, because the
-/// events are matched in full by the window and a new kind of event would not
-/// compile there. They are sent once, before `Discovered`, so by the time
-/// that event is handled a `try_recv` on the second receiver has them.
-pub fn spawn_reporting(
+/// The second receiver has what each root came to: one report per root, in
+/// the order the roots were given. The events can only speak of repositories
+/// that were found, so a root that found none had no way to say so: its
+/// repositories were simply not on the grid. The reports are sent once,
+/// before `Discovered`, so by the time that event is handled a `try_recv` on
+/// the second receiver has them.
+pub fn spawn(
     roots: Vec<Root>,
     extras: Vec<PathBuf>,
     max_depth: usize,
@@ -149,7 +139,7 @@ mod tests {
         }
         let roots = vec![root(&base.join("code")), root(&base.join("moved-away"))];
 
-        let (events, reports) = spawn_reporting(roots.clone(), Vec::new(), 3);
+        let (events, reports) = spawn(roots.clone(), Vec::new(), 3);
         // The window takes the reports when it is told how many repositories
         // are coming, without waiting: they have to be there by then.
         let first = events.recv_blocking().unwrap();
@@ -161,8 +151,8 @@ mod tests {
         assert_eq!(drain(&events), (None, vec!["one".to_string(), "two".to_string()]));
 
         // And a scan nobody takes the reports from runs to its end all the
-        // same, which is every scan until the window asks for them.
-        let events = spawn(roots, Vec::new(), 3);
+        // same.
+        let (events, _) = spawn(roots, Vec::new(), 3);
         assert_eq!(drain(&events), (Some(2), vec!["one".to_string(), "two".to_string()]));
     }
 }

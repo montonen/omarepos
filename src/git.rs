@@ -354,10 +354,6 @@ impl RootReport {
 
     /// What there is to tell the user about this root, as a phrase to follow
     /// its name, or `None` when it found repositories and nothing is amiss.
-    //
-    // Nothing outside the tests calls it yet: the status bar and the Settings
-    // row that are to show it are in other files.
-    #[allow(dead_code)]
     pub fn says(&self) -> Option<String> {
         if let Some(problem) = &self.problem {
             return Some(problem.clone());

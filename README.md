@@ -192,12 +192,22 @@ roots = [
 ]
 ```
 
-`nested` lifts the stop-at-`.git` rule for that folder, and **only** for the
-subdirectories the folder's own repository *ignores*. That is the whole test,
-and it is the right one: a parked clone is ignored, while a submodule is
-tracked. Submodule paths are then excluded outright as well, so an unusual
-ignore configuration cannot let one in by accident. Below that first level the
-normal rule applies again — a clone's own submodules stay out of the grid.
+`nested` lifts the stop-at-`.git` rule for that folder: the clones its own
+repository *ignores* are found, at any depth, so a `.gitignore` of `repos/*`
+works as well as one of `*`. A parked clone is ignored; the folder's own
+submodules are not what is being looked for, and are left out by path wherever
+they sit. Inside a clone found this way the normal rule applies again — its own
+submodules stay out of the grid.
+
+A clone the workspace does *not* ignore is left out, and the status bar and the
+root's row in Settings say so by name, since that is nearly always a missing
+ignore rule and not a decision. The same two places say when a root gave
+nothing at all: the folder has been moved, or is not a folder, or holds no
+repositories. A workspace whose own repository will not open is searched as a
+plain folder, so its clones stay on the grid.
+
+When one root sits inside another, a repository belongs to the narrower one,
+whichever was listed first: that is the root whose tag it gets.
 
 `tag` tags what is found there, so thirty new cards do not drown the ones you
 had. It is reconciled on every scan — at startup, on `Ctrl+R`, and after any
@@ -212,10 +222,16 @@ which is what makes the following all behave:
 | Rename it on a repo whose tag you deleted | Nothing; a rename follows the tag, it does not resurrect one |
 | Clear the root's tag | The tag it applied is retired from every repo under it |
 | Tag a repo yourself | Never touched by any of the above |
+| Give a root a tag some repos already carry | Theirs stays theirs: the root adopts it there, and never takes it away |
+| Remove a root | Its repositories are forgotten, tags and all, unless something else still reaches them. Asked first when hand-made tags would go |
+
+A root's tag is one word: the filter, the tag editor and the refresh scope all
+split on spaces and commas, so the field refuses a tag that has either.
 
 Entries are keyed by absolute path, and ones whose repository has gone are
-dropped after a scan — but only when the parent directory is still there, so an
-unmounted disk does not cost you its tags.
+dropped after a scan — but only when the parent directory is still there with
+something in it, so neither an unmounted disk nor its empty mount point costs
+you its tags.
 
 `include_self` controls whether the wrapper repository gets a card of its own.
 It defaults to false for a workspace, since a repo that ignores everything has
@@ -234,7 +250,12 @@ live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
   unique to one of them survive.
 - With one or two tags they appear as toggle chips in the header — one click to
   filter instead of three. From three tags on, the **Tags** popover takes over,
-  since more than that crowds out the title.
+  since more than that crowds out the title. Chips and counts are of the
+  repositories on the grid, not of everything the file remembers.
+- `Enter` in the tag editor saves.
+- `repos.toml` can be edited by hand while the window is open, on the same
+  terms as the config file: read again at the next rescan, and never saved over
+  in between.
 - The popover filters the grid. Several ticked tags is an OR. `tag:work`
   typed in the filter box is an AND, and stacks with the rest of the query —
   `tag:work ruby` means tagged work *and* matching "ruby".
@@ -342,9 +363,11 @@ would.
 
 ### Why it shells out to `git`
 
-Authentication lives in credential helpers, SSH agents, `insteadOf` rewrites and
-`includeIf` identities — none of which libgit2 reads. Driving the same `git` you
-drive means your setup applies unchanged, including per-directory identities. A
+Authentication lives in credential helpers, SSH agents and `insteadOf` rewrites,
+none of which libgit2 uses, and an identity can hang off a kind of `includeIf`
+it does not follow (it reads `gitdir:` rules, not `hasconfig:` or `onbranch:`
+ones). Driving the same `git` you drive means your setup applies unchanged,
+including per-directory identities. A
 repository you cannot fetch by hand is one omarepos does not pretend it can
 fetch either; it reports the failure and moves on.
 
@@ -398,8 +421,11 @@ around it instead of everything in between.
 
 Searches run on worker threads and are abandoned the moment the query changes,
 so typing does not queue up passes over the fleet. A repository stops at 50,000
-commits or 200 matches, and the newest 500 results are listed — the status bar
-says when there were more.
+commits or 500 matches, and the newest 500 results are listed. The status bar
+says when either limit was reached: "at least N commits", how many repositories
+stopped at the match limit, and how many were read only 50,000 commits back. An
+empty page does not claim that nothing matches in a repository it did not
+finish reading.
 
 ## Commit graph
 

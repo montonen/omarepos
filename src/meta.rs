@@ -56,6 +56,11 @@ pub struct Meta {
     /// again from anything else, and this file used to be overwritten by the
     /// first scan after a launch that failed to read it.
     pub load_error: Option<String>,
+    /// The file as it was last read or written, `None` for no file, as
+    /// `Config` keeps for its own: `save` looks before it replaces, so tags
+    /// typed into the file by hand while the window is open are not written
+    /// over by the next scan that seeds one.
+    on_disk: std::cell::RefCell<Option<String>>,
 }
 
 pub fn path() -> PathBuf {
@@ -143,6 +148,7 @@ impl Meta {
             Self {
                 repos: BTreeMap::new(),
                 load_error: Some(crate::config::why_unusable(&path, &why)),
+                ..Self::default()
             }
         };
         let text = match std::fs::read_to_string(&path) {
@@ -151,9 +157,39 @@ impl Meta {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => return unusable(err.to_string()),
         };
-        match toml::from_str::<File>(&text) {
-            Ok(file) => Self { repos: file.repos, load_error: None },
+        let mut meta = match toml::from_str::<File>(&text) {
+            Ok(file) => Self { repos: file.repos, ..Self::default() },
             Err(err) => unusable(err.to_string()),
+        };
+        meta.on_disk = std::cell::RefCell::new(Some(text));
+        meta
+    }
+
+    /// Read the file again if it is not what was last read or written.
+    pub fn reread(&mut self) -> crate::config::Reread {
+        use crate::config::Reread;
+        let path = path();
+        let disk = std::fs::read_to_string(&path).ok();
+        if disk == *self.on_disk.borrow() {
+            return Reread::Unchanged;
+        }
+        let parsed = match &disk {
+            None => Ok(File::default()),
+            Some(text) => toml::from_str::<File>(text).map_err(|err| err.to_string()),
+        };
+        match parsed {
+            Ok(file) => {
+                *self = Self { repos: file.repos, ..Self::default() };
+                *self.on_disk.borrow_mut() = disk;
+                Reread::Loaded
+            }
+            Err(why) => {
+                // The tags in memory stay; the file is not saved over.
+                let why = crate::config::why_unusable(&path, &why);
+                self.load_error = Some(why.clone());
+                *self.on_disk.borrow_mut() = disk;
+                Reread::Broken(why)
+            }
         }
     }
 
@@ -456,22 +492,23 @@ impl Meta {
         changed
     }
 
-    /// Every tag in the store, with how many entries carry it. That is not
-    /// what is on screen: see `tags_among`.
-    pub fn all_tags(&self) -> Vec<(String, usize)> {
-        self.tags_among(self.repos.keys().map(Path::new))
-    }
-
     pub fn save(&self) -> std::io::Result<()> {
         let path = path();
         crate::config::refuse_to_replace(&self.load_error)?;
+        if std::fs::read_to_string(&path).ok() != *self.on_disk.borrow() {
+            return Err(std::io::Error::other(format!(
+                "not saved: {} has been changed outside omarepos since it was read. \
+                 Rescan (Ctrl+R) to read it again, then make the change once more.",
+                crate::config::tildify(&path)
+            )));
+        }
         let file = File { repos: self.repos.clone() };
         let body = toml::to_string_pretty(&file)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        crate::config::replace_file(
-            &path,
-            &format!("# omarepos repository metadata — written by the app.\n\n{body}"),
-        )
+        let text = format!("# omarepos repository metadata — written by the app.\n\n{body}");
+        crate::config::replace_file(&path, &text)?;
+        *self.on_disk.borrow_mut() = Some(text);
+        Ok(())
     }
 }
 
@@ -479,6 +516,44 @@ impl Meta {
 mod tests {
     use super::*;
     use crate::testkit::*;
+
+    #[test]
+    fn tags_typed_into_the_file_are_read_again_and_never_saved_over() {
+        let _guard = isolate();
+        let file = path();
+        let _ = std::fs::remove_file(&file);
+        let repo = Path::new("/srv/fixtures/billing");
+
+        let mut meta = Meta::load();
+        meta.set_tags(repo, vec!["work".to_string()]);
+        meta.save().unwrap();
+        assert_eq!(meta.reread(), crate::config::Reread::Unchanged, "its own save is not an edit");
+
+        // By hand, with the window open.
+        let edited = read(&file).replace("work", "client");
+        write(&file, &edited);
+
+        meta.set_tags(repo, vec!["urgent".to_string()]);
+        let refused = meta.save().expect_err("the file is not what was read");
+        assert!(refused.to_string().contains("changed outside"), "{refused}");
+        assert_eq!(read(&file), edited);
+
+        assert_eq!(meta.reread(), crate::config::Reread::Loaded);
+        assert_eq!(meta.tags_for(repo), ["client"]);
+
+        // Half-edited: what is in memory stays, and is not written.
+        write(&file, "[repos.\"/srv/fixtures/billing\"]\ntags = [");
+        assert!(matches!(meta.reread(), crate::config::Reread::Broken(_)));
+        assert_eq!(meta.tags_for(repo), ["client"]);
+        assert!(meta.save().is_err());
+
+        write(&file, &edited);
+        assert_eq!(meta.reread(), crate::config::Reread::Loaded);
+        assert_eq!(meta.load_error, None);
+        meta.save().unwrap();
+
+        let _ = std::fs::remove_file(&file);
+    }
 
     #[test]
     fn tags_survive_being_saved_and_loaded() {

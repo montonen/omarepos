@@ -479,7 +479,10 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // any. A repository with files and no commits yet is not that. It
             // used to get this page too, which hid the one row its first
             // commit is made from.
-            if graph.rows.is_empty() && graph.working_changes == 0 {
+            if graph.rows.is_empty()
+                && graph.working_changes == 0
+                && graph.working_unreadable.is_none()
+            {
                 push.set_sensitive(false);
                 empty.set_title("No commits");
                 empty.set_description(Some("This repository has no history yet."));
@@ -493,7 +496,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                     &load_path,
                     &watcher,
                     Rc::new(move |glance: Glance| {
-                        if glance.changes > 0 || glance.tip.is_some() {
+                        if glance.changes > 0 || glance.unreadable.is_some() || glance.tip.is_some() {
                             if let Some(reload) = reload.borrow().clone() {
                                 reload();
                             }
@@ -521,7 +524,10 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // there is anything to show. Offering a permanently empty one
             // on a clean repository would be noise in the place the eye
             // lands first.
-            let has_working = graph.working_changes > 0;
+            // A working tree that could not be read gets the row as well. Its
+            // count is not zero, it is unknown, and the row is the only way to
+            // the pane that says why.
+            let has_working = graph.working_changes > 0 || graph.working_unreadable.is_some();
 
             // Filled before the rows go in: selecting a row is what loads the
             // pane, and the handler reads this to know which commit it is.
@@ -544,6 +550,9 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 .filter(|row| row.refs.iter().any(|label| label.current))
                 .map(|row| row.lane);
             let (working, working_count) = working_row(graph.working_changes, width, tail);
+            if let Some(why) = &graph.working_unreadable {
+                say_unreadable(&working_count, why);
+            }
             working.set_visible(has_working);
             rows_box.append(&working);
             for row in slice {
@@ -626,8 +635,15 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                             return;
                         }
                         let changes = glance.changes;
-                        working.set_visible(changes > 0);
-                        working_count.set_label(&entries(changes));
+                        let something = changes > 0 || glance.unreadable.is_some();
+                        working.set_visible(something);
+                        match &glance.unreadable {
+                            Some(why) => say_unreadable(&working_count, why),
+                            None => {
+                                working_count.set_label(&entries(changes));
+                                working_count.set_tooltip_text(None);
+                            }
+                        }
                         let on_working = rows
                             .selected_row()
                             .map(|row| row.index() == 0)
@@ -636,7 +652,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                             // A commit cannot have changed under us.
                             return;
                         }
-                        if changes > 0 {
+                        if something {
                             load_detail(repo.clone(), Target::Working);
                             return;
                         }
@@ -793,6 +809,11 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
     if let Some(head) = &graph.head {
         parts.push(format!("HEAD {head}"));
     }
+    // A branch whose commit cannot be read is left out of the rows, and left
+    // out without a word it reads as a branch that is not there.
+    if !graph.unreadable_refs.is_empty() {
+        parts.push(format!("not drawn, unreadable: {}", graph.unreadable_refs.join(", ")));
+    }
     parts.join("  ·  ")
 }
 
@@ -931,6 +952,12 @@ fn watch(body: &gtk::Stack, repo: &Path, watcher: &Watcher, on_glance: Rc<dyn Fn
         });
     });
     *watcher.borrow_mut() = Some((window.downgrade(), id));
+}
+
+/// The count on the Local changes row, when there is no count to give.
+fn say_unreadable(count: &gtk::Label, why: &str) {
+    count.set_label("unreadable");
+    count.set_tooltip_text(Some(&format!("The working tree could not be read:\n{why}")));
 }
 
 fn entries(changes: usize) -> String {

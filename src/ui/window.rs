@@ -88,6 +88,8 @@ struct Ui {
     untagged_only: Cell<bool>,
     spinner: gtk::Spinner,
     stack: gtk::Stack,
+    /// What the window shows in place of an empty grid.
+    empty: adw::StatusPage,
     flow: gtk::FlowBox,
     status: gtk::Label,
     /// Up for as long as a file the app keeps cannot be read.
@@ -117,6 +119,9 @@ struct Ui {
     /// again each time the window is returned to.
     handed: RefCell<BTreeSet<PathBuf>>,
     expected: Cell<usize>,
+    /// What the last scan made of each root: how many repositories it gave,
+    /// or what stood in the way of it giving any.
+    root_reports: RefCell<Vec<crate::git::RootReport>>,
     /// How many repositories the scan in progress has read so far. Not
     /// `repos.len()`: a rescan leaves the grid as it is until it has the whole
     /// answer, so the list on screen says nothing about how far along it is.
@@ -334,6 +339,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         untagged_only: Cell::new(false),
         spinner,
         stack,
+        empty: empty.clone(),
         flow,
         status,
         trouble,
@@ -348,6 +354,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         opened: RefCell::new(None),
         handed: RefCell::new(BTreeSet::new()),
         expected: Cell::new(0),
+        root_reports: RefCell::new(Vec::new()),
         scanned: Cell::new(0),
         refresh_source: RefCell::new(None),
         refresh_armed: Cell::new(0),
@@ -838,17 +845,17 @@ impl Ui {
         if !unusable.is_empty() {
             self.trouble.set_title(&format!(
                 "Could not read {}. Nothing will be saved over it. Fix the file, then \
-                 rescan (Ctrl+R) for the settings or start omarepos again for the tags.",
+                 rescan (Ctrl+R).",
                 unusable.join("; ")
             ));
         }
         self.trouble.set_revealed(!unusable.is_empty());
     }
 
-    /// Take up an edit made to the config file since it was read. The README
-    /// offers the file as a way to configure the app, and until now only a
-    /// restart read it: Ctrl+R scanned the roots held in memory, and the next
-    /// save put the launch-time settings back over the edit.
+    /// Take up an edit made to the config file or the tag file since it was
+    /// read. The README offers the files as a way to configure the app, and
+    /// until now only a restart read them: Ctrl+R scanned the roots held in
+    /// memory, and the next save put the launch-time copy back over the edit.
     fn reread_config(self: &Rc<Self>) {
         // Not while something up the stack is holding the settings.
         let Ok(mut cfg) = self.cfg.try_borrow_mut() else { return };
@@ -868,6 +875,18 @@ impl Ui {
                 self.toasts.add_toast(ui::toast("Read config.toml again"));
             }
             // The banner has the reason.
+            crate::config::Reread::Broken(_) => self.sync_trouble(),
+        }
+        // And the tags, which are a file to edit as much as the settings are.
+        let Ok(mut meta) = self.meta.try_borrow_mut() else { return };
+        let outcome = meta.reread();
+        drop(meta);
+        match outcome {
+            crate::config::Reread::Unchanged => {}
+            crate::config::Reread::Loaded => {
+                self.sync_trouble();
+                self.toasts.add_toast(ui::toast("Read repos.toml again"));
+            }
             crate::config::Reread::Broken(_) => self.sync_trouble(),
         }
     }
@@ -899,7 +918,7 @@ impl Ui {
             let cfg = self.cfg.borrow();
             (cfg.roots(), cfg.extra_repos(), cfg.depth(), cfg.one_off())
         };
-        let rx = scan::spawn(roots, extras, depth);
+        let (rx, reports) = scan::spawn(roots, extras, depth);
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
             // Roots that seed a tag write to the metadata store as repos come
@@ -913,6 +932,10 @@ impl Ui {
                 match event {
                     Event::Discovered(n) => {
                         ui.expected.set(n);
+                        // Sent ahead of this event, so they are there.
+                        if let Ok(found) = reports.try_recv() {
+                            *ui.root_reports.borrow_mut() = found;
+                        }
                         ui.update_status();
                     }
                     Event::Repo { info, seed } => {
@@ -959,7 +982,7 @@ impl Ui {
                         }
                         if seeded_any {
                             if let Err(err) = ui.meta.borrow().save() {
-                                eprintln!("omarepos: could not write the tag file: {err}");
+                                ui::complain(&ui.toasts, &format!("The tags this scan gave were {err}"));
                             }
                         }
                         ui.scanning.set(false);
@@ -998,6 +1021,7 @@ impl Ui {
             || info.ahead > 0
             || info.unpushed > 0
             || info.behind > 0
+            || info.history_unreadable.is_some()
             || self
                 .fetch_errors
                 .borrow()
@@ -1088,14 +1112,14 @@ impl Ui {
             self.flow.remove(&child);
         }
 
-        // A filter on a tag that no longer exists matches nothing, and the
-        // controls that could take it off are built from the tags that do
-        // exist: the grid stayed empty until the app was restarted.
-        {
+        // A filter on a tag that nothing on the grid carries matches nothing,
+        // and the controls that could take it off are built from the tags
+        // that are there: the grid stayed empty until the app was restarted.
+        // Not while the first scan is still bringing cards in, when a tag's
+        // repositories may simply not have arrived yet.
+        if !self.scanning.get() {
             let live: BTreeSet<String> = self
-                .meta
-                .borrow()
-                .all_tags()
+                .grid_tags()
                 .into_iter()
                 .map(|(tag, _)| tag.to_lowercase())
                 .collect();
@@ -1154,6 +1178,21 @@ impl Ui {
         self.sync_tag_controls();
 
         let page = if repos.is_empty() && !self.scanning.get() { "empty" } else { "grid" };
+        if page == "empty" {
+            // Why, where it can be said. "No repositories found" over a
+            // filter that hides forty of them, or over a root that has been
+            // moved, sent the reader looking in the wrong place.
+            let amiss = self.roots_amiss();
+            let (title, why) = if !self.repos.borrow().is_empty() {
+                ("Nothing matches", "No repository on the grid passes the filter in force.".to_string())
+            } else if amiss.is_empty() {
+                ("No repositories found", "Add a folder to scan in Settings (Ctrl+,).".to_string())
+            } else {
+                ("No repositories found", amiss.join("\n"))
+            };
+            self.empty.set_title(title);
+            self.empty.set_description(Some(&glib::markup_escape_text(&why)));
+        }
         self.stack.set_visible_child_name(page);
         self.update_status();
 
@@ -1204,6 +1243,10 @@ impl Ui {
         if broken > 0 {
             parts.push(format!("{broken} unreadable"));
         }
+        // A root that gave nothing, or less than it holds, says so here. It
+        // used to say nothing anywhere: a folder that had been moved simply
+        // took its repositories off the grid and out of every fetch.
+        parts.extend(self.roots_amiss());
         {
             // Of the repositories on the grid: the record can hold one the
             // grid has since lost.
@@ -1281,7 +1324,23 @@ impl Ui {
         } else if self.untagged_only.get() {
             parts.push("untagged only".to_string());
         }
-        self.status.set_label(&parts.join("  ·  "));
+        let line = parts.join("  ·  ");
+        // The line is cut where the window ends; the tooltip has all of it.
+        self.status.set_tooltip_text(Some(&line.replace("  ·  ", "\n")));
+        self.status.set_label(&line);
+    }
+
+    /// What the last scan has to say about roots that did not simply give
+    /// their repositories: one phrase each, led by the root.
+    fn roots_amiss(&self) -> Vec<String> {
+        self.root_reports
+            .borrow()
+            .iter()
+            .filter_map(|report| {
+                let amiss = report.says()?;
+                Some(format!("{}: {amiss}", crate::config::tildify(Path::new(&report.root))))
+            })
+            .collect()
     }
 
     /// (Re)arm the periodic refresh from the current settings. Called at
@@ -1669,6 +1728,18 @@ impl Ui {
         });
     }
 
+    /// The tags on the repositories of the grid, with how many carry each.
+    /// Not the tags in the store, which also remembers repositories no root
+    /// reaches any more: counted over that, a tag none of whose repositories
+    /// was still on the grid kept its chip and its old count, and filtering
+    /// by it emptied the grid.
+    fn grid_tags(&self) -> Vec<(String, usize)> {
+        let repos = self.repos.borrow();
+        self.meta
+            .borrow()
+            .tags_among(repos.iter().map(|repo| repo.path.as_path()))
+    }
+
     /// Keep the tag chrome in step with the tags that exist and the filter in
     /// force. Below three tags they become toggles in the header, which is one
     /// click instead of three; past that they would crowd out the title, so the
@@ -1676,7 +1747,7 @@ impl Ui {
     fn sync_tag_controls(self: &Rc<Self>) {
         const QUICK_LIMIT: usize = 3;
 
-        let tags = self.meta.borrow().all_tags();
+        let tags = self.grid_tags();
         let quick = !tags.is_empty() && tags.len() < QUICK_LIMIT;
         let signature = tags
             .iter()
@@ -1765,7 +1836,7 @@ impl Ui {
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.set_width_request(230);
 
-        let known = self.meta.borrow().all_tags();
+        let known = self.grid_tags();
         let quick = !known.is_empty() && known.len() < 3;
         if quick {
             // The header chips already do the filtering; repeating it here
@@ -1875,7 +1946,12 @@ impl Ui {
             &self.window,
             Rc::clone(&self.meta),
             repos,
+            self.grid_tags(),
             Rc::new(move || ui.rebuild()),
+            {
+                let ui = Rc::clone(self);
+                Rc::new(move |why: String| ui::complain(&ui.toasts, &why))
+            },
         );
     }
 
@@ -2134,6 +2210,10 @@ impl Ui {
         ui::dialogs::settings(
             &self.window,
             Rc::clone(&self.cfg),
+            // A look at somewhere else has no business forgetting the
+            // fleet's tags, whatever is removed while it is open.
+            (!self.cfg.borrow().one_off()).then(|| Rc::clone(&self.meta)),
+            self.root_reports.borrow().clone(),
             rescan,
             reschedule,
             restyle,

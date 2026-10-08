@@ -74,17 +74,11 @@ pub struct Graph {
     /// or as a sparse index, and a damaged one. That used to come out as zero,
     /// which hid the row, which is the only way to the pane that would have
     /// shown the error: a repository with edits in it had no Local changes.
-    //
-    // Nothing reads it yet. The page is in another file.
-    #[allow(dead_code)]
     pub working_unreadable: Option<String>,
     /// Branches that are there and are not in `rows`, because the commit they
     /// name could not be read. git says "does not point to a valid object"
     /// and carries on with the rest, and so does the walk; but a branch left
     /// out of the graph without a word reads as a branch that is not there.
-    //
-    // Nothing reads it yet either.
-    #[allow(dead_code)]
     pub unreadable_refs: Vec<String>,
     /// Where the checked-out branch stands against its upstream, and what that
     /// upstream is. `None` when there is no branch or no upstream.
@@ -344,9 +338,6 @@ pub struct Glance {
     pub changes: usize,
     /// Why `changes` is not a count, as [`Graph::working_unreadable`] is for
     /// the page's first reading. Zero with this set is not "nothing changed".
-    //
-    // Nothing reads it yet. The page is in another file.
-    #[allow(dead_code)]
     pub unreadable: Option<String>,
     /// What HEAD is called: a branch, or "HEAD" when detached.
     pub head: Option<String>,

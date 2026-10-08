@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
+use gtk::glib;
 
 use crate::config::{Config, Refresh, RootSpec, tildify};
 use crate::meta::{self, Meta};
@@ -18,37 +19,32 @@ use crate::meta::{self, Meta};
 /// re-arms a timer. Sharing one callback made flipping a refresh switch
 /// rescan every repository for nothing.
 ///
-/// Opened this way the dialog cannot reach the tag store, so removing a root
-/// leaves what the store holds about its repositories where it is. The window
-/// has the store and wants `settings_with_tags`.
+/// With the tag store, removing a root, or an individually listed
+/// repository, also forgets what the store holds about the repositories
+/// nothing else reaches (`Meta::forget_source`). The store is saved here; the
+/// rescan that `on_sources` starts redraws the tags. `reports` is what the
+/// last scan made of each root, which is what a root's row says of it.
 pub fn settings(
     parent: &impl IsA<gtk::Widget>,
     cfg: Rc<RefCell<Config>>,
-    on_sources: Rc<dyn Fn()>,
-    on_refresh: Rc<dyn Fn()>,
-    on_restyle: Rc<dyn Fn()>,
-) {
-    settings_with_tags(parent, cfg, None, on_sources, on_refresh, on_restyle);
-}
-
-/// The settings dialog, with the tag store: removing a root, or an
-/// individually listed repository, then also forgets what the store holds
-/// about the repositories nothing else reaches (`Meta::forget_source`). The
-/// store is saved here; the rescan that `on_sources` starts redraws the tags.
-pub fn settings_with_tags(
-    parent: &impl IsA<gtk::Widget>,
-    cfg: Rc<RefCell<Config>>,
     meta: Option<Rc<RefCell<Meta>>>,
+    reports: Vec<crate::git::RootReport>,
     on_sources: Rc<dyn Fn()>,
     on_refresh: Rc<dyn Fn()>,
     on_restyle: Rc<dyn Fn()>,
 ) {
+    let reports = Rc::new(reports);
     let on_change = on_sources;
     let dialog = adw::PreferencesDialog::builder()
         .title("Settings")
         .content_width(540)
         .content_height(680)
         .build();
+    // Where a refused save is said. Every switch in here writes the file, and
+    // a write that is refused (the file was edited elsewhere, or could not be
+    // read) used to go to stderr, with the switch left showing what was not
+    // saved.
+    COMPLAIN_TO.with(|slot| *slot.borrow_mut() = Some(dialog.downgrade()));
     let page = adw::PreferencesPage::new();
     dialog.add(&page);
 
@@ -109,7 +105,7 @@ pub fn settings_with_tags(
                         let mut meta = meta.borrow_mut();
                         if meta.forget_source(source.path(), &kept) > 0 {
                             if let Err(err) = meta.save() {
-                                eprintln!("omarepos: could not write the tag file: {err}");
+                                complain(&format!("Its tags are still in the tag file: {err}"));
                             }
                         }
                     }
@@ -169,6 +165,8 @@ pub fn settings_with_tags(
         let repos_group = repos_group.clone();
         let listed = Rc::clone(&listed);
         let on_change = Rc::clone(&on_change);
+        let reports = Rc::clone(&reports);
+        let listed_once = Cell::new(false);
         Rc::new(move || {
             for (group, row) in listed.borrow_mut().drain(..) {
                 group.remove(&row);
@@ -189,8 +187,14 @@ pub fn settings_with_tags(
                 roots_group.add(&row);
                 added.push((roots_group.clone(), row.upcast()));
             }
+            // The reports are of the scan before the dialog opened. Once
+            // something in here has changed the roots they are about a list
+            // that no longer exists.
+            let scanned = !listed_once.replace(true);
             for spec in roots {
-                let row = root_row(&spec, Rc::clone(&cfg), Rc::clone(&on_change), {
+                let wanted = crate::config::expand(spec.path_str()).display().to_string();
+                let report = reports.iter().find(|report| scanned && report.root == wanted);
+                let row = root_row(&spec, report, Rc::clone(&cfg), Rc::clone(&on_change), {
                     let remove = Rc::clone(&remove);
                     let path = crate::config::expand(spec.path_str());
                     move || remove(Source::Root(path.clone()))
@@ -550,6 +554,7 @@ fn add_button(label: &str) -> gtk::Button {
 /// toggling a switch does not collapse the row under the pointer.
 fn root_row(
     spec: &RootSpec,
+    report: Option<&crate::git::RootReport>,
     cfg: Rc<RefCell<Config>>,
     on_change: Rc<dyn Fn()>,
     on_remove: impl Fn() + 'static,
@@ -565,7 +570,7 @@ fn root_row(
 
         .use_markup(false)
         .title(spec.path_str())
-        .subtitle(root_summary(&resolved))
+        .subtitle(root_summary(&resolved, report))
         .build();
 
     let remove = gtk::Button::builder()
@@ -690,10 +695,22 @@ fn set_nested(cfg: &mut Config, path: &Path, on: bool) -> bool {
     shown
 }
 
-fn root_summary(root: &crate::config::Root) -> String {
+/// One line about a root. `report` is what the last scan made of it, when
+/// there is one that still applies: how many repositories it gave, or what
+/// stood in the way. Without one the line can only say whether the folder is
+/// there, which is all it used to say: a root that had quietly stopped giving
+/// repositories read exactly like one that gave forty.
+fn root_summary(root: &crate::config::Root, report: Option<&crate::git::RootReport>) -> String {
     let mut parts = Vec::new();
-    if !root.path.exists() {
-        parts.push("missing".to_string());
+    match report {
+        Some(report) => match report.says() {
+            Some(amiss) => parts.push(amiss),
+            None if report.found > 0 => parts.push(format!("{} found", report.found)),
+            // Everything it reaches belongs to a narrower root.
+            None => parts.push("all under another root".to_string()),
+        },
+        None if !root.path.exists() => parts.push("missing".to_string()),
+        None => {}
     }
     if root.nested {
         parts.push("workspace".to_string());
@@ -714,7 +731,8 @@ fn refresh_summary(cfg: &Rc<RefCell<Config>>, path: &std::path::Path, row: &adw:
         .iter()
         .find(|spec| crate::config::expand(spec.path_str()) == path)
     {
-        row.set_subtitle(&root_summary(&spec.resolve()));
+        // The report was for the root as it was scanned, before this change.
+        row.set_subtitle(&root_summary(&spec.resolve(), None));
     }
 }
 
@@ -755,14 +773,33 @@ fn pick_folder(
     });
 }
 
-/// Whether the file was written.
+thread_local! {
+    /// The settings dialog that is open, for `persist` to speak through.
+    static COMPLAIN_TO: RefCell<Option<glib::WeakRef<adw::PreferencesDialog>>> =
+        const { RefCell::new(None) };
+}
+
+/// Whether the file was written. When it was not, the dialog says why.
 fn persist(cfg: &Rc<RefCell<Config>>) -> bool {
     match cfg.borrow().save() {
         Ok(()) => true,
         Err(err) => {
-            eprintln!("omarepos: could not write the config file: {err}");
+            complain(&format!("That change was {err}"));
             false
         }
+    }
+}
+
+/// Say something went wrong, in the settings dialog, until it is dismissed.
+fn complain(said: &str) {
+    let dialog = COMPLAIN_TO.with(|slot| slot.borrow().as_ref().and_then(|d| d.upgrade()));
+    match dialog {
+        Some(dialog) => {
+            let toast = crate::ui::toast(said);
+            toast.set_timeout(0);
+            dialog.add_toast(toast);
+        }
+        None => eprintln!("omarepos: {said}"),
     }
 }
 
@@ -810,30 +847,17 @@ fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
     eprintln!("omarepos: {text}");
 }
 
-/// Edit the tags on one or more repositories, offering every tag in the store
-/// as a chip. The store is wider than the grid, so this offers tags, with
-/// counts, that nothing on screen carries: a caller that knows what is on the
-/// grid wants `edit_tags_among`.
-pub fn edit_tags(
-    parent: &impl IsA<gtk::Widget>,
-    meta: Rc<RefCell<Meta>>,
-    repos: Vec<PathBuf>,
-    on_change: Rc<dyn Fn()>,
-) {
-    let known = meta.borrow().all_tags();
-    edit_tags_among(parent, meta, repos, known, on_change);
-}
-
 /// Edit the tags on one or more repositories. With several repos the entry
 /// starts from the tags they already have in common. `known` is the tags to
 /// offer as chips with how many repositories carry each, which is
 /// `Meta::tags_among` over the grid.
-pub fn edit_tags_among(
+pub fn edit_tags(
     parent: &impl IsA<gtk::Widget>,
     meta: Rc<RefCell<Meta>>,
     repos: Vec<PathBuf>,
     known: Vec<(String, usize)>,
     on_change: Rc<dyn Fn()>,
+    on_refused: Rc<dyn Fn(String)>,
 ) {
     if repos.is_empty() {
         return;
@@ -933,7 +957,9 @@ pub fn edit_tags_among(
             let mut meta = meta.borrow_mut();
             meta.replace_shared(&repos, &shared, &wanted);
             if let Err(err) = meta.save() {
-                eprintln!("omarepos: could not write the tag file: {err}");
+                // In the window, not on stderr: the cards now show tags that
+                // are not in the file, and the next launch will not have them.
+                on_refused(format!("The tags were {err}"));
             }
         }
         on_change();
@@ -969,7 +995,9 @@ mod tests {
     const WORKSPACE: &str = "/work/acme";
 
     fn with_one_root() -> Config {
-        Config { roots: vec![RootSpec::Simple(WORKSPACE.to_string())], ..Config::default() }
+        let mut cfg = Config::default();
+        cfg.roots = vec![RootSpec::Simple(WORKSPACE.to_string())];
+        cfg
     }
 
     /// "Show the containing repository" was set once, when the row was built.
