@@ -129,9 +129,12 @@ omarepos [options]
 `l`, `e`, `p` and `f` act once for each press. A key held down, or one that
 sticks, does not open a terminal per repeat or start a second fetch.
 
-The filter matches repo name, path, branch, remote and language. The warning
+The filter matches repo name, path, branch and remote. Every word typed has to
+be found, in any order, so `acme billing` finds the billing repository under
+`acme`. `tag:work` and `lang:rust` narrow by tag and by language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
-unreadable, or holding commits that are on no remote.
+unreadable, holding commits that are on no remote, or that the last fetch or
+update failed on.
 
 "Ahead" is measured against the branch's upstream, and says nothing when there
 is none. So a card also says when HEAD has commits that exist on no remote at
@@ -247,7 +250,7 @@ Off by default. Turn it on in settings, or in the config file:
 every_minutes = 15     # 0 turns it off
 fetch = true           # run `git fetch`; touches the network, not your files
 fast_forward = true    # update the code where that is unambiguously safe
-only_tags = ["work"]   # blank means every repository
+only_tags = []          # e.g. ["work"]; blank means every repository
 max_parallel = 4
 timeout_seconds = 60
 ```
@@ -259,6 +262,21 @@ stops going stale. With `fast_forward` on it also moves the checked-out branch.
 never pushes. Changing a refresh setting, or the scan roots, calls off a pass
 that is under way: repositories it had not reached are left alone, and one
 that was being fetched is not then fast-forwarded.
+
+The status bar says what the timer is doing, and what it is not. `fetched 5
+minutes ago` is the last pass that reached a remote: a pass run offline does
+not count as one, so the next launch tries again. With `only_tags` set the
+stamp names the tags it covered, and when nothing carries any of them it reads
+`auto fetch idle: nothing is tagged work` in place of a schedule that would
+fetch nothing. `2 not fetched` and `1 not updated` count the cards carrying
+those pills.
+
+A remote that turned a fetch away (a login refused, a repository that is not
+there any more) is not asked again by the timer. Trying every few minutes with
+the same credential changes nothing, and is how an account gets locked. The
+card keeps its `fetch failed` pill; `f`, `p` or `Ctrl+Shift+R` try again, and a
+fetch that works clears it. A remote that could not be reached is different,
+and is tried on every pass.
 
 ### What it will and will not do
 

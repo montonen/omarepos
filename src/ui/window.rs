@@ -56,6 +56,8 @@ struct Ui {
     grid_page: adw::NavigationPage,
     provider: gtk::CssProvider,
     subtitle: gtk::Label,
+    /// The name of the palette in use, as the subtitle shows it.
+    theme_name: RefCell<String>,
     search: gtk::SearchEntry,
     sort: gtk::DropDown,
     dirty_only: gtk::ToggleButton,
@@ -313,6 +315,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         grid_page: grid_page.clone(),
         provider,
         subtitle,
+        theme_name: RefCell::new(String::new()),
         search: search.clone(),
         sort: sort.clone(),
         dirty_only: dirty_only.clone(),
@@ -777,9 +780,18 @@ impl Ui {
         } else {
             adw::ColorScheme::ForceLight
         });
+        *self.theme_name.borrow_mut() = palette.name.clone();
+        self.sync_subtitle();
+    }
+
+    /// The line under the title: where the grid comes from, and the theme. Its
+    /// own function because the roots change in Settings, where the theme
+    /// does not, and the line went on naming a root that had been removed
+    /// until the theme next changed.
+    fn sync_subtitle(&self) {
         let roots = self.cfg.borrow().root_labels().join("  ");
         self.subtitle
-            .set_label(&format!("{}  ·  {}", roots, palette.name));
+            .set_label(&format!("{}  ·  {}", roots, self.theme_name.borrow()));
     }
 
     /// Restyle whenever Omarchy's current-theme directory changes.
@@ -872,6 +884,14 @@ impl Ui {
                         if !streaming {
                             *ui.repos.borrow_mut() = std::mem::take(&mut fresh);
                         }
+                        // A tick on a repository the scan no longer finds is
+                        // a tick nobody can see or take off, and it went on
+                        // feeding Contributions, Search and the tag editor.
+                        {
+                            let found: HashSet<PathBuf> =
+                                ui.repos.borrow().iter().map(|repo| repo.path.clone()).collect();
+                            ui.selected.borrow_mut().retain(|path| found.contains(path));
+                        }
                         // Pruning after the scan, so a repository that was just
                         // found is never a candidate for removal.
                         if !one_off {
@@ -910,13 +930,20 @@ impl Ui {
         });
     }
 
-    fn needs_attention(info: &RepoInfo) -> bool {
+    /// What the warning toggle keeps. A repository the last fetch failed on,
+    /// or that an update was refused in, is on this list too: it carries the
+    /// reddest pill on the grid, and the toggle used to hide it for being
+    /// clean.
+    fn needs_attention(&self, info: &RepoInfo) -> bool {
         info.error.is_some()
             || !info.tree.is_clean()
             || info.ahead > 0
             || info.unpushed > 0
             || info.behind > 0
-            || info.tree.conflicted > 0
+            || self
+                .fetch_errors
+                .borrow()
+                .contains_key(&info.path.display().to_string())
     }
 
     fn visible(&self) -> Vec<RepoInfo> {
@@ -930,7 +957,7 @@ impl Ui {
             .repos
             .borrow()
             .iter()
-            .filter(|r| !dirty_only || Self::needs_attention(r))
+            .filter(|r| !dirty_only || self.needs_attention(r))
             .filter(|r| {
                 let tags: Vec<String> = meta
                     .tags_for(&r.path)
@@ -948,7 +975,7 @@ impl Ui {
                     || tags.iter().any(|t| tag_filter.contains(t))
             })
             .filter(|r| query.langs.iter().all(|lang| r.speaks(lang)))
-            .filter(|r| query.text.is_empty() || r.haystack().contains(&query.text))
+            .filter(|r| query.words.is_empty() || query.matches(&r.haystack()))
             .cloned()
             .collect();
         drop(meta);
@@ -1001,6 +1028,20 @@ impl Ui {
 
         while let Some(child) = self.flow.first_child() {
             self.flow.remove(&child);
+        }
+
+        // A filter on a tag that no longer exists matches nothing, and the
+        // controls that could take it off are built from the tags that do
+        // exist: the grid stayed empty until the app was restarted.
+        {
+            let live: BTreeSet<String> = self
+                .meta
+                .borrow()
+                .all_tags()
+                .into_iter()
+                .map(|(tag, _)| tag.to_lowercase())
+                .collect();
+            self.tag_filter.borrow_mut().retain(|tag| live.contains(tag));
         }
 
         let repos = self.visible();
@@ -1105,6 +1146,25 @@ impl Ui {
         if broken > 0 {
             parts.push(format!("{broken} unreadable"));
         }
+        {
+            // Of the repositories on the grid: the record can hold one the
+            // grid has since lost.
+            let errors = self.fetch_errors.borrow();
+            let recorded = |wanted: fn(&Trouble) -> bool| {
+                repos
+                    .iter()
+                    .filter(|repo| errors.get(&repo.path.display().to_string()).is_some_and(wanted))
+                    .count()
+            };
+            let failed = recorded(|trouble| matches!(trouble, Trouble::Fetch(_)));
+            let held = recorded(|trouble| matches!(trouble, Trouble::Update { .. }));
+            if failed > 0 {
+                parts.push(format!("{failed} not fetched"));
+            }
+            if held > 0 {
+                parts.push(format!("{held} not updated"));
+            }
+        }
         let shown = self.flow.observe_children().n_items();
         if (shown as usize) != total {
             parts.push(format!("{shown} shown"));
@@ -1113,11 +1173,23 @@ impl Ui {
         if selected > 0 {
             parts.push(format!("{selected} selected"));
         }
-        if let Some(when) = self.last_refresh.get() {
-            parts.push(format!("fetched {}", ui::relative_time(when)));
-        }
         let cfg = self.cfg.borrow();
         let settings = &cfg.refresh;
+        let only: Vec<&str> = settings
+            .only_tags
+            .iter()
+            .map(|tag| tag.trim())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        if let Some(when) = self.last_refresh.get() {
+            // The stamp is the last pass, and a pass narrowed to some tags
+            // says nothing about the rest of the grid.
+            parts.push(if only.is_empty() {
+                format!("fetched {}", ui::relative_time(when))
+            } else {
+                format!("fetched {} (tagged {})", ui::relative_time(when), only.join(", "))
+            });
+        }
         if cfg.one_off() {
             parts.push("one-off look: no background refresh".to_string());
         } else if settings.enabled() {
@@ -1128,7 +1200,19 @@ impl Ui {
             } else {
                 "rescan"
             };
-            parts.push(format!("auto {what} every {}m", settings.every_minutes));
+            // A scope that matches nothing makes the timer a no-op, and the
+            // bar went on promising a fetch every few minutes. Not asked
+            // while a scan is under way: the grid is not all there yet.
+            let scoped_to_nothing = settings.will_fetch()
+                && !only.is_empty()
+                && !self.scanning.get()
+                && !repos.is_empty()
+                && self.refresh_scope().is_empty();
+            parts.push(if scoped_to_nothing {
+                format!("auto {what} idle: nothing is tagged {}", only.join(", "))
+            } else {
+                format!("auto {what} every {}m", settings.every_minutes)
+            });
         }
         let tag_filter = self.tag_filter.borrow();
         if !tag_filter.is_empty() {
@@ -1353,12 +1437,47 @@ impl Ui {
             crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref());
         if repos.is_empty() {
             if manual {
+                let only = settings
+                    .only_tags
+                    .iter()
+                    .map(|tag| tag.trim())
+                    .filter(|tag| !tag.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 self.toasts.add_toast(ui::toast(&if unseen > 0 {
                     format!("Nothing fetched: {unseen} new here, open each once to include it")
+                } else if !only.is_empty() {
+                    format!("Nothing fetched: the refresh covers what is tagged {only}, and nothing is")
                 } else {
                     "Nothing in scope to fetch".to_string()
                 }));
             }
+            return;
+        }
+
+        // A pass nobody asked for does not go back to a remote that turned
+        // the last fetch away. It did, every interval, for as long as the
+        // window stayed open: a wrong or expired credential offered to the
+        // same server again and again, which is how accounts get locked.
+        // Asking by hand (`f`, `p`, Ctrl+Shift+R) still tries, and a fetch
+        // that then works clears the record.
+        let before = repos.len();
+        let repos: Vec<PathBuf> = if manual {
+            repos
+        } else {
+            let errors = self.fetch_errors.borrow();
+            repos
+                .into_iter()
+                .filter(|path| {
+                    !matches!(
+                        errors.get(&path.display().to_string()),
+                        Some(Trouble::Fetch(err)) if refused_by_remote(err)
+                    )
+                })
+                .collect()
+        };
+        let given_up = before - repos.len();
+        if repos.is_empty() {
             return;
         }
 
@@ -1398,7 +1517,13 @@ impl Ui {
             for _ in 0..unseen {
                 summary.add(&refresh::Outcome::Skipped(refresh::Skip::Unseen));
             }
+            if given_up > 0 {
+                summary.skipped += given_up;
+                *summary.skips.entry("refused by the remote last time").or_insert(0) += given_up;
+            }
             let mut done = 0usize;
+            // Whether any remote was reached at all.
+            let mut reached = false;
             // Trouble that was not already on a card. A repository that fails
             // the same way on every pass is said once, not every half hour.
             let mut new_trouble = 0usize;
@@ -1406,6 +1531,7 @@ impl Ui {
                 match event {
                     refresh::Event::Repo(report) => {
                         done += 1;
+                        reached |= report.fetched;
                         ui.refresh_progress.set((done, total));
                         summary.add(&report.outcome);
                         if ui.note_outcome(&report) {
@@ -1452,7 +1578,13 @@ impl Ui {
             ui.spinner.stop();
             ui.spinner.set_visible(false);
             ui.refresh_cancel.borrow_mut().take();
-            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+            // A one-off look is at somebody else's repositories. What it
+            // could not fetch, and when it last fetched, is not the fleet's
+            // record to keep.
+            let one_off = ui.cfg.borrow().one_off();
+            if !one_off {
+                crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+            }
             if cancel.stopped() {
                 // Not stamped as a refresh: the fleet was not covered, and the
                 // next pass should not think it was.
@@ -1461,9 +1593,15 @@ impl Ui {
                     summary.line()
                 )));
             } else {
-                let finished = now_seconds();
-                ui.last_refresh.set(Some(finished));
-                crate::config::record_refresh(finished);
+                // Stamped only when a remote was reached. A pass run offline
+                // failed forty-four times and then wrote "fetched just now",
+                // which the status bar repeated and the next launch believed:
+                // nothing was due again for a whole interval.
+                if reached && !one_off {
+                    let finished = now_seconds();
+                    ui.last_refresh.set(Some(finished));
+                    crate::config::record_refresh(finished);
+                }
                 if manual || summary.updated > 0 || new_trouble > 0 {
                     ui.toasts.add_toast(ui::toast(&summary.line()));
                 }
@@ -1838,8 +1976,23 @@ impl Ui {
         if !self.on_grid() {
             return;
         }
-        if !force && current.is_some() {
-            return;
+        // Unforced, the grid stands back for a keyboard that is in use:
+        // typing, already on a card, or in a menu or a dialog. It used to
+        // stand back for any focus at all, and a window always has one by the
+        // time a scan ends, on the first button of the header. So this never
+        // once ran, and the arrow keys did nothing until Tab had been found.
+        if !force {
+            if self.window.visible_dialog().is_some() {
+                return;
+            }
+            if let Some(focus) = &current {
+                let typing = focus.is::<gtk::Editable>();
+                let in_grid = focus.is_ancestor(&self.flow);
+                let in_menu = focus.ancestor(gtk::Popover::static_type()).is_some();
+                if typing || in_grid || in_menu {
+                    return;
+                }
+            }
         }
         if let Some(child) = self.flow.child_at_index(0) {
             // As in `rebuild`: through the box, so its cursor comes too. GTK
@@ -1894,13 +2047,17 @@ impl Ui {
                 // What the pass in flight was started for no longer holds.
                 ui.cancel_refresh();
                 ui.schedule_refresh();
+                ui.sync_subtitle();
                 ui.start_scan();
             }) as Rc<dyn Fn()>
         };
         let reschedule = {
             let ui = Rc::clone(self);
-            // Refresh settings change nothing in the grid, so this re-arms the
-            // timer and updates the status line, and stops there.
+            // Refresh settings move nothing on disk, so there is no rescan.
+            // They do change what a card says: "held back" is a statement
+            // about the refresh, and it stayed on cards after the refresh
+            // had been switched off or pointed at other tags. The cards are
+            // drawn again from what is already in memory.
             Rc::new(move || {
                 // A pass under way was started with the settings as they
                 // were. Switching fast-forward off, or the refresh off, while
@@ -1909,6 +2066,7 @@ impl Ui {
                 // afresh.
                 ui.cancel_refresh();
                 ui.schedule_refresh();
+                ui.rebuild();
             }) as Rc<dyn Fn()>
         };
         let restyle = {
@@ -2116,7 +2274,9 @@ impl Ui {
             ui.refreshing.set(false);
             ui.spinner.stop();
             ui.spinner.set_visible(false);
-            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+            if !ui.cfg.borrow().one_off() {
+                crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+            }
             ui::say(&ui.toasts, &said);
             // This one card, drawn again whatever was read: a fetch that
             // failed changes what the card says without changing the
@@ -2280,27 +2440,68 @@ fn noun(n: usize, one: &'static str, many: &'static str) -> &'static str {
 /// A parsed filter: free text, plus the `tag:` and `lang:` terms pulled out of
 /// it. Each kind of term is matched against its own field, so a word can only
 /// match where the user aimed it.
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 struct Query {
-    text: String,
+    /// Each has to be found, anywhere and in any order. They used to be
+    /// joined back into one phrase, so a second word emptied the grid unless
+    /// the two happened to sit side by side in the name or the path.
+    words: Vec<String>,
     tags: Vec<String>,
     langs: Vec<String>,
 }
 
+impl Query {
+    /// Whether every free word is somewhere in `haystack`, which is lower
+    /// case already.
+    fn matches(&self, haystack: &str) -> bool {
+        self.words.iter().all(|word| haystack.contains(word.as_str()))
+    }
+}
+
 fn split_query(raw: &str) -> Query {
-    let mut words = Vec::new();
     let mut query = Query::default();
     for token in raw.split_whitespace() {
-        if let Some(tag) = token.strip_prefix("tag:").filter(|t| !t.is_empty()) {
-            query.tags.push(tag.to_lowercase());
-        } else if let Some(lang) = token.strip_prefix("lang:").filter(|l| !l.is_empty()) {
-            query.langs.push(lang.to_lowercase());
+        // Lowered before the prefixes are looked for, so `Tag:work` is a tag.
+        let token = token.to_lowercase();
+        if let Some(tag) = token.strip_prefix("tag:") {
+            // A bare `tag:` is one that is still being typed. Taken as a
+            // word, it emptied the grid between the colon and the first
+            // letter after it.
+            if !tag.is_empty() {
+                query.tags.push(tag.to_string());
+            }
+        } else if let Some(lang) = token.strip_prefix("lang:") {
+            if !lang.is_empty() {
+                query.langs.push(lang.to_string());
+            }
         } else {
-            words.push(token.to_lowercase());
+            query.words.push(token);
         }
     }
-    query.text = words.join(" ");
     query
+}
+
+/// Whether a fetch failed because the remote turned it away, and not because
+/// it could not be reached. Trying again on a timer does not change the first
+/// kind: the repository has moved, or the credential is wrong, and each
+/// attempt is another refused login against somebody's server.
+fn refused_by_remote(err: &str) -> bool {
+    let err = err.to_lowercase();
+    [
+        "authentication failed",
+        "could not read username",
+        "could not read password",
+        "permission denied",
+        "access denied",
+        "repository not found",
+        "does not appear to be a git repository",
+        "http 401",
+        "http 403",
+        "error: 401",
+        "error: 403",
+    ]
+    .iter()
+    .any(|sign| err.contains(sign))
 }
 
 /// The selection checkbox of a card, found by walking down from its flow box
@@ -2324,4 +2525,58 @@ fn now_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_words_both_have_to_be_there_in_either_order() {
+        let hay = "billing ~/work/acme/billing main git@example.invalid:acme/billing";
+        assert!(split_query("billing").matches(hay));
+        assert!(split_query("acme billing").matches(hay));
+        assert!(split_query("billing acme").matches(hay));
+        assert!(split_query("Billing MAIN").matches(hay));
+        assert!(!split_query("billing ledger").matches(hay));
+        // No words is no narrowing.
+        assert!(split_query("  ").matches(hay));
+    }
+
+    #[test]
+    fn tag_and_lang_terms_are_pulled_out_whatever_their_case() {
+        let query = split_query("Tag:Work lang:Rust api");
+        assert_eq!(query.tags, ["work"]);
+        assert_eq!(query.langs, ["rust"]);
+        assert_eq!(query.words, ["api"]);
+    }
+
+    #[test]
+    fn a_term_still_being_typed_narrows_nothing() {
+        let query = split_query("tag: lang:");
+        assert_eq!(query, Query::default());
+        assert!(query.matches("anything at all"));
+    }
+
+    #[test]
+    fn a_remote_that_refused_is_told_from_one_that_was_not_reached() {
+        for refused in [
+            "remote: Invalid username or token. Password authentication is not supported.\nfatal: Authentication failed for 'https://example.invalid/acme/billing.git/'",
+            "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled",
+            "git@example.invalid: Permission denied (publickey).",
+            "remote: Repository not found.",
+            "fatal: '/srv/git/billing.git' does not appear to be a git repository",
+            "fatal: unable to access 'https://example.invalid/x.git/': The requested URL returned error: 403",
+        ] {
+            assert!(refused_by_remote(refused), "{refused}");
+        }
+        for unreachable in [
+            "fatal: unable to access 'https://example.invalid/x.git/': Could not resolve host: example.invalid",
+            "ssh: connect to host example.invalid port 22: Connection timed out",
+            "git fetch gave no answer in 60 seconds",
+            "fatal: unable to access 'https://example.invalid/x.git/': The requested URL returned error: 503",
+        ] {
+            assert!(!refused_by_remote(unreachable), "{unreachable}");
+        }
+    }
 }
