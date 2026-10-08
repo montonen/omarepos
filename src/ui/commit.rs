@@ -297,8 +297,13 @@ pub fn pane(
         // the commit was Tab, past the name, and then Enter. Not while a
         // commit is running, when the button is switched off; a click sent
         // from here would not ask.
-        let commit_button = commit_button.clone();
+        // Weakly: the button's own handler holds the message, to read it, and
+        // a handler on the message that held the button would make a ring of
+        // the two, each kept alive by a closure on the other, and with them
+        // the file list the button's handler also holds.
+        let commit_button = commit_button.downgrade();
         message.connect_activate(move |_| {
+            let Some(commit_button) = commit_button.upgrade() else { return };
             if commit_button.is_sensitive() {
                 commit_button.emit_clicked();
             }
