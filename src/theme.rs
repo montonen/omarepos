@@ -36,6 +36,11 @@ fn is_light(background: &str) -> bool {
     (r + g + b) * 255.0 > 382.5
 }
 
+/// The opacity of whatever steps back to let something else stand out. It
+/// fades text along with the surface under it, so it cannot go far: on
+/// catppuccin-latte a card's name drops under 4.5:1 below 0.88.
+const STEPPED_BACK: f64 = 0.90;
+
 /// A fully resolved palette: no optionals left for the stylesheet to worry about.
 #[derive(Debug, Clone)]
 pub struct Palette {
@@ -276,24 +281,32 @@ dropdown.om-sort > button {{
   background-color: shade(@om_raised, 1.08);
 }}
 
+/* The ring and the check say a card is ticked. The fill only backs them up,
+   because it goes under the card's text and the accent is whatever the theme
+   says it is. At 0.22, and 0.38 on a ticked card with the focus, the name of
+   the repository fell under 4.5:1 on half the stock themes; on kanagawa,
+   whose accent is its foreground, the card was mixed toward the colour of
+   its own text. */
 .om-card.om-selected {{
   border-color: @om_accent;
-  background-color: mix(@om_raised, @om_accent, 0.22);
+  background-color: mix(@om_raised, @om_accent, 0.10);
   box-shadow: inset 0 0 0 2px @om_accent;
 }}
 
 .om-card.om-selected:hover {{
-  background-color: mix(@om_raised, @om_accent, 0.30);
+  background-color: mix(@om_raised, @om_accent, 0.12);
 }}
 
 /* A muted theme accent cannot carry the highlight on its own, so once
-   anything is selected the rest of the grid steps back. */
+   anything is selected the rest of the grid steps back. A little: opacity
+   fades the text along with the card, and these are the cards read next, to
+   choose the second one. At 0.42 no stock theme kept a name at 4.5:1. */
 flowbox.om-flow.om-has-selection .om-card:not(.om-selected) {{
-  opacity: 0.42;
+  opacity: {stepped_back};
 }}
 
 flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
-  opacity: 0.85;
+  opacity: 1;
 }}
 
 .om-card.om-selected checkbutton check {{
@@ -456,12 +469,12 @@ flowbox.om-flow.om-keyboard .om-card:hover {{
 }}
 
 flowbox.om-flow.om-keyboard .om-card.om-selected:hover {{
-  background-color: mix(@om_raised, @om_accent, 0.22);
+  background-color: mix(@om_raised, @om_accent, 0.10);
   border-color: @om_accent;
 }}
 
 flowbox.om-flow.om-keyboard.om-has-selection .om-card:not(.om-selected):hover {{
-  opacity: 0.42;
+  opacity: {stepped_back};
 }}
 
 /* A focused card is the one being looked at, so it is never the dimmed one. */
@@ -471,7 +484,7 @@ flowbox.om-flow.om-has-selection > flowboxchild:focus-visible .om-card:not(.om-s
 
 flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
   outline-color: @om_accent;
-  background-color: mix(@om_raised, @om_accent, 0.38);
+  background-color: mix(@om_raised, @om_accent, 0.12);
 }}
 
 .om-statusbar {{
@@ -671,6 +684,7 @@ popover.menu contents, popover contents {{
             red = p.red,
             cyan = p.cyan,
             magenta = p.magenta,
+            stepped_back = STEPPED_BACK,
         )
     }
 }
@@ -679,6 +693,393 @@ popover.menu contents, popover contents {{
 mod tests {
     use super::*;
     use crate::testkit::*;
+
+    // Nothing here opens a window, so nothing here can look at the result.
+    // What can be done without one is to read the stylesheet back, work out
+    // the colour of each piece of text and of what it is drawn on, and measure
+    // the two against each other: that is what most of these tests do, for
+    // real palettes.
+
+    /// What WCAG asks between text and its background at the sizes used
+    /// here, all of them under 18.66px bold.
+    const AA: f64 = 4.5;
+
+    /// What the muted lines are held to instead: path, remote, sha, author,
+    /// age. On miasma, rose-pine and everforest they do not reach 4.5:1 on a
+    /// surface nothing has touched. That is the theme's choice of colours;
+    /// what is tested is that no state of the interface takes them under 3:1,
+    /// which is where several used to leave them.
+    const FLOOR: f64 = 3.0;
+
+    /// Stock Omarchy palettes as `Palette::load` resolves them, copied here
+    /// so that the tests do not depend on what is installed: the one this was
+    /// written under, Omarchy's default, the three dark ones with the least
+    /// contrast to spare or the oddest accent, and three light ones. In the
+    /// order of the fields of `Palette`.
+    const STOCK: [(&str, bool, [&str; 13]); 8] = [
+        (
+            "retro-82",
+            true,
+            [
+                "#05182e", "#0a2540", "#020c17", "#f6dcac", "#a7c9c6", "#2a6b78", "#faa968",
+                "#f85525", "#e97b3c", "#028391", "#3f8f8a", "#8cbfb8", "#3f8f8a",
+            ],
+        ),
+        (
+            "tokyo-night",
+            true,
+            [
+                "#1a1b26", "#24283b", "#0e0e14", "#a9b1d6", "#b4bee6", "#414868", "#7aa2f7",
+                "#f7768e", "#e0af68", "#9ece6a", "#7aa2f7", "#449dab", "#ad8ee6",
+            ],
+        ),
+        (
+            "everforest",
+            true,
+            [
+                "#2d353b", "#343f44", "#181d20", "#d3c6aa", "#9da9a0", "#475258", "#7fbbb3",
+                "#e67e80", "#dbbc7f", "#a7c080", "#7fbbb3", "#83c092", "#d699b6",
+            ],
+        ),
+        (
+            "miasma",
+            true,
+            [
+                "#222222", "#2c2c2c", "#121212", "#c2c2b0", "#8a8a7e", "#666666", "#78824b",
+                "#685742", "#b36d43", "#5f875f", "#78824b", "#c9a554", "#bb7744",
+            ],
+        ),
+        (
+            "kanagawa",
+            true,
+            [
+                "#1f1f28", "#223249", "#111116", "#dcd7ba", "#c8c093", "#54546d", "#dcd7ba",
+                "#c34043", "#c0a36e", "#76946a", "#7e9cd8", "#6a9589", "#957fb8",
+            ],
+        ),
+        (
+            "catppuccin-latte",
+            false,
+            [
+                "#eff1f5", "#dce0e8", "#d7d8dc", "#4c4f69", "#5c5f77", "#acb0be", "#1e66f5",
+                "#d20f39", "#df8e1d", "#40a02b", "#1e66f5", "#179299", "#ea76cb",
+            ],
+        ),
+        (
+            "rose-pine",
+            false,
+            [
+                "#faf4ed", "#f2e9e1", "#e1dbd5", "#575279", "#6e6a86", "#cecacd", "#56949f",
+                "#b4637a", "#ea9d34", "#286983", "#56949f", "#d7827e", "#907aa9",
+            ],
+        ),
+        (
+            "flexoki-light",
+            false,
+            [
+                "#fffcf0", "#e6e4d9", "#e5e2d8", "#100f0f", "#403e3c", "#b7b5ac", "#205ea6",
+                "#d14d41", "#d0a215", "#879a39", "#205ea6", "#3aa99f", "#ce5d97",
+            ],
+        ),
+    ];
+
+    /// The stock palettes above, and the built-in one.
+    fn palettes() -> Vec<Palette> {
+        let mut all: Vec<Palette> = STOCK
+            .iter()
+            .map(|(name, dark, c)| Palette {
+                name: name.to_string(),
+                dark: *dark,
+                bg: c[0].into(),
+                bg_raised: c[1].into(),
+                bg_sunken: c[2].into(),
+                fg: c[3].into(),
+                fg_dim: c[4].into(),
+                border: c[5].into(),
+                accent: c[6].into(),
+                red: c[7].into(),
+                yellow: c[8].into(),
+                green: c[9].into(),
+                blue: c[10].into(),
+                cyan: c[11].into(),
+                magenta: c[12].into(),
+            })
+            .collect();
+        all.push(Palette::fallback());
+        all
+    }
+
+    /// A colour that is what it is whatever lies under it.
+    type Solid = (f64, f64, f64);
+    /// A colour as the stylesheet states it, which may let what is under it
+    /// show through.
+    type Rgba = (f64, f64, f64, f64);
+
+    /// The generated stylesheet, read back: its colour definitions, and every
+    /// declaration with the selector it was written for.
+    struct Sheet {
+        colours: Vec<(String, String)>,
+        rules: Vec<(String, String, String)>,
+    }
+
+    impl Sheet {
+        fn of(palette: &Palette) -> Self {
+            let mut css = palette.stylesheet();
+            while let Some(start) = css.find("/*") {
+                let end = start + css[start..].find("*/").expect("a comment is closed") + 2;
+                css.replace_range(start..end, "");
+            }
+            let mut sheet = Sheet { colours: Vec::new(), rules: Vec::new() };
+            let mut rest = css.as_str();
+            loop {
+                rest = rest.trim_start();
+                if rest.is_empty() {
+                    break;
+                }
+                if let Some(define) = rest.strip_prefix("@define-color") {
+                    let (statement, after) = define.split_once(';').expect("a definition ends");
+                    let (name, value) = statement
+                        .trim()
+                        .split_once(char::is_whitespace)
+                        .expect("a definition has a name and a value");
+                    sheet.colours.push((name.to_string(), value.trim().to_string()));
+                    rest = after;
+                    continue;
+                }
+                let (selectors, after) = rest.split_once('{').expect("a rule opens");
+                let (body, after) = after.split_once('}').expect("a rule closes");
+                for selector in selectors.split(',') {
+                    let selector = selector.split_whitespace().collect::<Vec<_>>().join(" ");
+                    for declaration in body.split(';') {
+                        if let Some((property, value)) = declaration.split_once(':') {
+                            sheet.rules.push((
+                                selector.clone(),
+                                property.trim().to_string(),
+                                value.trim().to_string(),
+                            ));
+                        }
+                    }
+                }
+                rest = after;
+            }
+            sheet
+        }
+
+        /// What the stylesheet declares for exactly this selector. This is
+        /// not the cascade: a test names the rule it knows to win for the
+        /// state it is asking about.
+        fn value(&self, selector: &str, property: &str) -> &str {
+            self.rules
+                .iter()
+                .rev()
+                .find(|(s, p, _)| s == selector && p == property)
+                .map(|(_, _, value)| value.as_str())
+                .unwrap_or_else(|| panic!("the stylesheet sets no `{property}` on `{selector}`"))
+        }
+
+        fn colour(&self, selector: &str, property: &str) -> Rgba {
+            self.eval(self.value(selector, property))
+        }
+
+        fn solid(&self, selector: &str, property: &str) -> Solid {
+            let (r, g, b, alpha) = self.colour(selector, property);
+            assert_eq!(alpha, 1.0, "`{property}` on `{selector}` is not opaque");
+            (r, g, b)
+        }
+
+        fn number(&self, selector: &str, property: &str) -> f64 {
+            self.value(selector, property).parse().expect("a number")
+        }
+
+        /// A colour expression, as GTK resolves it.
+        fn eval(&self, expr: &str) -> Rgba {
+            let expr = expr.trim();
+            if let Some(name) = expr.strip_prefix('@') {
+                let (_, value) = self
+                    .colours
+                    .iter()
+                    .find(|(defined, _)| defined == name)
+                    .unwrap_or_else(|| panic!("`@{name}` is used and never defined"));
+                return self.eval(value);
+            }
+            if expr.starts_with('#') {
+                let (r, g, b) = Palette::rgb(expr);
+                return (r, g, b, 1.0);
+            }
+            if expr == "transparent" {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let (function, list) = expr
+                .strip_suffix(')')
+                .and_then(|open| open.split_once('('))
+                .unwrap_or_else(|| panic!("`{expr}` is not a colour this test can read"));
+            let factor = |text: &str| -> f64 { text.parse().expect("a factor") };
+            match (function, arguments(list).as_slice()) {
+                ("alpha", [colour, by]) => {
+                    let (r, g, b, alpha) = self.eval(colour);
+                    (r, g, b, alpha * factor(by))
+                }
+                ("mix", [from, to, by]) => {
+                    let (from, to, by) = (self.eval(from), self.eval(to), factor(by));
+                    let lerp = |a: f64, b: f64| a + (b - a) * by;
+                    (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2), lerp(from.3, to.3))
+                }
+                ("shade", [colour, by]) => shade(self.eval(colour), factor(by)),
+                _ => panic!("`{expr}` is not a colour this test can read"),
+            }
+        }
+    }
+
+    /// The arguments of a call, split at the commas that are its own.
+    fn arguments(list: &str) -> Vec<&str> {
+        let (mut depth, mut start, mut out) = (0, 0, Vec::new());
+        for (at, c) in list.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(list[start..at].trim());
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(list[start..].trim());
+        out
+    }
+
+    /// GTK's `shade()`: the colour taken to hue, lightness and saturation,
+    /// the last two multiplied, and brought back.
+    fn shade((r, g, b, alpha): Rgba, factor: f64) -> Rgba {
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let lightness = (max + min) / 2.0;
+        let (hue, saturation) = if max == min {
+            (0.0, 0.0)
+        } else {
+            let spread = max - min;
+            let saturation =
+                if lightness > 0.5 { spread / (2.0 - max - min) } else { spread / (max + min) };
+            let sixth = if max == r {
+                (g - b) / spread + if g < b { 6.0 } else { 0.0 }
+            } else if max == g {
+                (b - r) / spread + 2.0
+            } else {
+                (r - g) / spread + 4.0
+            };
+            (sixth / 6.0, saturation)
+        };
+        let lightness = (lightness * factor).clamp(0.0, 1.0);
+        let saturation = (saturation * factor).clamp(0.0, 1.0);
+        let upper = if lightness < 0.5 {
+            lightness * (1.0 + saturation)
+        } else {
+            lightness + saturation - lightness * saturation
+        };
+        let lower = 2.0 * lightness - upper;
+        let channel = |turn: f64| {
+            let turn = turn.rem_euclid(1.0);
+            if turn < 1.0 / 6.0 {
+                lower + (upper - lower) * 6.0 * turn
+            } else if turn < 0.5 {
+                upper
+            } else if turn < 2.0 / 3.0 {
+                lower + (upper - lower) * (2.0 / 3.0 - turn) * 6.0
+            } else {
+                lower
+            }
+        };
+        (channel(hue + 1.0 / 3.0), channel(hue), channel(hue - 1.0 / 3.0), alpha)
+    }
+
+    /// One colour drawn over another. GTK blends the encoded values, not
+    /// linear light, unless it is asked to with a debug flag.
+    fn over((r, g, b, alpha): Rgba, under: Solid) -> Solid {
+        (
+            under.0 + (r - under.0) * alpha,
+            under.1 + (g - under.1) * alpha,
+            under.2 + (b - under.2) * alpha,
+        )
+    }
+
+    /// A colour inside a widget drawn at `opacity`, with `backdrop` behind
+    /// the widget. Opacity takes the whole widget, text and all.
+    fn faded(colour: Solid, opacity: f64, backdrop: Solid) -> Solid {
+        over((colour.0, colour.1, colour.2, opacity), backdrop)
+    }
+
+    /// The WCAG 2 contrast ratio.
+    fn ratio(a: Solid, b: Solid) -> f64 {
+        let luminance = |(r, g, b): Solid| {
+            let linear =
+                |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// One kind of text measured across the palettes. It is asserted on once
+    /// everything has been measured, so that a failure lists every case that
+    /// fell short and not the first; and it prints the worst case when it
+    /// passes, to be seen with `--nocapture`.
+    struct Measured {
+        what: &'static str,
+        need: f64,
+        worst: (f64, String),
+        short: Vec<String>,
+    }
+
+    impl Measured {
+        fn new(what: &'static str, need: f64) -> Self {
+            Self { what, need, worst: (f64::INFINITY, String::new()), short: Vec::new() }
+        }
+
+        fn add(&mut self, palette: &Palette, case: &str, ratio: f64) {
+            let label = match case {
+                "" => format!("{} at {ratio:.2}", palette.name),
+                _ => format!("{}, {case}, at {ratio:.2}", palette.name),
+            };
+            if ratio < self.worst.0 {
+                self.worst = (ratio, label.clone());
+            }
+            if ratio < self.need {
+                self.short.push(label);
+            }
+        }
+
+        fn check(self) {
+            println!("{}: lowest is {}", self.what, self.worst.1);
+            assert!(
+                self.short.is_empty(),
+                "{} is under {}:1 in {} cases, lowest {}:\n{:#?}",
+                self.what,
+                self.need,
+                self.short.len(),
+                self.worst.1,
+                self.short
+            );
+        }
+    }
+
+    /// Every background a card can have, by the rule that wins for it.
+    const CARD_STATES: [(&str, &str); 7] = [
+        ("at rest", ".om-card"),
+        ("under the pointer", ".om-card:hover"),
+        ("with the focus", "flowbox.om-flow > flowboxchild:focus-visible .om-card"),
+        ("ticked", ".om-card.om-selected"),
+        ("ticked, under the pointer", ".om-card.om-selected:hover"),
+        (
+            "ticked, under an idle pointer",
+            "flowbox.om-flow.om-keyboard .om-card.om-selected:hover",
+        ),
+        (
+            "ticked, with the focus",
+            "flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected",
+        ),
+    ];
+
+    /// The rule that steps a card back once another is ticked.
+    const STEPS_BACK: &str = "flowbox.om-flow.om-has-selection .om-card:not(.om-selected)";
 
     /// Put a theme where `Palette::load` looks for the active one. Only under
     /// `isolate()`: the directory is emptied first, and without the fake state
@@ -904,5 +1305,64 @@ brown = "#743d1e"
             [&palette.blue, &palette.cyan, &palette.magenta],
             ["#3f8f8a", "#8cbfb8", "#3f8f8a"]
         );
+    }
+
+    /// A ticked card had the accent mixed in under its text: 22% of it, and
+    /// 38% on the card that also had the focus, which is the card under the
+    /// keyboard straight after Space. There the name was at 3.26:1 on
+    /// everforest and the muted lines at 2.26:1.
+    #[test]
+    fn the_text_on_a_card_reads_whatever_state_the_card_is_in() {
+        let mut names = Measured::new("a repository's name on its card", AA);
+        let mut muted = Measured::new("the muted lines on a card", FLOOR);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let name = sheet.solid(".om-name", "color");
+            let meta = sheet.solid(".om-meta", "color");
+            for (state, rule) in CARD_STATES {
+                let card = sheet.solid(rule, "background-color");
+                names.add(&palette, state, ratio(name, card));
+                muted.add(&palette, state, ratio(meta, card));
+            }
+        }
+        names.check();
+        muted.check();
+    }
+
+    /// Ticking one card drew every other card at 42% opacity, and opacity
+    /// takes the text with it. The names on them, which is what is read to
+    /// find the second card to tick, were at 1.85:1 on catppuccin-latte and
+    /// no better than 3.98:1 on any stock theme.
+    #[test]
+    fn a_card_that_has_stepped_back_can_still_be_read() {
+        let mut names = Measured::new("a repository's name on a card that has stepped back", AA);
+        let mut muted = Measured::new("the muted lines on a card that has stepped back", FLOOR);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let page = sheet.solid("flowbox.om-flow", "background-color");
+            let opacity = sheet.number(STEPS_BACK, "opacity");
+            let card = faded(sheet.solid(".om-card", "background-color"), opacity, page);
+            let on_it = |rule: &str| ratio(faded(sheet.solid(rule, "color"), opacity, page), card);
+            names.add(&palette, "", on_it(".om-name"));
+            muted.add(&palette, "", on_it(".om-meta"));
+
+            // The pointer and the focus bring a card forward. An idle pointer
+            // in keyboard mode leaves it where it was. Nothing sends it
+            // further back, which the old hover rule would now do.
+            let forward = [
+                format!("{STEPS_BACK}:hover"),
+                "flowbox.om-flow.om-has-selection > flowboxchild:focus-visible \
+                 .om-card:not(.om-selected)"
+                    .to_string(),
+            ];
+            for rule in &forward {
+                assert_eq!(sheet.number(rule, "opacity"), 1.0, "{rule}");
+            }
+            let idle =
+                "flowbox.om-flow.om-keyboard.om-has-selection .om-card:not(.om-selected):hover";
+            assert_eq!(sheet.number(idle, "opacity"), opacity);
+        }
+        names.check();
+        muted.check();
     }
 }
