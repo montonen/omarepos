@@ -2421,29 +2421,34 @@ impl Ui {
                 .add_toast(ui::toast("No repositories to search"));
             return;
         }
-        let ui = Rc::clone(self);
-        let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
-            Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
-                ui.accept(&path);
-                ui.nav
-                    .push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
-            });
-        let (page, query) = ui::search::page(repos, scope, on_open);
+        let (page, query) = ui::search::page(repos, scope, self.commit_opener());
         self.nav.push(&page);
         // Now, not when the slide has finished: see `ui::search::page`.
         query.grab_focus();
     }
 
+    /// How a page that lists commits (search, contributions) opens one: the
+    /// graph of its repository, on that commit.
+    fn commit_opener(self: &Rc<Self>) -> Rc<dyn Fn(PathBuf, String, Option<String>)> {
+        let ui = Rc::clone(self);
+        Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
+            ui.accept(&path);
+            ui.nav
+                .push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
+        })
+    }
+
     /// What a graph page of the repository at `path` reaches the window with.
     fn graph_host(self: &Rc<Self>, path: &Path) -> ui::graph::Host {
         let (detail_open, on_detail_toggled) = self.detail_prefs();
-        let nav = self.nav.clone();
+        let ui = Rc::clone(self);
         let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            nav.push(&ui::stats::page(vec![path], name));
+            ui.nav
+                .push(&ui::stats::page(vec![path], name, ui.commit_opener()));
         });
         let on_pull: Rc<dyn Fn(bool, Rc<dyn Fn(bool)>)> = {
             let ui = Rc::clone(self);
@@ -2667,13 +2672,14 @@ impl Ui {
         })
     }
 
-    fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {
+    fn open_contributions(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
             self.toasts
                 .add_toast(ui::toast("No repositories to report on"));
             return;
         }
-        self.nav.push(&ui::stats::page(repos, scope));
+        self.nav
+            .push(&ui::stats::page(repos, scope, self.commit_opener()));
     }
 
     fn run_action(self: &Rc<Self>, action: Action, info: &RepoInfo) {

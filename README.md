@@ -648,7 +648,8 @@ local calendar days, bucketed at local midnight.
   work, already counted. The per-author tooltip breaks out how many were merges.
 - Per-day strips are scaled against the busiest author-day, so rows are comparable.
 - A row expands to the work itself: every commit, grouped by repository, with
-  its sha, churn and age. The newest 100 per repository are kept; past that the
+  its sha, churn and age. `Enter` or a click on one opens that repository's
+  graph on that commit. The newest 100 per repository are kept; past that the
   group says how many older ones there were.
 
 Line counts come from diffing each commit against its first parent, which is the

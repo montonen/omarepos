@@ -17,7 +17,11 @@ const BAR_H: i32 = 46;
 const SPARK_W: f64 = 11.0;
 
 /// `scope` is shown as the page subtitle, e.g. "4 selected repos".
-pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
+/// What opens a commit from the page: its repository, what to call it, and
+/// the commit.
+pub type OnOpen = Rc<dyn Fn(PathBuf, String, Option<String>)>;
+
+pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::NavigationPage {
     // The subtitle also says which commits are counted. The totals mean one
     // thing for the branch that is checked out and another for every branch
     // there is, and the page gave no way to tell which it was showing.
@@ -119,6 +123,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
             let empty = empty.clone();
             let status = status.clone();
             let progress = progress.clone();
+            let on_open = Rc::clone(&on_open);
             glib::spawn_future_local(async move {
                 while let Ok(event) = rx.recv().await {
                     if *generation.borrow() != mine {
@@ -147,7 +152,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
                                 }
                                 content.append(&overview(&result));
                                 for author in &result.authors {
-                                    content.append(&author_row(author, &result));
+                                    content.append(&author_row(author, &result, &on_open));
                                 }
                                 stack.set_visible_child_name("content");
                             }
@@ -366,7 +371,7 @@ fn big_number(value: &str, caption: &str) -> gtk::Box {
     column
 }
 
-fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
+fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.add_css_class("om-card");
     card.add_css_class("om-stat-row");
@@ -469,7 +474,7 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
     let revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
         .transition_duration(160)
-        .child(&commit_list(&repos))
+        .child(&commit_list(&repos, on_open))
         .build();
     card.append(&revealer);
 
@@ -516,7 +521,7 @@ fn tooltip(author: &Author) -> String {
 }
 
 /// The author's commits, grouped by repository, busiest first.
-fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
+fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
     list.set_margin_top(12);
     list.set_margin_start(26);
@@ -543,9 +548,25 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
 
         let mut commits = in_repo.commits.clone();
         commits.sort_by(|a, b| b.when.cmp(&a.when));
+        // A list, so that a commit can be reached with the keyboard and
+        // opened. These were plain boxes: the page could show that a commit
+        // existed and offered no way to it, not even its whole sha.
+        let rows = gtk::ListBox::new();
+        rows.set_selection_mode(gtk::SelectionMode::None);
+        rows.add_css_class("om-results");
+        {
+            let ids: Vec<String> = commits.iter().map(|commit| commit.id.clone()).collect();
+            let path = (*path).clone();
+            let name = in_repo.name.clone();
+            let on_open = Rc::clone(on_open);
+            rows.connect_row_activated(move |_, row| {
+                if let Some(id) = usize::try_from(row.index()).ok().and_then(|index| ids.get(index)) {
+                    on_open(path.clone(), name.clone(), Some(id.clone()));
+                }
+            });
+        }
         for commit in &commits {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            row.add_css_class("om-row");
 
             let sha = gtk::Label::builder()
                 .label(&commit.short_id)
@@ -589,7 +610,7 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
             row.append(&when);
 
             let written = crate::ui::absolute_time(commit.when);
-            let mut tip = format!("{}\n{}\n{written}", commit.short_id, commit.summary);
+            let mut tip = format!("{}\n{}\n{written}", commit.id, commit.summary);
             // The row is dated by when the work was written. A rebase, an
             // amend or a cherry-pick makes the commit itself newer than that,
             // and the commit graph shows that other date.
@@ -603,9 +624,13 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
                      everything the commit changed, or the commit it was made on.",
                 );
             }
-            row.set_tooltip_text(Some(&tip));
-            group.append(&row);
+            tip.push_str("\n\nEnter, or a click, opens it in the commit graph.");
+            let listed = gtk::ListBoxRow::builder().child(&row).build();
+            listed.add_css_class("om-row");
+            listed.set_tooltip_text(Some(&tip));
+            rows.append(&listed);
         }
+        group.append(&rows);
 
         if in_repo.total > commits.len() {
             let more = gtk::Label::builder()

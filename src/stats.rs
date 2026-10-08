@@ -69,6 +69,8 @@ impl Window {
 /// rather than only its total.
 #[derive(Debug, Clone)]
 pub struct Commit {
+    /// In full, which is what it takes to open the commit from the page.
+    pub id: String,
     pub short_id: String,
     pub summary: String,
     /// When it was written, by its author's clock. This is the one that says
@@ -281,6 +283,7 @@ impl Tally {
             in_repo.total += 1;
             if in_repo.commits.len() < MAX_COMMITS_LISTED {
                 in_repo.commits.push(Commit {
+                    id: commit.oid.to_string(),
                     short_id: commit.oid.to_string().chars().take(7).collect(),
                     summary: commit.summary,
                     when: commit.when,
