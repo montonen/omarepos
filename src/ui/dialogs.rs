@@ -601,12 +601,29 @@ fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
     eprintln!("omarepos: {text}");
 }
 
-/// Edit the tags on one or more repositories. With several repos the entry
-/// starts from the tags they already have in common.
+/// Edit the tags on one or more repositories, offering every tag in the store
+/// as a chip. The store is wider than the grid, so this offers tags, with
+/// counts, that nothing on screen carries: a caller that knows what is on the
+/// grid wants `edit_tags_among`.
 pub fn edit_tags(
     parent: &impl IsA<gtk::Widget>,
     meta: Rc<RefCell<Meta>>,
     repos: Vec<PathBuf>,
+    on_change: Rc<dyn Fn()>,
+) {
+    let known = meta.borrow().all_tags();
+    edit_tags_among(parent, meta, repos, known, on_change);
+}
+
+/// Edit the tags on one or more repositories. With several repos the entry
+/// starts from the tags they already have in common. `known` is the tags to
+/// offer as chips with how many repositories carry each, which is
+/// `Meta::tags_among` over the grid.
+pub fn edit_tags_among(
+    parent: &impl IsA<gtk::Widget>,
+    meta: Rc<RefCell<Meta>>,
+    repos: Vec<PathBuf>,
+    known: Vec<(String, usize)>,
     on_change: Rc<dyn Fn()>,
 ) {
     if repos.is_empty() {
@@ -636,9 +653,7 @@ pub fn edit_tags(
 
     // Existing tags as one-click chips, so spelling stays consistent. One the
     // entry could not hold is not offered.
-    let known: Vec<(String, usize)> = meta
-        .borrow()
-        .all_tags()
+    let known: Vec<(String, usize)> = known
         .into_iter()
         .filter(|(tag, _)| meta::editable(tag))
         .collect();

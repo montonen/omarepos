@@ -351,11 +351,21 @@ impl Meta {
         before - self.repos.len()
     }
 
-    /// Every tag in use, sorted, with how many repos carry it.
-    pub fn all_tags(&self) -> Vec<(String, usize)> {
+    /// The tags carried by `repos`, sorted, with how many of them carry each.
+    ///
+    /// This is the one to build chips and counts from, handed the repositories
+    /// on the grid. The store is wider than the grid: it keeps what it knows
+    /// about a repository no root reaches any more, and about one whose disk
+    /// is away. Counted over the store, a tag none of whose repositories was
+    /// still scanned stayed in the header with its old count, counted towards
+    /// the three-tag limit, and filtered to an empty grid.
+    pub fn tags_among<'a>(
+        &self,
+        repos: impl IntoIterator<Item = &'a Path>,
+    ) -> Vec<(String, usize)> {
         let mut counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
-        for meta in self.repos.values() {
-            for tag in &meta.tags {
+        for repo in repos {
+            for tag in self.tags_for(repo) {
                 let entry = counts
                     .entry(tag.to_lowercase())
                     .or_insert_with(|| (tag.clone(), 0));
@@ -363,6 +373,12 @@ impl Meta {
             }
         }
         counts.into_values().collect()
+    }
+
+    /// Every tag in the store, with how many entries carry it. That is not
+    /// what is on screen: see `tags_among`.
+    pub fn all_tags(&self) -> Vec<(String, usize)> {
+        self.tags_among(self.repos.keys().map(Path::new))
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -640,6 +656,30 @@ mod tests {
         for tag in ["open source", "a,b", "a, b", " acme", "acme,", "tab\tbed", "", ","] {
             assert!(!is_one_tag(tag), "{tag:?}");
         }
+    }
+
+    /// The store is wider than the grid: it keeps what it knows about a
+    /// repository whose root was removed, or whose disk is away. The header
+    /// chips were counted over the store, so a tag with nothing left on the
+    /// grid stayed as a chip, with its old count, and filtered to nothing.
+    #[test]
+    fn tags_are_counted_over_the_repositories_asked_about_not_the_whole_store() {
+        let (api, web) = (repo("api"), repo("web"));
+        let left = PathBuf::from("/home/me/work/former/app");
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["acme".to_string(), "rust".to_string()]);
+        meta.set_tags(&web, vec!["Acme".to_string()]);
+        meta.set_tags(&left, vec!["acme".to_string(), "former".to_string()]);
+        let counted = |tags: &[(&str, usize)]| -> Vec<(String, usize)> {
+            tags.iter().map(|(tag, count)| (tag.to_string(), *count)).collect()
+        };
+
+        let grid = [api.as_path(), web.as_path(), Path::new("/home/me/code/untagged")];
+        assert_eq!(meta.tags_among(grid), counted(&[("acme", 2), ("rust", 1)]));
+        assert_eq!(meta.tags_among([left.as_path()]), counted(&[("acme", 1), ("former", 1)]));
+        assert!(meta.tags_among(std::iter::empty()).is_empty());
+
+        assert_eq!(meta.all_tags(), counted(&[("acme", 3), ("former", 1), ("rust", 1)]));
     }
 
     /// The unmounted disk the doc comment is about. A mount point from fstab
