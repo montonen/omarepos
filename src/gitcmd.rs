@@ -75,6 +75,30 @@ pub fn winding_down() -> bool {
     WINDING_DOWN.load(Ordering::SeqCst)
 }
 
+/// The variables that tell git which repository to act on, whatever
+/// directory it is run in: what `git rev-parse --local-env-vars` lists. One
+/// inherited from wherever the application was started (a shell inside a
+/// hook, an alias, a `git rebase --exec`) sent every stage, commit and push
+/// to that repository and not to the one on screen. No command run from here
+/// is given them, and `main` takes them out of the application's own
+/// environment at launch, so that a terminal it opens does not have them
+/// either.
+pub const REPOSITORY_ENV: [&str; 13] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_CONFIG",
+];
+
 /// How long git gets to stop after being asked to, before it is made to.
 const GRACE: Duration = Duration::from_secs(5);
 /// How long to go on waiting for the last of the output once git has exited.
@@ -233,7 +257,11 @@ fn ssh_command(dir: &Path, args: &[&str], attended: bool) -> Option<String> {
     if !talks_to_a_remote(args) {
         return plain();
     }
-    let asked = Command::new("git")
+    let mut ask = Command::new("git");
+    for name in REPOSITORY_ENV {
+        ask.env_remove(name);
+    }
+    let asked = ask
         .current_dir(dir)
         .args(["config", "--show-scope", "--get", "core.sshCommand"])
         .stdin(Stdio::null())
@@ -293,6 +321,9 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
         // nobody can answer, and the worker thread is gone for good.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0");
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
     if let Some(ssh) = ssh_command(dir, args, attended) {
         command.env("GIT_SSH_COMMAND", ssh);
     }

@@ -1810,7 +1810,11 @@ mod tests {
         assert_eq!(staged(&elsewhere.work), "theirs.txt", "the file was staged in another repository");
         assert_eq!(elsewhere.remote_ref("refs/heads/main"), their_remote, "another repository was pushed");
         // And each answer is true of the one on screen.
-        assert_eq!(staged_it.is_ok(), staged(&shown.work).contains("secret.txt"), "{staged_it:?}");
+        // In the index, whether still waiting there or taken by the commit
+        // that followed: with a runner that clears the variable all three
+        // writes go through, and the commit takes what the stage put there.
+        let in_index = !git(&shown.work, &["ls-files", "--", "secret.txt"]).is_empty();
+        assert_eq!(staged_it.is_ok(), in_index, "{staged_it:?}");
         assert_eq!(committed.is_ok(), shown.head() != before, "{committed:?}");
         assert_eq!(pushed.is_ok(), shown.remote_ref("refs/heads/main") == armed.tip, "{pushed:?}");
         if let Err(why) = &staged_it {

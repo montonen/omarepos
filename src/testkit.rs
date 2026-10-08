@@ -51,7 +51,7 @@ pub fn isolate() -> MutexGuard<'static, ()> {
             std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
             std::env::set_var("GIT_CONFIG_GLOBAL", home.join("gitconfig"));
             std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-            for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK"] {
+            for name in crate::gitcmd::REPOSITORY_ENV.iter().chain(&["GIT_SSH_COMMAND", "SSH_AUTH_SOCK"]) {
                 std::env::remove_var(name);
             }
         }

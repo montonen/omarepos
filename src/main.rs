@@ -39,6 +39,12 @@ Config: ~/.config/omarepos/config.toml
 ";
 
 fn main() -> glib::ExitCode {
+    // Before anything else, and before there is a second thread: see
+    // `gitcmd::REPOSITORY_ENV`.
+    for name in gitcmd::REPOSITORY_ENV {
+        // SAFETY: nothing else is running yet to read the environment.
+        unsafe { std::env::remove_var(name) };
+    }
     let mut cfg = config::Config::load();
     let mut roots: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);

@@ -127,6 +127,7 @@ omarepos [options]
 | `f` | Fetch only, leaving your files alone |
 | `Space` in the changed files | Stage or unstage that file |
 | `c` in the changed files | Write a commit message |
+| `Enter` in the message | Commit what is staged |
 
 `l`, `e`, `p` and `f` act once for each press. A key held down, or one that
 sticks, does not open a terminal per repeat or start a second fetch.
@@ -497,8 +498,9 @@ on a side branch still appears.
 
 The header carries a **Push N** button, enabled when the branch is ahead of its
 upstream and nothing is in the way. A branch that has never been pushed says
-**Publish** instead, and only when the repository has exactly one remote —
-guessing which remote to publish to is not a guess worth making.
+**Publish** instead: one with no upstream configured and no branch of its name
+on the remote, and only when the repository has exactly one remote — guessing
+which remote to publish to is not a guess worth making.
 
 Never forced, never `--all`, never tags, never another branch, and never from
 the grid across a selection. That is not left to git's defaults: the push names
@@ -557,7 +559,13 @@ Each group folds. Untracked starts folded past ten files, where it stops being
 information and starts being noise.
 
 The `+` beside a file stages it, `−` unstages it, and the box below commits what
-is staged. A file that is staged and then edited again has two rows, and each
+is staged: `c` puts the keyboard in the message, `Enter` commits, `Esc` steps
+back out and leaves the message. After a stage the keyboard is on the next
+file of the same group, so a run of files is `Space`, `Space`, `Space`. What a
+write came to, a hook's refusal included, stays on a line of its own above the
+message until the next one. The list is read again when the window is
+returned to, and keeps your place: the selected file, the keyboard, which
+groups are folded and how far it was scrolled. A file that is staged and then edited again has two rows, and each
 shows its own half: the Staged row is exactly what the commit will take. The
 name beside the Commit button is who git will record it as. A submodule whose
 checkout has moved is not listed, and neither it nor a repository nested inside
@@ -589,6 +597,15 @@ things" is what the card already says and this view exists to say which.
 
 An untracked file has nothing to diff against, so its contents are shown as
 added, the way `git diff --no-index` would.
+
+The list is libgit2's reading of the working tree, and there are two things
+libgit2 does not do that git does. In a sparse checkout it reports every file
+outside the cone as deleted, and it does not run clean or smudge filters, so a
+file with a `filter` or `working-tree-encoding` attribute can show as modified
+when git says it is not. Where either applies, a line above the list says how
+many rows that may be, and to ask `git status`. And in a partial clone, a
+commit whose blobs were never fetched has rows marked `unreadable` and a diff
+that says why, where it used to say `+0 −0` and "No textual changes".
 
 The working tree changes outside the app, so it is re-read whenever the window
 regains focus — edit in your editor, come back, and the list is current. HEAD

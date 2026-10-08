@@ -57,6 +57,8 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓", "Move; the diff follows"),
             ("Space", "Stage or unstage this file"),
             ("c", "Write a commit message"),
+            ("Enter in the message", "Commit what is staged"),
+            ("Esc in the message", "Step out of it; the message stays"),
         ],
     ),
     (
