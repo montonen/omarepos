@@ -1446,6 +1446,10 @@ pub fn spawn_write(
 
 /// Commit what is staged. `-m` only: no `-a`, no `--amend`, nothing that could
 /// take in work the user has not looked at or rewrite what is already there.
+///
+/// The answer is the new commit's short id, to be shown, or nothing where it
+/// could not be asked for: the commit is made by then, and failing to name it
+/// must not be reported as failing to make it.
 pub fn spawn_commit(
     repo: PathBuf,
     message: String,
@@ -1456,11 +1460,11 @@ pub fn spawn_commit(
             let _ = tx.send_blocking(Err(why));
             return;
         }
-        let result = crate::gitcmd::run(&repo, &["commit", "-m", &message], WRITE_TIMEOUT)
-            .and_then(|_| {
-                crate::gitcmd::run(&repo, &["rev-parse", "--short=8", "HEAD"], WRITE_TIMEOUT)
-            })
-            .map(|sha| sha.trim().to_string());
+        let result = crate::gitcmd::run(&repo, &["commit", "-m", &message], WRITE_TIMEOUT).map(|_| {
+            crate::gitcmd::run(&repo, &["rev-parse", "--short=8", "HEAD"], WRITE_TIMEOUT)
+                .map(|sha| sha.trim().to_string())
+                .unwrap_or_default()
+        });
         let _ = tx.send_blocking(result);
     });
     rx
@@ -2145,6 +2149,50 @@ mod tests {
         let why = why_not_commit(&dir, 1, "resolved, honest").unwrap();
         assert!(why.contains("unresolved conflicts"), "{why}");
         assert!(read(&dir.join("f.txt")).contains("<<<<<<<"), "the markers are still the user's to deal with");
+    }
+
+    #[test]
+    fn a_commit_says_which_commit_it_made() {
+        let _guard = isolate();
+        let f = fleet("cm-commit-made");
+        write(&f.work.join("mine.txt"), "mine\n");
+        git(&f.work, &["add", "mine.txt"]);
+
+        let made = recv(spawn_commit(f.work.clone(), "mine".to_string())).unwrap();
+
+        assert_eq!(made.len(), 8);
+        assert_eq!(made, git(&f.work, &["rev-parse", "--short=8", "HEAD"]));
+        assert_eq!(git(&f.work, &["log", "--format=%s", "-1"]), "mine");
+    }
+
+    /// A hook that fixes what it objects to and then refuses, which is what
+    /// the formatters run by the pre-commit framework do. The refusal is
+    /// quoted, and the tree is no longer what the list was drawn from: the
+    /// file is staged as it was and modified as it now is. The pane reads the
+    /// tree again after a refusal for this reason.
+    #[test]
+    fn a_hook_that_rewrites_a_file_and_refuses_leaves_a_tree_worth_reading_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = isolate();
+        let dir = scratch("cm-hook-rewrites");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "f.txt", "one\n", "first");
+        let hook = dir.join(".git/hooks/pre-commit");
+        write(&hook, "#!/bin/sh\nprintf 'one\\ntwo\\n' > f.txt\necho 'f.txt: trailing whitespace, fixed' >&2\nexit 1\n");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write(&dir.join("f.txt"), "one\ntwo  \n");
+        git(&dir, &["add", "f.txt"]);
+
+        let groups = || -> Vec<Group> {
+            load_working(&dir, &Cancel::default()).unwrap().files.iter().map(|f| f.group).collect()
+        };
+        assert_eq!(groups(), [Group::Staged]);
+
+        let refused = recv(spawn_commit(dir.clone(), "add two".to_string())).unwrap_err();
+
+        assert!(refused.contains("trailing whitespace, fixed"), "{refused}");
+        assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first", "nothing was committed");
+        assert_eq!(groups(), [Group::Staged, Group::Unstaged]);
     }
 
     #[test]

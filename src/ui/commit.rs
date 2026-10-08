@@ -163,11 +163,28 @@ pub fn pane(
         .max_width_chars(30)
         .build();
     who.add_css_class("om-meta");
-    let commit_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    // What the last write here came to: "Committing…" while one runs, and a
+    // refusal in git's or a hook's own words. On a line of its own, which the
+    // loader never writes to. These used to go to the totals line under the
+    // pane, and the loader writes that on every read: "Committed" was put
+    // there and replaced in the same turn of the main loop, so it was never
+    // drawn at all, and a hook's reason for refusing lasted until the window
+    // was next come back to, which is the way back from fixing what the hook
+    // complained about.
+    let outcome = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .visible(false)
+        .build();
+    outcome.add_css_class("om-summary");
+    let commit_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    commit_line.append(&message);
+    commit_line.append(&who);
+    commit_line.append(&commit_button);
+    let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
     commit_box.add_css_class("om-commit");
-    commit_box.append(&message);
-    commit_box.append(&who);
-    commit_box.append(&commit_button);
+    commit_box.append(&outcome);
+    commit_box.append(&commit_line);
     commit_box.set_visible(false);
 
     let left = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -216,7 +233,7 @@ pub fn pane(
         let staged_count = Rc::clone(&staged_count);
         let reload = Rc::clone(&reload);
         let message = message.clone();
-        let totals = totals.clone();
+        let outcome = outcome.clone();
         let on_changed = Rc::clone(&on_changed);
         let busy = Rc::clone(&busy);
         let files_for_commit = files.clone();
@@ -224,23 +241,23 @@ pub fn pane(
             let Some(repo) = viewer.working() else { return };
             let text = message.text().to_string();
             if let Some(reason) = commit::why_not_commit(&repo, staged_count.get(), &text) {
-                tell(&totals, &reason);
+                report(&outcome, &reason);
                 return;
             }
             if busy.replace(true) {
-                tell(&totals, "Still staging. Try again in a moment.");
+                report(&outcome, "Still staging. Try again in a moment.");
                 return;
             }
             button.set_sensitive(false);
             files_for_commit.set_sensitive(false);
-            tell(&totals, "Committing…");
+            report(&outcome, "Committing…");
 
             let rx = commit::spawn_commit(repo, text);
             let button = button.clone();
             let busy = Rc::clone(&busy);
             let files_for_commit = files_for_commit.clone();
             let message = message.clone();
-            let totals = totals.clone();
+            let outcome = outcome.clone();
             let reload = Rc::clone(&reload);
             let on_changed = Rc::clone(&on_changed);
             glib::spawn_future_local(async move {
@@ -248,21 +265,52 @@ pub fn pane(
                 button.set_sensitive(true);
                 files_for_commit.set_sensitive(true);
                 busy.set(false);
+                let reread = || {
+                    if let Some(reload) = reload.borrow().clone() {
+                        reload();
+                    }
+                };
                 match result {
                     Ok(Ok(sha)) => {
                         message.set_text("");
-                        tell(&totals, &format!("Committed {sha}"));
-                        if let Some(reload) = reload.borrow().clone() {
-                            reload();
-                        }
+                        let done = match sha.as_str() {
+                            "" => "Committed".to_string(),
+                            sha => format!("Committed {sha}"),
+                        };
+                        // As a toast, where a push and a pull report theirs:
+                        // after the commit that leaves the tree clean, this
+                        // box and its line are no longer on screen.
+                        report(&outcome, if announce(&button, &done) { "" } else { &done });
+                        reread();
                         on_changed(true);
                     }
                     // A hook that refuses is quoted rather than paraphrased.
-                    // The label holds one line; the rest is in its tooltip.
-                    Ok(Err(err)) => tell(&totals, &err),
-                    Err(_) => totals.set_label("The commit could not be started"),
+                    // The line holds the first of what it said; the rest is in
+                    // the tooltip. And the tree is read again: a hook that
+                    // refuses has often rewritten a file first, which is then
+                    // staged as it was and modified as it is, and the list
+                    // went on showing neither that nor a `+` to stage the fix.
+                    Ok(Err(err)) => {
+                        report(&outcome, &err);
+                        reread();
+                    }
+                    Err(_) => report(&outcome, "The commit could not be started"),
                 }
             });
+        });
+    }
+
+    {
+        // Enter in the message commits, as it does in every box with one
+        // button beside it. It did nothing: the only way from the message to
+        // the commit was Tab, past the name, and then Enter. Not while a
+        // commit is running, when the button is switched off; a click sent
+        // from here would not ask.
+        let commit_button = commit_button.clone();
+        message.connect_activate(move |_| {
+            if commit_button.is_sensitive() {
+                commit_button.emit_clicked();
+            }
         });
     }
 
@@ -317,6 +365,7 @@ pub fn pane(
             let scroller = scroller.clone();
             let totals = totals.clone();
             let commit_box = commit_box.clone();
+            let outcome = outcome.clone();
             let staged_count = Rc::clone(&staged_count);
             let reload = Rc::clone(&reload);
             let on_changed = Rc::clone(&on_changed);
@@ -396,6 +445,9 @@ pub fn pane(
                 let offset = scroller.vadjustment().value();
                 if !same {
                     folds.borrow_mut().clear();
+                    // What a write came to was said about the list this one
+                    // replaces.
+                    report(&outcome, "");
                 }
                 // The message box goes when this is not the working tree, and
                 // after the commit that emptied the tree the keyboard is in it.
@@ -416,7 +468,7 @@ pub fn pane(
                     let viewer = Rc::clone(&viewer);
                     let reload = Rc::clone(&reload);
                     let on_changed = Rc::clone(&on_changed);
-                    let totals = totals.clone();
+                    let outcome = outcome.clone();
                     let busy = Rc::clone(&busy);
                     Rc::new(move |what: Write, file: String| {
                         let Some(repo) = viewer.working() else { return };
@@ -427,18 +479,31 @@ pub fn pane(
                         let rx = commit::spawn_write(repo, what, vec![file]);
                         let reload = Rc::clone(&reload);
                         let on_changed = Rc::clone(&on_changed);
-                        let totals = totals.clone();
+                        let outcome = outcome.clone();
                         glib::spawn_future_local(async move {
                             let result = rx.recv().await;
                             busy.set(false);
+                            let reread = || {
+                                if let Some(reload) = reload.borrow().clone() {
+                                    reload();
+                                }
+                            };
                             match result {
                                 Ok(Ok(())) => {
-                                    if let Some(reload) = reload.borrow().clone() {
-                                        reload();
-                                    }
+                                    // Whatever the line said was about the
+                                    // index as it was before this.
+                                    report(&outcome, "");
+                                    reread();
                                     on_changed(false);
                                 }
-                                Ok(Err(err)) => tell(&totals, &err),
+                                // git refusing to stage a file it was shown
+                                // as able to stage means the list is out of
+                                // date: the file is gone, or something else
+                                // has the index. So it is read again here too.
+                                Ok(Err(err)) => {
+                                    report(&outcome, &err);
+                                    reread();
+                                }
                                 Err(_) => {}
                             }
                         });
@@ -1076,6 +1141,28 @@ fn tell(label: &gtk::Label, text: &str) {
     label.set_label(first);
     let more = text.lines().count() > 1 || first.chars().count() > 60;
     label.set_tooltip_text(more.then_some(text));
+}
+
+/// Say what a write came to on the line kept for that, which takes no room
+/// while it has nothing to say.
+fn report(outcome: &gtk::Label, text: &str) {
+    tell(outcome, text);
+    outcome.set_visible(!text.trim().is_empty());
+}
+
+/// Raise a toast on the page `from` is part of. Whether there was a page to
+/// raise it on: the pane does not own one, and is not told which it is in.
+fn announce(from: &impl IsA<gtk::Widget>, text: &str) -> bool {
+    let overlay = from
+        .ancestor(adw::ToastOverlay::static_type())
+        .and_downcast::<adw::ToastOverlay>();
+    match overlay {
+        Some(overlay) => {
+            overlay.add_toast(crate::ui::toast(text));
+            true
+        }
+        None => false,
+    }
 }
 
 fn describe(detail: &Detail) -> String {
