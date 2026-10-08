@@ -12,6 +12,15 @@
 //! nobody will answer: `GIT_TERMINAL_PROMPT=0`, and ssh's batch options, which
 //! are appended to the ssh command they configured rather than put in its
 //! place.
+//!
+//! That is the terminal. git asks an askpass program before it considers the
+//! terminal, and an askpass program is a window: `GIT_ASKPASS`, `core.askPass`
+//! and `SSH_ASKPASS` are tried in that order, and `GIT_TERMINAL_PROMPT` gates
+//! none of them. For something the user asked for, a window asking for their
+//! password is the right answer and is left alone. For a pass nobody is
+//! watching ([`run_fenced`]) it is a dialog per repository, every interval,
+//! on the screen of somebody who asked for nothing, so there the askpass
+//! programs are switched off as well.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -50,11 +59,29 @@ pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, Strin
     exec(dir, args, timeout, true)
 }
 
-/// As [`run`], for a pass nobody is watching. The one difference is whose
-/// word is taken for the ssh command: see [`ssh_command`].
+/// As [`run`], for a pass nobody is watching. Two differences: whose word is
+/// taken for the ssh command (see [`ssh_command`]), and that nothing is
+/// allowed to ask (see [`UNASKED`]).
 pub fn run_fenced(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     exec(dir, args, timeout, false)
 }
+
+/// The environment of a pass nobody is watching, on top of what every command
+/// gets. `GIT_TERMINAL_PROMPT=0` was believed to cover this and does not: with
+/// an askpass program exported by the desktop session, or named by a
+/// repository's own `core.askPass`, the timer's fetches put a password dialog
+/// on screen for every repository whose stored credential had expired.
+///
+/// - `GIT_ASKPASS` set and empty is the one value that outranks the other two
+///   places git looks, and runs nothing. Unset, git falls through to them.
+/// - `SSH_ASKPASS_REQUIRE=never` is the same for ssh's own questions, a key's
+///   passphrase or a host key, which reach it whatever the ssh command is.
+const UNASKED: [(&str, &str); 2] = [("GIT_ASKPASS", ""), ("SSH_ASKPASS_REQUIRE", "never")];
+
+/// Put in front of the arguments on a pass nobody is watching: git's own word
+/// for "do not ask", which a credential helper that would otherwise open a
+/// window or a browser is expected to honour as well.
+const UNASKED_CONFIG: [&str; 2] = ["-c", "credential.interactive=false"];
 
 /// What ssh has to be told so that it fails instead of waiting on a prompt
 /// nobody will answer.
@@ -70,15 +97,34 @@ const BATCH: &str = "-o BatchMode=yes -o ConnectTimeout=10";
 /// hand-typed one works, or worse, succeeding as the wrong account. The batch
 /// options are now added to whatever the user configured.
 ///
-/// `own_config` says whether the repository's own config is believed. For a
-/// repository the user pointed at, it is, as it would be for a command they
-/// typed. On a pass across the fleet it is not: an ssh command is a command,
-/// and a repository does not get to name one for a run nobody is watching.
-fn ssh_command(dir: &Path, args: &[&str], own_config: bool) -> Option<String> {
-    // Set by the user for this session: theirs, untouched.
-    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+/// `attended` says whether somebody asked for this command, and with that
+/// whether the repository's own config is believed. For a repository the user
+/// pointed at, it is, as it would be for a command they typed. On a pass
+/// across the fleet it is not: an ssh command is a command, and a repository
+/// does not get to name one for a run nobody is watching.
+fn ssh_command(dir: &Path, args: &[&str], attended: bool) -> Option<String> {
+    let is_ssh = |command: &str| {
+        // A wrapper script may not take ssh's options; only ssh itself gets
+        // them.
+        let program = command.split_whitespace().next().unwrap_or_default();
+        Path::new(program).file_name().is_some_and(|name| name == "ssh")
+    };
+    // Set by the user for this session: theirs. Acting for them it is left
+    // exactly as it is, prompts included. On a pass nobody is watching it is
+    // still what runs, but the variable used to mean the batch options were
+    // left off altogether, and an exported `ssh -i …` then sat on a passphrase
+    // prompt in whatever terminal the application was started from.
+    if let Some(exported) = std::env::var_os("GIT_SSH_COMMAND") {
+        return match exported.to_str() {
+            Some(exported) if !attended && is_ssh(exported) => Some(format!("{exported} {BATCH}")),
+            _ => None,
+        };
+    }
+    // A program, not a command line: there is nowhere to put an option.
+    if std::env::var_os("GIT_SSH").is_some() {
         return None;
     }
+    let own_config = attended;
     let plain = || Some(format!("ssh {BATCH}"));
     if !talks_to_a_remote(args) {
         return plain();
@@ -98,9 +144,7 @@ fn ssh_command(dir: &Path, args: &[&str], own_config: bool) -> Option<String> {
     if !own_config && matches!(scope, "local" | "worktree") {
         return plain();
     }
-    // A wrapper script may not take ssh's options; only ssh itself gets them.
-    let program = configured.split_whitespace().next().unwrap_or_default();
-    if Path::new(program).file_name().is_some_and(|name| name == "ssh") {
+    if is_ssh(configured) {
         Some(format!("{configured} {BATCH}"))
     } else if own_config || !matches!(scope, "local" | "worktree") {
         None
@@ -122,10 +166,13 @@ fn talks_to_a_remote(args: &[&str]) -> bool {
     false
 }
 
-fn exec(dir: &Path, args: &[&str], timeout: Duration, own_config: bool) -> Result<String, String> {
+fn exec(dir: &Path, args: &[&str], timeout: Duration, attended: bool) -> Result<String, String> {
     let mut command = Command::new("git");
+    command.current_dir(dir);
+    if !attended {
+        command.args(UNASKED_CONFIG).envs(UNASKED);
+    }
     command
-        .current_dir(dir)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -136,7 +183,7 @@ fn exec(dir: &Path, args: &[&str], timeout: Duration, own_config: bool) -> Resul
         // nobody can answer, and the worker thread is gone for good.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0");
-    if let Some(ssh) = ssh_command(dir, args, own_config) {
+    if let Some(ssh) = ssh_command(dir, args, attended) {
         command.env("GIT_SSH_COMMAND", ssh);
     }
 
@@ -487,6 +534,82 @@ mod tests {
             }
         }
         assert!(read(&my_log).contains("-i id_work"), "{}", read(&my_log));
+    }
+
+    // ---- whose prompt -----------------------------------------------------
+
+    /// A repository whose fetch needs a password only a prompt can supply. The
+    /// proxy names a user and no password, and git asks for that before it
+    /// connects to anything; the askpass program writes down that it was
+    /// called and fails, so git stops there and nothing leaves the machine.
+    fn needs_a_password(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = repo(name);
+        git(&dir, &["remote", "add", "origin", "http://git.example.invalid/me/repo.git"]);
+        git(&dir, &["config", "http.proxy", "http://someone@proxy.example.invalid:8080"]);
+        let (askpass, log) = recording(&dir, "askpass");
+        (dir, askpass, log)
+    }
+
+    /// `GIT_TERMINAL_PROMPT=0` stops git asking on the terminal. It asks an
+    /// askpass program first, and that is a window on somebody's screen.
+    #[test]
+    fn a_pass_nobody_is_watching_opens_no_password_dialog() {
+        let _guard = isolate();
+        let (dir, askpass, log) = needs_a_password("gitcmd-askpass-fenced");
+
+        // Named by the repository itself, which needs no environment at all.
+        git(&dir, &["config", "core.askPass", askpass.to_str().unwrap()]);
+        let got = run_fenced(&dir, &["fetch", "--quiet"], PATIENT);
+        assert!(got.is_err(), "{got:?}");
+        assert!(!log.exists(), "the repository's askpass ran unattended: {}", read(&log));
+        git(&dir, &["config", "--unset", "core.askPass"]);
+
+        // Exported by the desktop session, or by the editor's terminal.
+        for name in ["SSH_ASKPASS", "GIT_ASKPASS"] {
+            // SAFETY: under the isolation lock, and taken out again below.
+            unsafe { std::env::set_var(name, &askpass) };
+            let got = run_fenced(&dir, &["fetch", "--quiet"], PATIENT);
+            unsafe { std::env::remove_var(name) };
+            assert!(got.is_err(), "{name}: {got:?}");
+            assert!(!log.exists(), "{name} was run unattended: {}", read(&log));
+        }
+    }
+
+    /// The other half: a fetch the user asked for may still ask them.
+    #[test]
+    fn asked_for_one_repository_the_users_askpass_is_still_theirs() {
+        let _guard = isolate();
+        let (dir, askpass, log) = needs_a_password("gitcmd-askpass-attended");
+        // SAFETY: under the isolation lock, and taken out again below.
+        unsafe { std::env::set_var("GIT_ASKPASS", &askpass) };
+        let got = run(&dir, &["fetch", "--quiet"], PATIENT);
+        unsafe { std::env::remove_var("GIT_ASKPASS") };
+        assert!(got.is_err(), "{got:?}");
+        assert!(read(&log).contains("Password for"), "{}", read(&log));
+    }
+
+    /// An ssh command exported for the session is the user's, and used. On a
+    /// pass nobody is watching it is still told not to wait on a prompt.
+    #[test]
+    fn an_exported_ssh_command_is_kept_and_batched_only_when_unattended() {
+        let _guard = isolate();
+        let dir = ssh_repo("gitcmd-ssh-exported");
+        let (ssh, log) = recording(&dir, "ssh");
+        let exported = format!("{} -i id_session", ssh.display());
+
+        // SAFETY: under the isolation lock, and taken out again below.
+        unsafe { std::env::set_var("GIT_SSH_COMMAND", &exported) };
+        let _ = run(&dir, &["fetch", "--quiet"], PATIENT);
+        let attended = read(&log);
+        std::fs::remove_file(&log).unwrap();
+        let _ = run_fenced(&dir, &["fetch", "--quiet"], PATIENT);
+        unsafe { std::env::remove_var("GIT_SSH_COMMAND") };
+        let unattended = read(&log);
+
+        assert!(attended.contains("-i id_session"), "{attended}");
+        assert!(!attended.contains("BatchMode"), "theirs, untouched: {attended}");
+        assert!(unattended.contains("-i id_session"), "the exported key was dropped: {unattended}");
+        assert!(unattended.contains("BatchMode=yes"), "it could wait on a prompt: {unattended}");
     }
 
     #[test]
