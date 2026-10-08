@@ -13,9 +13,16 @@
 //! write it performs is a fast-forward of the checked-out branch, and `git
 //! merge --ff-only` refuses anything else even if the checks here were wrong.
 //!
-//! Two things git does by default had to be switched off for that paragraph to
-//! be true, and both were found the hard way:
+//! Three things about git had to be dealt with for that paragraph to be true,
+//! and all three were found the hard way:
 //!
+//! - `--ff-only` refuses what the command line asks for. What `git merge`
+//!   then does is also decided by configuration: with a merge strategy of the
+//!   user's, or a branch's own merge options, the same command wrote a merge
+//!   commit, or staged a squash, and exited 0. Those settings are overridden
+//!   for the one command, and afterwards the branch is looked at instead of
+//!   the exit code being believed; see [`FAST_FORWARD`], [`fast_forward`] and
+//!   [`landed`].
 //! - `git merge` overwrites *ignored* files that are in the way of what it is
 //!   checking out, without a word — an ignored `.env` is replaced the day
 //!   somebody upstream starts tracking one. It is run with
@@ -100,9 +107,11 @@ pub enum Outcome {
     /// Fetched and fast-forwarded by this many commits.
     FastForwarded(usize),
     Skipped(Skip),
-    /// Fetched, but git would not fast-forward, and this is what it said.
-    /// Nothing was changed. Kept apart from `Failed`: the remote was reached,
-    /// and "fetch failed" would send the user looking in the wrong place.
+    /// Fetched, but not fast-forwarded, and this is why: what git said when
+    /// it refused, or what was found that made asking it pointless. Kept apart
+    /// from `Failed`: the remote was reached, and "fetch failed" would send
+    /// the user looking in the wrong place. Nothing was changed unless the
+    /// text says otherwise.
     Refused(String),
     /// The fetch itself failed.
     Failed(String),
@@ -219,15 +228,6 @@ const FETCH: [&str; 4] = [
     "--no-recurse-submodules",
 ];
 
-/// The fast-forward, and nothing but.
-///
-/// `--no-overwrite-ignore`: without it git replaces an ignored file that is in
-/// the way of an incoming one, silently, and there is no reflog or stash to
-/// get it back from. With it git refuses and names the file.
-///
-/// `merge.autoStash=false`: a user who has turned autostash on would otherwise
-/// have this stash and re-apply their work around the update, and this module
-/// promises never to stash.
 /// How long a fast-forward may take. Not `Options::timeout`: that one is tuned
 /// to give up on a dead network within a minute, and this is a local write to
 /// the working tree, which is worse stopped half-way than waited for. A
@@ -237,15 +237,96 @@ const FETCH: [&str; 4] = [
 /// expectation.
 const FAST_FORWARD_PATIENCE: Duration = Duration::from_secs(30 * 60);
 
-const FAST_FORWARD: [&str; 7] = [
+/// The fast-forward, and nothing but. [`fast_forward`] puts the branch's own
+/// switch in front of this and what to merge behind it.
+///
+/// `--ff-only` was described here as the backstop that "refuses anything else
+/// even if the checks were wrong". It refuses a merge that the *command line*
+/// asks for. What `git merge` does is also decided by configuration, read
+/// before the command line and able to outvote it, and each of the following
+/// made it do something else and exit 0.
+///
+/// `pull.twohead=recursive`: the key names the strategy for merging one head,
+/// and a strategy that cannot fast-forward (`ours`, `subtree`) switches
+/// `--ff-only` off without a word. git wrote a merge commit that threw
+/// upstream's changes away, and the pass reported "updated". It is pinned to
+/// a strategy that can, by the one name every git version knows: an empty
+/// value is an error, and the default's own name is newer than the oldest git
+/// this runs on.
+///
+/// `--no-squash`, `--no-autostash`: a branch's own merge options, which
+/// [`fast_forward`] sets aside, said once more on the command line for the
+/// branch where that cannot be done. git reads the command line second.
+///
+/// `--no-overwrite-ignore`: without it git replaces an ignored file that is in
+/// the way of an incoming one, silently, and there is no reflog or stash to
+/// get it back from. With it git refuses and names the file.
+///
+/// `merge.autoStash=false`: a user who has turned autostash on would otherwise
+/// have this stash and re-apply their work around the update, and this module
+/// promises never to stash.
+const FAST_FORWARD: [&str; 10] = [
     "-c",
     "merge.autoStash=false",
+    "-c",
+    "pull.twohead=recursive",
     "merge",
     "--ff-only",
+    "--no-squash",
+    "--no-autostash",
     "--no-overwrite-ignore",
     "--quiet",
-    "@{u}",
 ];
+
+/// The whole fast-forward command for the branch called `branch`, or why it
+/// will not be run.
+///
+/// `branch.<name>.mergeoptions` is read by `git merge` ahead of its command
+/// line and can hold anything the command line can. `-s ours` there turns
+/// `--ff-only` into a merge commit that discards what upstream did;
+/// `--squash` stages upstream's whole diff and leaves the branch where it
+/// was; `--autostash` stashes the user's work, updates, and re-applies it
+/// with conflict markers where the two overlap. All three exit 0. A strategy
+/// cannot be taken back by a later argument, so the key itself is set to
+/// nothing for this one command.
+///
+/// One thing those options can hold is a refusal and not a behaviour, and
+/// setting the key aside must not lose it: a branch that insists on signed
+/// commits still does.
+///
+/// `-c key=value` ends the key at the first `=`, so the key cannot be spelled
+/// for a branch with one in its name. Such a branch is updated only if it has
+/// no merge options to set aside.
+fn fast_forward(repo: &Repository, branch: &str) -> Result<Vec<String>, String> {
+    let key = format!("branch.{branch}.mergeoptions");
+    let own = match repo.config().and_then(|config| config.get_string(&key)) {
+        Ok(options) => options,
+        Err(err) if err.code() == git2::ErrorCode::NotFound => String::new(),
+        // Unreadable is not the same as absent.
+        Err(err) => return Err(format!("could not read {key}: {}", err.message())),
+    };
+
+    let mut args = Vec::new();
+    if !branch.contains('=') {
+        args.extend(["-c".to_string(), format!("{key}=")]);
+    } else if !own.trim().is_empty() {
+        return Err(format!(
+            "This branch has merge options of its own ({key} = {}), and with `=` in the \
+             branch's name they cannot be set aside for one command. Update it by hand.",
+            own.trim()
+        ));
+    }
+    args.extend(FAST_FORWARD.iter().map(|arg| arg.to_string()));
+    let signed = own
+        .split_whitespace()
+        .filter(|option| matches!(*option, "--verify-signatures" | "--no-verify-signatures"))
+        .next_back();
+    if signed == Some("--verify-signatures") {
+        args.push("--verify-signatures".to_string());
+    }
+    args.push("@{u}".to_string());
+    Ok(args)
+}
 
 pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
@@ -331,15 +412,16 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     if crate::git::belongs_here(&repo, path).is_err() {
         return report(Outcome::Skipped(Skip::Elsewhere));
     }
-    let (ahead, behind) = match divergence(&repo) {
-        Ok(counts) => counts,
+    let at = match tracking(&repo) {
+        Ok(at) => at,
         Err(skip) => return report(Outcome::Skipped(skip)),
     };
+    let behind = at.behind;
 
     if behind == 0 {
         return report(Outcome::UpToDate);
     }
-    if ahead > 0 {
+    if at.ahead > 0 {
         return report(Outcome::Skipped(Skip::Diverged));
     }
     if !options.fast_forward {
@@ -365,8 +447,17 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Behind(behind));
     }
 
-    match options.pass.git(path, &FAST_FORWARD, FAST_FORWARD_PATIENCE) {
-        Ok(_) => report(Outcome::FastForwarded(behind)),
+    let command = match fast_forward(&repo, &at.branch) {
+        Ok(command) => command,
+        Err(why) => return report(Outcome::Refused(why)),
+    };
+    let command: Vec<&str> = command.iter().map(String::as_str).collect();
+    match options.pass.git(path, &command, FAST_FORWARD_PATIENCE) {
+        // Exit 0 is git's opinion. Where the branch is now is the fact.
+        Ok(_) => match landed(path, at.upstream) {
+            Ok(()) => report(Outcome::FastForwarded(behind)),
+            Err(why) => report(Outcome::Refused(why)),
+        },
         Err(err) => report(Outcome::Refused(err)),
     }
 }
@@ -393,7 +484,17 @@ fn disqualify(repo: &Repository) -> Option<Skip> {
     None
 }
 
-pub(crate) fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
+/// The checked-out branch and what it tracks, as they stand right now.
+struct Tracking {
+    /// The branch's short name: `main`.
+    branch: String,
+    local: git2::Oid,
+    upstream: git2::Oid,
+    ahead: usize,
+    behind: usize,
+}
+
+fn tracking(repo: &Repository) -> Result<Tracking, Skip> {
     let head = repo.head().map_err(|_| Skip::Unborn)?;
     let branch_name = head.shorthand().map_err(|_| Skip::Detached)?.to_string();
     let branch = repo
@@ -402,7 +503,45 @@ pub(crate) fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
     let upstream = branch.upstream().map_err(|_| Skip::NoUpstream)?;
     let local = branch.get().target().ok_or(Skip::NoUpstream)?;
     let remote = upstream.get().target().ok_or(Skip::NoUpstream)?;
-    repo.graph_ahead_behind(local, remote).map_err(|_| Skip::NoUpstream)
+    let (ahead, behind) = repo
+        .graph_ahead_behind(local, remote)
+        .map_err(|_| Skip::NoUpstream)?;
+    Ok(Tracking { branch: branch_name, local, upstream: remote, ahead, behind })
+}
+
+pub(crate) fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
+    tracking(repo).map(|at| (at.ahead, at.behind))
+}
+
+/// Whether the branch is where a fast-forward to `meant` puts it.
+///
+/// git exiting 0 used to be the whole of the evidence, and the count reported
+/// was one worked out before the command ran. With a merge strategy of the
+/// user's in force the same exit code came back from a merge commit, and from
+/// a squash that staged upstream's diff and left the branch where it was; the
+/// card then offered "Push 1" for a commit nobody had written. Those two are
+/// closed off in [`fast_forward`]. This is for the one nobody has thought of.
+///
+/// A branch level with its upstream as it stands now also counts: a fetch from
+/// a terminal may have moved the upstream on between the measuring and the
+/// merge, and git then fast-forwarded to the newer commit.
+fn landed(path: &Path, meant: git2::Oid) -> Result<(), String> {
+    let short = |oid: git2::Oid| oid.to_string()[..7].to_string();
+    let now = Repository::open(path).ok().and_then(|repo| tracking(&repo).ok());
+    match now {
+        Some(at) if at.local == meant || at.local == at.upstream => Ok(()),
+        Some(at) => Err(format!(
+            "git reported the update as done, but the branch is at {} and its upstream at {}. \
+             Something in this repository's merge settings made `git merge --ff-only` do \
+             something other than fast-forward: look at `git status` and `git log -3` before \
+             anything else.",
+            short(at.local),
+            short(at.upstream)
+        )),
+        None => Err("git reported the update as done, but the branch cannot be read back \
+                     to check: look at `git status` before anything else."
+            .to_string()),
+    }
 }
 
 /// Staged, modified or conflicted. Untracked files are left out: git refuses
@@ -888,6 +1027,130 @@ mod tests {
             assert!(matches!(got, Outcome::Failed(_)), "{pass:?}: {got:?}");
             assert_eq!(marker.exists(), runs, "{pass:?}");
         }
+    }
+
+    // ---- a fast-forward is one, whatever the merge settings say -----------
+
+    /// Each of these makes `git merge --ff-only` do something that is not a
+    /// fast-forward and exit 0: a merge commit that throws upstream's changes
+    /// away, or upstream's whole diff staged with the branch left where it
+    /// was. Each was reported as "updated".
+    #[test]
+    fn merge_settings_cannot_turn_the_fast_forward_into_something_else() {
+        let _guard = isolate();
+        let mut wrong = Vec::new();
+        for (name, key, value) in [
+            ("ours", "branch.main.mergeoptions", "-s ours"),
+            ("subtree", "branch.main.mergeoptions", "-s subtree"),
+            ("squash", "branch.main.mergeoptions", "--squash"),
+            ("twohead", "pull.twohead", "ours"),
+        ] {
+            for pass in [Pass::Fleet, Pass::One] {
+                let f = fleet(&format!("rf-merge-config-{name}-{pass:?}"));
+                git(&f.work, &["config", key, value]);
+                f.remote_commits("an edit and a new file", |seed| {
+                    write(&seed.join("README.md"), "two\n");
+                    write(&seed.join("added.txt"), "new\n");
+                });
+
+                let got = refresh_one(&f.work, &options(true, pass)).outcome;
+
+                let fast_forwarded = matches!(got, Outcome::FastForwarded(1))
+                    && f.head() == f.remote_ref("refs/heads/main")
+                    && git(&f.work, &["status", "--porcelain"]).is_empty()
+                    && read(&f.work.join("README.md")) == "two\n";
+                if !fast_forwarded {
+                    wrong.push(format!(
+                        "{name}, {pass:?}: {got:?}, then `{}` and status `{}`",
+                        git(&f.work, &["log", "--format=%s", "-1"]),
+                        git(&f.work, &["status", "--porcelain"])
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "not a fast-forward:\n{}", wrong.join("\n"));
+    }
+
+    /// The module promises never to stash. `merge.autoStash` was switched off
+    /// for that; the same request in a branch's own merge options was not.
+    #[test]
+    fn a_branch_that_asks_for_autostash_is_not_stashed_around() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-autostash");
+        git(&f.work, &["config", "branch.main.mergeoptions", "--autostash"]);
+        let before = f.head();
+        write(&f.work.join("README.md"), "my edit\n");
+        f.remote_commits("their edit to the same file", |seed| {
+            write(&seed.join("README.md"), "their edit\n");
+        });
+
+        let got = asked_for(&f);
+
+        assert_eq!(read(&f.work.join("README.md")), "my edit\n", "{got:?}");
+        assert_eq!(git(&f.work, &["stash", "list"]), "", "{got:?}");
+        assert_eq!(f.head(), before, "{got:?}");
+        assert!(matches!(got, Outcome::Refused(_)), "{got:?}");
+    }
+
+    /// Setting a branch's merge options aside must not set aside a refusal
+    /// the user asked for.
+    #[test]
+    fn a_branch_that_insists_on_signed_commits_still_does() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-signed");
+        git(&f.work, &["config", "branch.main.mergeoptions", "--verify-signatures"]);
+        let before = f.head();
+        f.remote_moves(1);
+
+        let got = fleet_pass(&f);
+
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("signature"), "{why}");
+        assert_eq!(f.head(), before);
+    }
+
+    /// `-c branch.<name>.mergeoptions=` is how the options are set aside, and
+    /// it cannot be spelled for a branch with `=` in its name: git reads the
+    /// key as ending at the first one.
+    #[test]
+    fn merge_options_that_cannot_be_set_aside_stop_the_update() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-equals");
+        git(&f.work, &["branch", "-m", "main", "rel=1"]);
+        git(&f.work, &["config", "branch.rel=1.mergeoptions", "-s ours"]);
+        let before = f.head();
+        f.remote_moves(1);
+
+        for pass in [Pass::Fleet, Pass::One] {
+            let got = refresh_one(&f.work, &options(true, pass)).outcome;
+            let Outcome::Refused(why) = &got else { panic!("{pass:?}: {got:?}") };
+            assert!(why.contains("mergeoptions"), "{pass:?}: {why}");
+            assert_eq!(f.head(), before, "{pass:?}");
+        }
+
+        // Without options of its own, a branch named like that is updated
+        // like any other.
+        git(&f.work, &["config", "--unset", "branch.rel=1.mergeoptions"]);
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// The last line of defence, for whatever the switches above do not
+    /// cover: exit 0 is not what "fast-forwarded" means.
+    #[test]
+    fn success_is_believed_only_when_the_branch_is_at_its_upstream() {
+        let _guard = isolate();
+        let f = fleet("rf-landed");
+        f.remote_moves(2);
+        git(&f.work, &["fetch", "-q"]);
+        let upstream = git2::Oid::from_str(&f.remote_ref("refs/heads/main")).unwrap();
+
+        let said = landed(&f.work, upstream).unwrap_err();
+        assert!(said.contains(&f.head()[..7]), "it should say where the branch is: {said}");
+
+        git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
+        assert_eq!(landed(&f.work, upstream), Ok(()));
     }
 
     // ---- what a fetch leaves alone ----------------------------------------
