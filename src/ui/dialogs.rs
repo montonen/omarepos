@@ -7,7 +7,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 
-use crate::config::{Config, RootSpec, tildify};
+use crate::config::{Config, Refresh, RootSpec, tildify};
 use crate::meta::{self, Meta};
 
 /// The settings dialog: where repositories are looked for, which tools to
@@ -305,6 +305,16 @@ pub fn settings_with_tags(
     }
 
     // --- background refresh ------------------------------------------------
+    // A file can say `fast_forward = true` and leave `fetch` false, or out.
+    // The timer reads that as both and goes ahead; the two switches below,
+    // built from the fields as written, read "Fetch from the remote" off over
+    // a fast-forward switch that was on and greyed out. The one control that
+    // stops the app moving working trees could not be reached, under a switch
+    // saying nothing was fetched. So the pair is made to say what the timer
+    // does before it is shown. Nothing is written for that; the next change
+    // made here writes it.
+    fetch_implied(&mut cfg.borrow_mut().refresh);
+
     let every = adw::SpinRow::with_range(0.0, 1440.0, 5.0);
     every.set_title("Refresh every");
     every.set_subtitle("Minutes. Zero turns it off.");
@@ -377,16 +387,51 @@ pub fn settings_with_tags(
             on_change();
         });
     }
-    {
+    // The scope was the one refresh setting that did nothing until Enter or
+    // the tick was pressed, and it is the last row of the four: the switches
+    // above it are live by the time it is typed into. Typed and left, the
+    // text stayed in the row and the saved scope stayed empty, which means
+    // every repository. So it is also taken when the keyboard leaves the row,
+    // and when the dialog closes.
+    let commit_scope: Rc<dyn Fn(&adw::EntryRow)> = {
         let cfg = Rc::clone(&cfg);
         let on_change = Rc::clone(&on_refresh);
+        Rc::new(move |entry: &adw::EntryRow| {
+            let changed = set_scope(&mut cfg.borrow_mut().refresh, &entry.text());
+            if changed {
+                persist(&cfg);
+                on_change();
+            }
+        })
+    };
+    {
+        let cfg = Rc::clone(&cfg);
+        let commit = Rc::clone(&commit_scope);
         scope.connect_apply(move |entry| {
-            let tags = crate::meta::parse_list(&entry.text());
-            entry.set_text(&tags.join(", "));
-            cfg.borrow_mut().refresh.only_tags = tags;
-            persist(&cfg);
-            on_change();
+            commit(entry);
+            // Show the list as it was understood.
+            let understood = cfg.borrow().refresh.only_tags.join(", ");
+            if entry.text() != understood {
+                entry.set_text(&understood);
+            }
         });
+    }
+    {
+        let commit = Rc::clone(&commit_scope);
+        let focus = gtk::EventControllerFocus::new();
+        // The row is found through the controller: a closure the row owns
+        // must not own the row.
+        focus.connect_leave(move |controller| {
+            if let Some(entry) = controller.widget().and_downcast::<adw::EntryRow>() {
+                commit(&entry);
+            }
+        });
+        scope.add_controller(focus);
+    }
+    {
+        let commit = Rc::clone(&commit_scope);
+        let scope = scope.clone();
+        dialog.connect_closed(move |_| commit(&scope));
     }
 
     let follow = adw::SwitchRow::builder()
@@ -462,6 +507,31 @@ pub fn settings_with_tags(
 enum Field {
     Terminal,
     Editor,
+}
+
+/// Fast-forwarding implies a fetch: it could only ever act on a stale remote
+/// ref otherwise, and `Refresh::will_fetch` is where the timer takes that
+/// from. Make the stored pair say the same.
+fn fetch_implied(refresh: &mut Refresh) {
+    refresh.fetch = refresh.will_fetch();
+}
+
+/// Take what the "Only repos tagged" row holds as the refresh scope. Returns
+/// whether that changed the scope.
+///
+/// A row still holding what it was filled in with is left alone, so that a
+/// list written into the file by hand is not rewritten by opening Settings
+/// and closing it again.
+fn set_scope(refresh: &mut Refresh, typed: &str) -> bool {
+    if typed == refresh.only_tags.join(", ") {
+        return false;
+    }
+    let tags = meta::parse_list(typed);
+    if refresh.only_tags == tags {
+        return false;
+    }
+    refresh.only_tags = tags;
+    true
 }
 
 fn add_button(label: &str) -> gtk::Button {
@@ -901,5 +971,51 @@ mod tests {
         assert!(set_nested(&mut cfg, path, false));
         assert!(matches!(cfg.roots[0], RootSpec::Simple(_)), "{:?}", cfg.roots[0]);
         assert!(!set_nested(&mut cfg, path, true));
+    }
+
+    /// `fast_forward = true` with `fetch` left out is one line in a file the
+    /// README invites editing. The timer fetched and fast-forwarded on it;
+    /// the dialog showed fetching off.
+    #[test]
+    fn fast_forward_without_fetch_is_shown_as_what_the_timer_does_with_it() {
+        let mut by_hand = Refresh { every_minutes: 15, fast_forward: true, ..Refresh::default() };
+        assert!(!by_hand.fetch && by_hand.will_fetch());
+        fetch_implied(&mut by_hand);
+        assert!(by_hand.fetch && by_hand.fast_forward);
+
+        // Nothing else is read into a pair that already agrees with itself.
+        let mut off = Refresh::default();
+        fetch_implied(&mut off);
+        assert!(!off.fetch && !off.fast_forward);
+        let mut fetch_only = Refresh { fetch: true, ..Refresh::default() };
+        fetch_implied(&mut fetch_only);
+        assert!(fetch_only.fetch && !fetch_only.fast_forward);
+    }
+
+    /// What leaving the row, or closing the dialog, does with the text in
+    /// "Only repos tagged".
+    #[test]
+    fn the_refresh_scope_is_taken_from_the_row_once_it_has_been_typed_in() {
+        let by_hand = ["work", "Side Projects"].map(str::to_string).to_vec();
+        let mut refresh = Refresh { only_tags: by_hand.clone(), ..Refresh::default() };
+
+        // Opened and closed: the row holds what it was filled in with, and a
+        // list the editor would have split is left as it was written.
+        let filled_in = refresh.only_tags.join(", ");
+        assert!(!set_scope(&mut refresh, &filled_in));
+        assert_eq!(refresh.only_tags, by_hand);
+
+        // Typed and left, without Enter. This used to save nothing, and an
+        // empty scope is every repository.
+        let mut refresh = Refresh::default();
+        assert!(set_scope(&mut refresh, "personal, Tools"));
+        assert_eq!(refresh.only_tags, ["personal", "Tools"]);
+        // Enter and then closing the dialog is one write, not two.
+        assert!(!set_scope(&mut refresh, "personal, Tools"));
+        assert!(!set_scope(&mut refresh, " Tools personal,"), "the same list, typed otherwise");
+
+        // Blank still means every repository, when blank is what was typed.
+        assert!(set_scope(&mut refresh, ""));
+        assert!(refresh.only_tags.is_empty());
     }
 }
