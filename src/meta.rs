@@ -19,6 +19,15 @@ pub struct RepoMeta {
     /// holds something.
     #[serde(rename = "seeded", skip_serializing_if = "Vec::is_empty")]
     pub seeded_legacy: Vec<String>,
+    /// Roots, by the same key as `seeded_by`, whose tag was already on the
+    /// repository when they first asked for it: typed by hand, or put there by
+    /// another root. Such a root has a record like any other, so that deleting
+    /// the tag still sticks, but the tag is not its own to take away again.
+    /// Without this a root given the name of a hand-made tag removed that tag
+    /// when it was cleared or renamed. Ahead of `seeded_by` because the file
+    /// wants plain values before tables.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub adopted: BTreeSet<String>,
     /// The tag each root applied, keyed by the root's absolute path. Keyed
     /// rather than listed so renaming a root's tag can retire the old one, and
     /// kept after the user deletes a tag so it is not applied again.
@@ -27,6 +36,7 @@ pub struct RepoMeta {
 }
 
 impl RepoMeta {
+    /// `adopted` only ever names roots that are in `seeded_by`.
     fn is_empty(&self) -> bool {
         self.tags.is_empty() && self.seeded_legacy.is_empty() && self.seeded_by.is_empty()
     }
@@ -140,6 +150,12 @@ impl Meta {
     /// `acme` is what lets a rename to `client-x` remove `acme` instead of leaving
     /// both behind. A tag the user deleted stays deleted, because the record
     /// survives the deletion.
+    ///
+    /// A root only ever takes away a tag it put there. One that was on the
+    /// repository already — typed by hand — is recorded as adopted and left
+    /// where it is, and one that another root still records stays for that
+    /// root. Retiring went by name alone before, so clearing a root's tag also
+    /// removed the same tag wherever the user had applied it themselves.
     pub fn apply_root_tag(&mut self, repo: &Path, root: &str, tag: Option<&str>) -> bool {
         let tag = tag.map(str::trim).filter(|t| !t.is_empty());
         let key = Self::key(repo);
@@ -179,20 +195,55 @@ impl Meta {
 
         let entry = self.repos.entry(key.clone()).or_default();
         if let Some(before) = &previous {
-            entry.tags.retain(|t| !t.eq_ignore_ascii_case(before));
-            if had_old {
-                // We just took that tag off ourselves, so any record saying it
-                // once went missing is ours too. Leaving it would make setting
-                // the same tag again silently do nothing. A record left behind
-                // when `had_old` is false is the real thing: the user removed
-                // the tag, and that still stands.
-                entry.seeded_legacy.retain(|t| !t.eq_ignore_ascii_case(before));
+            let adopted = entry.adopted.remove(root);
+            let also_recorded_by: Vec<String> = entry
+                .seeded_by
+                .iter()
+                .filter(|(other, theirs)| {
+                    other.as_str() != root && theirs.eq_ignore_ascii_case(before)
+                })
+                .map(|(other, _)| other.clone())
+                .collect();
+            if adopted {
+                // Never this root's: it was there before the root asked for it.
+            } else if !also_recorded_by.is_empty() {
+                // This root's, and now theirs. They hold it as their own from
+                // here on, so the last of them to let go still removes it.
+                for other in &also_recorded_by {
+                    entry.adopted.remove(other);
+                }
+            } else {
+                entry.tags.retain(|t| !t.eq_ignore_ascii_case(before));
+                if had_old {
+                    // We just took that tag off ourselves, so any record saying
+                    // it once went missing is ours too. Leaving it would make
+                    // setting the same tag again silently do nothing. A record
+                    // left behind when `had_old` is false is the real thing:
+                    // the user removed the tag, and that still stands.
+                    entry.seeded_legacy.retain(|t| !t.eq_ignore_ascii_case(before));
+                }
             }
         }
         match tag {
             Some(tag) => {
+                let present = entry.tags.iter().any(|t| t.eq_ignore_ascii_case(tag));
+                // Put there by a root: the flat record says one seeded it, or
+                // another root holds it as its own.
+                let from_a_root = entry
+                    .seeded_legacy
+                    .iter()
+                    .any(|seen| seen.eq_ignore_ascii_case(tag))
+                    || entry.seeded_by.iter().any(|(other, theirs)| {
+                        other.as_str() != root
+                            && theirs.eq_ignore_ascii_case(tag)
+                            && !entry.adopted.contains(other)
+                    });
                 entry.seeded_by.insert(root.to_string(), tag.to_string());
-                if should_add {
+                if present {
+                    if !from_a_root {
+                        entry.adopted.insert(root.to_string());
+                    }
+                } else if should_add {
                     let mut tags = entry.tags.clone();
                     tags.push(tag.to_string());
                     entry.tags = normalize(tags);
@@ -213,6 +264,12 @@ impl Meta {
     /// around it is more likely an unmounted disk than a deleted repository, and
     /// losing someone's tags to a disk that is merely offline is not worth the
     /// tidiness. Returns how many entries were dropped.
+    ///
+    /// The parent has to have something in it as well. A mount point from
+    /// fstab stays behind as an empty directory when its disk is away, so "the
+    /// parent exists" alone dropped every repository that sat directly under
+    /// one. The price is an entry that lingers when the last repository in a
+    /// folder is deleted and the folder is kept.
     pub fn prune(&mut self) -> usize {
         let before = self.repos.len();
         self.repos.retain(|key, _| {
@@ -221,7 +278,10 @@ impl Meta {
                 return true;
             }
             match path.parent() {
-                Some(parent) => !parent.exists(),
+                // A directory that cannot be listed proves nothing either way.
+                Some(parent) => std::fs::read_dir(parent)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(true),
                 None => true,
             }
         });
@@ -294,5 +354,175 @@ mod tests {
         assert_eq!(read(&path()), written);
 
         let _ = std::fs::remove_file(path());
+    }
+
+    const ROOT: &str = "/home/me/work/acme";
+
+    fn repo(name: &str) -> PathBuf {
+        Path::new(ROOT).join(name)
+    }
+
+    /// The table in the README, row by row, for a root that put its own tag
+    /// on what it found.
+    #[test]
+    fn a_root_tag_is_reconciled_the_way_the_readme_says() {
+        let (api, web) = (repo("api"), repo("web"));
+        let mut meta = Meta::default();
+
+        // Clone a new repo into the workspace: tagged on the next scan, and
+        // the scan after that has nothing to do.
+        assert!(meta.apply_root_tag(&api, ROOT, Some("acme")));
+        assert!(meta.apply_root_tag(&web, ROOT, Some("acme")));
+        assert_eq!(meta.tags_for(&api), ["acme"]);
+        assert!(!meta.apply_root_tag(&api, ROOT, Some("acme")));
+
+        // Delete the tag from one repo: it stays deleted.
+        meta.set_tags(&web, Vec::new());
+        assert!(!meta.apply_root_tag(&web, ROOT, Some("acme")));
+        assert!(meta.tags_for(&web).is_empty());
+
+        // Rename the root's tag: renamed in place, and not resurrected where
+        // it had been deleted.
+        meta.apply_root_tag(&api, ROOT, Some("client-x"));
+        meta.apply_root_tag(&web, ROOT, Some("client-x"));
+        assert_eq!(meta.tags_for(&api), ["client-x"]);
+        assert!(meta.tags_for(&web).is_empty());
+
+        // Clear the root's tag: retired from every repo under it, and nothing
+        // is kept about a repository there is nothing left to say about.
+        meta.apply_root_tag(&api, ROOT, None);
+        meta.apply_root_tag(&web, ROOT, None);
+        assert!(meta.tags_for(&api).is_empty());
+        assert!(meta.repos.is_empty(), "{:?}", meta.repos);
+    }
+
+    /// A tag applied under the flat scheme, before the root was recorded, is
+    /// still the root's: the record of it having been seeded says so.
+    #[test]
+    fn a_tag_seeded_before_roots_were_recorded_is_still_the_roots_to_retire() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.repos.insert(
+            Meta::key(&api),
+            RepoMeta {
+                tags: vec!["acme".to_string()],
+                seeded_legacy: vec!["acme".to_string()],
+                ..RepoMeta::default()
+            },
+        );
+
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        assert_eq!(meta.tags_for(&api), ["acme"]);
+        meta.apply_root_tag(&api, ROOT, None);
+        assert!(meta.tags_for(&api).is_empty());
+    }
+
+    /// The last row of the README's table: "Tag a repo yourself: never touched
+    /// by any of the above". A root given the same tag afterwards used to
+    /// record the tag as its own, and take it away again when it was cleared.
+    #[test]
+    fn a_hand_made_tag_survives_the_root_clearing_the_same_tag() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["acme".to_string(), "mine".to_string()]);
+
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        assert_eq!(meta.tags_for(&api), ["acme", "mine"]);
+        meta.apply_root_tag(&api, ROOT, None);
+        assert_eq!(meta.tags_for(&api), ["acme", "mine"]);
+    }
+
+    /// Whose tag it is has to outlive the session that noticed.
+    #[test]
+    fn a_hand_made_tag_is_still_the_users_after_a_restart() {
+        let _guard = isolate();
+        let _ = std::fs::remove_file(path());
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["acme".to_string()]);
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        meta.save().unwrap();
+
+        let mut meta = Meta::load();
+        assert_eq!(meta.load_error, None, "{}", read(&path()));
+        meta.apply_root_tag(&api, ROOT, None);
+        assert_eq!(meta.tags_for(&api), ["acme"], "{}", read(&path()));
+
+        let _ = std::fs::remove_file(path());
+    }
+
+    /// The same, for a rename: it turned the hand-made tag into the new name.
+    #[test]
+    fn a_hand_made_tag_survives_the_root_renaming_the_same_tag() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["acme".to_string()]);
+
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        meta.apply_root_tag(&api, ROOT, Some("client-x"));
+        assert_eq!(meta.tags_for(&api), ["acme", "client-x"]);
+
+        // The new name is the root's own, and goes when the root says so.
+        meta.apply_root_tag(&api, ROOT, None);
+        assert_eq!(meta.tags_for(&api), ["acme"]);
+    }
+
+    /// A root that renames onto a tag typed by hand has not applied it either.
+    #[test]
+    fn a_root_renamed_onto_a_hand_made_tag_does_not_take_it_along_later() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        meta.set_tags(&api, vec!["acme".to_string(), "client-x".to_string()]);
+
+        meta.apply_root_tag(&api, ROOT, Some("client-x"));
+        assert_eq!(meta.tags_for(&api), ["client-x"]);
+        meta.apply_root_tag(&api, ROOT, None);
+        assert_eq!(meta.tags_for(&api), ["client-x"]);
+    }
+
+    /// Two roots can both have recorded a repository: one contains the other,
+    /// and which of them a scan reports it under has changed over time.
+    #[test]
+    fn two_roots_seeding_the_same_tag_do_not_take_it_from_each_other() {
+        let api = repo("api");
+        let wider = "/home/me/work";
+        let mut meta = Meta::default();
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        meta.apply_root_tag(&api, wider, Some("acme"));
+
+        meta.apply_root_tag(&api, ROOT, None);
+        assert_eq!(meta.tags_for(&api), ["acme"], "the wider root still wants it");
+
+        // ...and it is not left behind for good once the last of them lets go.
+        meta.apply_root_tag(&api, wider, None);
+        assert!(meta.tags_for(&api).is_empty());
+        assert!(meta.repos.is_empty(), "{:?}", meta.repos);
+    }
+
+    /// The unmounted disk the doc comment is about. A mount point from fstab
+    /// stays behind as an empty directory, so "the parent is still there" was
+    /// true of every repository directly under it, and their tags were dropped
+    /// at the end of the first scan without the disk.
+    #[test]
+    fn prune_keeps_tags_for_repositories_directly_under_an_empty_mount_point() {
+        let _guard = isolate();
+        let base = scratch("meta-prune");
+        let mount = base.join("mnt/disk");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::create_dir_all(base.join("code/still-here/.git")).unwrap();
+
+        let mut meta = Meta::default();
+        let tag = || vec!["work".to_string()];
+        meta.set_tags(&mount.join("app"), tag());
+        meta.set_tags(&base.join("code/still-here"), tag());
+        meta.set_tags(&base.join("code/deleted"), tag());
+        meta.set_tags(&base.join("unplugged/group/app"), tag());
+
+        assert_eq!(meta.prune(), 1);
+        assert_eq!(meta.tags_for(&mount.join("app")), ["work"], "an empty mount point");
+        assert_eq!(meta.tags_for(&base.join("code/still-here")), ["work"]);
+        assert!(meta.tags_for(&base.join("code/deleted")).is_empty(), "deleted beside others");
+        assert_eq!(meta.tags_for(&base.join("unplugged/group/app")), ["work"], "no parent");
     }
 }
