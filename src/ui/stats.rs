@@ -190,10 +190,12 @@ fn status_line(result: &Contributions) -> String {
     }
     parts.extend([
         format!("{} commits", thousands(result.total_commits)),
+        // Authors, not people: the count is of names commits are signed with,
+        // and a robot has one and a person may have two.
         format!(
             "{} {}",
             result.authors.len(),
-            plural(result.authors.len(), "person", "people")
+            plural(result.authors.len(), "author", "authors")
         ),
         format!("{}/{} repos active", result.repos_active, result.repos_scanned),
         format!(
@@ -281,7 +283,7 @@ fn overview(result: &Contributions) -> gtk::Widget {
     ));
     numbers.append(&big_number(
         &result.authors.len().to_string(),
-        plural(result.authors.len(), "person", "people"),
+        plural(result.authors.len(), "author", "authors"),
     ));
     numbers.append(&big_number(
         &result.repos_active.to_string(),
@@ -745,7 +747,7 @@ mod tests {
     fn the_status_line_leads_with_what_was_left_out() {
         assert_eq!(
             status_line(&nothing_found(3, &[])),
-            "0 commits  ·  0 people  ·  0/3 repos active  ·  +0 −0"
+            "0 commits  ·  0 authors  ·  0/3 repos active  ·  +0 −0"
         );
 
         let mut result = nothing_found(3, &["api: object not found"]);

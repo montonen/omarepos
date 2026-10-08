@@ -9,8 +9,10 @@
 //! counted each of them.
 //!
 //! Authors are keyed by e-mail, so the same person with two spellings of their
-//! name still lands in one row. Merge commits count as commits but are left out
-//! of the line totals — their diffs are their parents' work, counted already.
+//! name still lands in one row. The same person with two addresses is two rows
+//! unless a mailmap says otherwise, and the one git reads is read here. Merge
+//! commits count as commits but are left out of the line totals — their diffs
+//! are their parents' work, counted already.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -164,7 +166,9 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
 /// Everything counted so far in one run.
 struct Tally {
     days: usize,
-    authors: HashMap<String, Author>,
+    /// Each author, and beside them every spelling of their name that has
+    /// been met with the number of commits that carry it.
+    authors: HashMap<String, (Author, Vec<(String, usize)>)>,
     per_day_total: Vec<usize>,
     /// Every commit counted, in any repository. A linked worktree, a second
     /// clone and a fork beside its upstream are each a card of their own and
@@ -206,19 +210,26 @@ impl Tally {
             } else {
                 commit.email.clone()
             };
-            let entry = self.authors.entry(key).or_insert_with(|| Author {
-                name: commit.name.clone(),
-                email: commit.email.clone(),
-                commits: 0,
-                merges: 0,
-                insertions: 0,
-                deletions: 0,
-                files: 0,
-                uncounted: 0,
-                per_day: vec![0; self.days],
-                repos: BTreeMap::new(),
-                last_seen: 0,
+            let (entry, spellings) = self.authors.entry(key).or_insert_with(|| {
+                let author = Author {
+                    name: commit.name.clone(),
+                    email: commit.email.clone(),
+                    commits: 0,
+                    merges: 0,
+                    insertions: 0,
+                    deletions: 0,
+                    files: 0,
+                    uncounted: 0,
+                    per_day: vec![0; self.days],
+                    repos: BTreeMap::new(),
+                    last_seen: 0,
+                };
+                (author, Vec::new())
             });
+            match spellings.iter_mut().find(|(name, _)| *name == commit.name) {
+                Some((_, times)) => *times += 1,
+                None => spellings.push((commit.name.clone(), 1)),
+            }
             entry.commits += 1;
             if commit.merge {
                 entry.merges += 1;
@@ -260,7 +271,24 @@ impl Tally {
     }
 
     fn finish(self, window: Window, repos_scanned: usize, errors: Vec<String>) -> Contributions {
-        let mut authors: Vec<Author> = self.authors.into_values().collect();
+        // One address, several spellings of the name: the row is titled with
+        // the one most of the commits carry. It used to be whichever the walk
+        // met first, which changed with the order the repositories were read
+        // in and could be a login or a typo from one afternoon.
+        let mut authors: Vec<Author> = self
+            .authors
+            .into_values()
+            .map(|(mut author, spellings)| {
+                let mut most = 0;
+                for (name, times) in spellings {
+                    if times > most {
+                        most = times;
+                        author.name = name;
+                    }
+                }
+                author
+            })
+            .collect();
         authors.sort_by(|a, b| {
             b.commits
                 .cmp(&a.commits)
@@ -363,6 +391,14 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
         rewritten = rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
     }
 
+    // Who is who, as `git shortlog` would have it: the `.mailmap` in the work
+    // tree, then `mailmap.blob` and `mailmap.file` from the configuration. The
+    // last is the one that covers every repository from one file. Without any
+    // of it the author was whatever the commit said, and somebody who merges
+    // pull requests on a forge is two people: the address on their machine
+    // and the one the forge commits under.
+    let mailmap = repo.mailmap().ok();
+
     let days = window.days();
     let mut seen = Vec::new();
     let mut stale = 0usize;
@@ -396,7 +432,9 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<S
             continue;
         }
 
-        let author = commit.author();
+        let as_written = commit.author();
+        let mapped = mailmap.as_ref().and_then(|map| commit.author_with_mailmap(map).ok());
+        let author = mapped.as_ref().unwrap_or(&as_written);
         let merge = commit.parent_count() > 1;
         seen.push(Seen {
             oid,
@@ -874,6 +912,48 @@ mod tests {
         );
         assert_eq!(named(&["/x/api", "/x/api"]), ["api", "api"], "the same one twice");
         assert_eq!(named(&["/"]), ["/"]);
+    }
+
+    // ---- who a commit is credited to ------------------------------------------
+
+    /// One person, three ways of signing: the work machine, the address the
+    /// forge commits under when a pull request is merged or a file is edited
+    /// in the browser, and a second machine set up in a hurry. The
+    /// repository's `.mailmap` says the first two are one.
+    #[test]
+    fn a_mailmap_makes_one_author_of_one_person() {
+        let _guard = isolate();
+        let dir = scratch("stats-mailmap");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let carol = ("Carol Example", "carol@work.example");
+        let forge = ("carol-ex", "1234567+carol-ex@users.noreply.forge.example");
+        commit_as(&dir, carol, "a.txt", "a\n", "one");
+        commit_as(&dir, carol, "b.txt", "b\n", "two");
+        commit_as(&dir, forge, "c.txt", "c\n", "merged on the forge");
+        commit_as(&dir, ("carol", "Carol@Work.Example"), "d.txt", "d\n", "from the other machine");
+        commit_as(&dir, ("robot[bot]", "robot@bots.example"), "e.lock", &lines(50), "bump");
+        let map = format!("{} <{}> <{}>\n", carol.0, carol.1, forge.1);
+        commit_file(&dir, ".mailmap", &map, "say who is who");
+
+        let result = contributions(&[&dir]);
+        assert_eq!(by_author(&result), shortlog(&dir, &["HEAD"]));
+        assert_eq!(by_author(&result).get(carol.1), Some(&4));
+        assert_eq!(result.authors.len(), 3, "Carol, the robot, and whoever wrote the mailmap");
+        let row = result.authors.iter().find(|a| a.email == carol.1).unwrap();
+        assert_eq!(row.name, "Carol Example", "the spelling most of her commits carry");
+
+        // The same from a file named in the configuration, which is how one
+        // mailmap serves repositories that do not carry their own.
+        let dir = scratch("stats-mailmap-file");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, carol, "a.txt", "a\n", "one");
+        commit_as(&dir, forge, "b.txt", "b\n", "merged on the forge");
+        let elsewhere = scratch("stats-mailmap-file-map").join("who");
+        write(&elsewhere, &map);
+        git(&dir, &["config", "mailmap.file", elsewhere.to_str().unwrap()]);
+        let result = contributions(&[&dir]);
+        assert_eq!(by_author(&result), shortlog(&dir, &["HEAD"]));
+        assert_eq!(by_author(&result).get(carol.1), Some(&2));
     }
 
     // ---- what could not be read ---------------------------------------------
