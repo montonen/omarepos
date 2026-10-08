@@ -503,8 +503,16 @@ pub fn pane(
                         tell(&totals, &summary(&detail));
                     }
                     Err(err) => {
-                        subject.set_label("Could not read this commit");
-                        meta.set_label(&err);
+                        subject.set_label(if working {
+                            "Could not read the working tree"
+                        } else {
+                            "Could not read this commit"
+                        });
+                        // Not the commit shown before this one.
+                        subject.set_tooltip_text(None);
+                        // The reason can be a sentence, and the line holds a
+                        // few words of one.
+                        tell(&meta, &err);
                         body_scroller.set_visible(false);
                         tell(&totals, "");
                     }
@@ -737,10 +745,25 @@ fn summary(detail: &Detail) -> String {
         if files == 1 { "file" } else { "files" }
     )];
     parts.push(format!("+{} −{}", detail.insertions, detail.deletions));
+    if detail.unreadable > 0 {
+        // The counts are of what could be read. Without this they are a
+        // total, and in a partial clone the total was "+0 −0".
+        parts.push(format!(
+            "{} could not be read and {} not counted",
+            detail.unreadable,
+            if detail.unreadable == 1 { "is" } else { "are" }
+        ));
+    }
     if detail.merge {
         // Against the first parent, so this is what the merge brought in
         // rather than everything on both sides.
         parts.push("against the first parent".to_string());
+    }
+    if detail.boundary {
+        // git marks such a commit "grafted" and shows the same numbers.
+        parts.push(
+            "its parent is outside this shallow clone, so every file reads as added".to_string(),
+        );
     }
     parts.join("  ·  ")
 }
@@ -1020,9 +1043,12 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             line.append(&name);
 
             // A rename with no edit is not "nothing changed", and a binary file
-            // has no line count to give.
+            // has no line count to give. Nor has one that could not be read:
+            // its count is not zero, it is not known.
             let churn = gtk::Label::builder()
-                .label(if file.binary {
+                .label(if file.unreadable {
+                    "unreadable".to_string()
+                } else if file.binary {
                     "binary".to_string()
                 } else if file.insertions == 0 && file.deletions == 0 {
                     String::new()

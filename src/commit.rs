@@ -106,6 +106,9 @@ pub struct FileChange {
     pub insertions: usize,
     pub deletions: usize,
     pub binary: bool,
+    /// libgit2 could not read one side of it, so the two counts above are not
+    /// zero, they are unknown.
+    pub unreadable: bool,
     pub group: Group,
 }
 
@@ -136,6 +139,13 @@ pub struct Detail {
     pub total_files: usize,
     pub insertions: usize,
     pub deletions: usize,
+    /// How many files could not be read, before the cap. The totals above do
+    /// not include them, and say so.
+    pub unreadable: usize,
+    /// The commit has a parent and this clone does not: it is where a shallow
+    /// clone's history stops. It is compared with nothing, as a first commit
+    /// is, so every file in the tree reads as added by it.
+    pub boundary: bool,
     /// For the working tree: how many entries each kind has, counted before
     /// the cap. What the pane says about the tree, and what Commit will take,
     /// are read from here and not from the list, which may have been cut.
@@ -213,16 +223,23 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     let committer = commit.committer();
     let committer_name = committer.name().unwrap_or("").to_string();
 
-    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let tree = commit.tree().map_err(|e| unreadable(&repo, &e))?;
     // A merge is diffed against its first parent: that shows what the merge
     // brought in, which is what someone looking at one means.
-    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+    let parent_tree = parent_tree(&repo, &commit)?;
+    // At the edge of a shallow clone libgit2 hides a commit's parents, as git
+    // does, and the commit's own header goes on naming them.
+    let boundary = commit.parent_count() == 0
+        && repo.is_shallow()
+        && commit
+            .raw_header()
+            .is_ok_and(|header| header.lines().any(|line| line.starts_with("parent ")));
 
     let mut opts = DiffOptions::new();
     opts.include_typechange(true).context_lines(0);
     let mut diff: Diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
-        .map_err(|e| e.message().to_string())?;
+        .map_err(|e| unreadable(&repo, &e))?;
 
     // Without this a rename reads as a delete plus an add, which is three
     // wrong facts where there was one right one.
@@ -234,14 +251,16 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     let mut files = Vec::with_capacity(total_files.min(MAX_FILES));
     let mut insertions = 0usize;
     let mut deletions = 0usize;
+    let mut unread = 0usize;
 
     for (index, delta) in diff.deltas().enumerate() {
         if cancel.stopped() {
             return Err("cancelled".into());
         }
-        let (adds, dels, binary) = measure(&diff, index);
+        let Measured { adds, dels, binary, unreadable } = measure(&diff, index);
         insertions += adds;
         deletions += dels;
+        unread += usize::from(unreadable);
 
         if files.len() >= MAX_FILES {
             continue;
@@ -262,6 +281,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
             insertions: adds,
             deletions: dels,
             binary,
+            unreadable,
             group: Group::Committed,
         });
     }
@@ -299,7 +319,74 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         total_files,
         insertions,
         deletions,
+        unreadable: unread,
+        boundary,
         counts: Counts::default(),
+    })
+}
+
+/// The tree a commit is compared with: its first parent's, or nothing for a
+/// commit that has no parent.
+///
+/// A parent that could not be read used to be taken for no parent. In a clone
+/// made with `--filter=tree:0` that is every commit but the newest, and a
+/// one-line commit was shown as having added the whole repository.
+fn parent_tree<'repo>(
+    repo: &'repo Repository,
+    commit: &git2::Commit<'repo>,
+) -> Result<Option<git2::Tree<'repo>>, String> {
+    if commit.parent_count() == 0 {
+        return Ok(None);
+    }
+    commit
+        .parent(0)
+        .and_then(|parent| parent.tree())
+        .map(Some)
+        .map_err(|err| unreadable(repo, &err))
+}
+
+/// The tree HEAD stands for, or nothing when nothing has been committed yet:
+/// then everything staged is new. Any other failure to read it is a failure,
+/// and not a reason to list the whole index as added.
+fn head_tree(repo: &Repository) -> Result<Option<git2::Tree<'_>>, String> {
+    match repo.head() {
+        Ok(head) => head.peel_to_tree().map(Some).map_err(|err| unreadable(repo, &err)),
+        Err(err) if matches!(err.code(), git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound) => {
+            Ok(None)
+        }
+        Err(err) => Err(err.message().to_string()),
+    }
+}
+
+/// libgit2's complaint about something it could not read, with the reason in
+/// front where the reason is known. A partial clone is the ordinary one: git
+/// fetches a missing object when it is asked for it, libgit2 does not, and
+/// "object not found" is all it has to say about that.
+fn unreadable(repo: &Repository, err: &git2::Error) -> String {
+    if err.code() == git2::ErrorCode::NotFound && is_partial(repo) {
+        format!(
+            "This is a partial clone, and this content has not been downloaded. git fetches \
+             it when asked: `git show` or `git diff` in a terminal. ({})",
+            err.message()
+        )
+    } else {
+        err.message().to_string()
+    }
+}
+
+/// Whether objects may be missing here on purpose: a clone made with
+/// `--filter`. git marks the remote it will fetch them from as a promisor;
+/// older versions named it under `extensions` as well.
+fn is_partial(repo: &Repository) -> bool {
+    let Ok(config) = repo.config() else { return false };
+    if config.get_string("extensions.partialclone").is_ok() {
+        return true;
+    }
+    repo.remotes().is_ok_and(|remotes| {
+        remotes
+            .iter()
+            .filter_map(|name| name.ok().flatten())
+            .any(|name| config.get_bool(&format!("remote.{name}.promisor")).unwrap_or(false))
     })
 }
 
@@ -380,19 +467,22 @@ pub fn spawn_patch(
 /// questions and only one of them blocks an update.
 fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
     let repo = crate::git::open_here(path)?;
-    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let head_tree = head_tree(&repo)?;
     let index = repo.index().map_err(|e| e.message().to_string())?;
 
     let mut files = Vec::new();
     let mut insertions = 0usize;
     let mut deletions = 0usize;
 
+    // A half that cannot be read is an error, here and below. It used to be
+    // left out: one file the user could not open, and the list was the staged
+    // files alone under "nothing here blocks an update".
     let mut staged_opts = DiffOptions::new();
     staged_opts.include_typechange(true).context_lines(0);
-    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
-    {
-        collect(&diff, Group::Staged, cancel, &mut files, &mut insertions, &mut deletions);
-    }
+    let diff = repo
+        .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
+        .map_err(|e| unreadable(&repo, &e))?;
+    collect(&diff, Group::Staged, cancel, &mut files, &mut insertions, &mut deletions);
 
     let mut work_opts = DiffOptions::new();
     work_opts
@@ -410,11 +500,13 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         // to be.
         .ignore_submodules(true)
         .context_lines(0);
-    if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut work_opts)) {
-        collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
-    }
+    let diff = repo
+        .diff_index_to_workdir(Some(&index), Some(&mut work_opts))
+        .map_err(|e| unreadable(&repo, &e))?;
+    collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
 
     let total_files = files.len();
+    let unread = files.iter().filter(|f| f.unreadable).count();
     let count = |group: Group| files.iter().filter(|f| f.group == group).count();
     let counts = Counts {
         staged: count(Group::Staged),
@@ -450,18 +542,35 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         total_files,
         insertions,
         deletions,
+        unreadable: unread,
+        boundary: false,
         counts,
     })
 }
 
-/// One delta's added and removed lines, and whether the file is binary.
+/// What building one delta's patch found out.
+#[derive(Default)]
+struct Measured {
+    adds: usize,
+    dels: usize,
+    binary: bool,
+    /// The patch could not be built. That is not "no lines changed".
+    unreadable: bool,
+}
+
+/// One delta's added and removed lines, whether the file is binary, and
+/// whether it could be read at all.
 ///
 /// libgit2 finds out that a file is binary while it builds the patch, and
 /// marks the delta then. The flag used to be read one statement before the
 /// patch was built, so it was false for every file: the list never said
 /// "binary", and an image was a row with a status letter and an empty cell,
 /// which is also what a file that was only renamed looks like.
-fn measure(diff: &Diff<'_>, index: usize) -> (usize, usize, bool) {
+///
+/// And a patch that could not be built used to be counted as one with no
+/// lines in it. In a clone made with `--filter=blob:none` that is every
+/// commit older than the checkout: each read "+0 −0", as a fact.
+fn measure(diff: &Diff<'_>, index: usize) -> Measured {
     let patch = Patch::from_diff(diff, index);
     let binary = diff.get_delta(index).is_some_and(|delta| {
         delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary()
@@ -469,9 +578,10 @@ fn measure(diff: &Diff<'_>, index: usize) -> (usize, usize, bool) {
     match patch {
         Ok(Some(patch)) if !binary => {
             let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
-            (adds, dels, false)
+            Measured { adds, dels, ..Measured::default() }
         }
-        _ => (0, 0, binary),
+        Ok(_) => Measured { binary, ..Measured::default() },
+        Err(_) => Measured { unreadable: true, ..Measured::default() },
     }
 }
 
@@ -513,13 +623,13 @@ fn collect(
             git2::Delta::Conflicted => Group::Conflicted,
             _ => default_group,
         };
-        let (adds, dels, binary) = if group == Group::Untracked {
+        let Measured { adds, dels, binary, unreadable } = if group == Group::Untracked {
             // An untracked file has nothing to diff against; counting its whole
             // length as additions would drown the totals. Nor is it read here
             // to see whether it is binary: there can be thousands of them and
             // the list keeps a few hundred. The ones it keeps are looked at
             // once the cap has fallen.
-            (0, 0, false)
+            Measured::default()
         } else {
             measure(diff, index)
         };
@@ -542,6 +652,7 @@ fn collect(
             insertions: adds,
             deletions: dels,
             binary,
+            unreadable,
             group,
         });
     }
@@ -551,8 +662,8 @@ fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<Fi
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
     let oid = Oid::from_str(id).map_err(|e| e.message().to_string())?;
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
-    let tree = commit.tree().map_err(|e| e.message().to_string())?;
-    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+    let tree = commit.tree().map_err(|e| unreadable(&repo, &e))?;
+    let parent_tree = parent_tree(&repo, &commit)?;
 
     // Narrowed to the one file, and with real context this time — the commit
     // summary asks for counts, this asks to be read.
@@ -568,7 +679,7 @@ fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<Fi
     }
     let mut diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
-        .map_err(|e| e.message().to_string())?;
+        .map_err(|e| unreadable(&repo, &e))?;
     if from.is_some() {
         // The same detection the list ran, so the two cannot disagree.
         let mut finds = DiffFindOptions::new();
@@ -577,7 +688,7 @@ fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<Fi
     }
 
     let mut out = FileDiff::default();
-    append_patch(&diff, Some(file), &mut out);
+    append_patch(&repo, &diff, Some(file), &mut out)?;
     Ok(out)
 }
 
@@ -608,7 +719,7 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
     let staged = !matches!(side, Some(Group::Unstaged) | Some(Group::Untracked));
     let unstaged = !matches!(side, Some(Group::Staged));
 
-    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let head_tree = head_tree(&repo)?;
     let mut staged_opts = DiffOptions::new();
     staged_opts
         .context_lines(3)
@@ -616,16 +727,16 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
         .pathspec(file)
         .disable_pathspec_match(true);
     if staged {
-        if let Ok(diff) =
-            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
-        {
-            append_patch(&diff, None, &mut out);
-        }
+        let diff = repo
+            .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
+            .map_err(|e| unreadable(&repo, &e))?;
+        append_patch(&repo, &diff, None, &mut out)?;
     }
     if unstaged {
-        if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
-            append_patch(&diff, None, &mut out);
-        }
+        let diff = repo
+            .diff_index_to_workdir(Some(&index), Some(&mut opts))
+            .map_err(|e| unreadable(&repo, &e))?;
+        append_patch(&repo, &diff, None, &mut out)?;
     }
     Ok(out)
 }
@@ -633,19 +744,43 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
 /// Add what `diff` holds to `out`, as lines. `only` names the one file wanted
 /// from a diff that had to take in another: where a renamed or copied file
 /// came from, which is a delta of its own when it is still there.
-fn append_patch(diff: &Diff<'_>, only: Option<&str>, out: &mut FileDiff) {
+///
+/// A patch that cannot be built is an error. It used to be skipped, and a
+/// diff with nothing in it is shown as "No textual changes.": a statement
+/// about the file, made of a failure to read it.
+fn append_patch(
+    repo: &Repository,
+    diff: &Diff<'_>,
+    only: Option<&str>,
+    out: &mut FileDiff,
+) -> Result<(), String> {
     for index in 0..diff.deltas().len() {
         let Some(delta) = diff.get_delta(index) else { continue };
         let named = delta.new_file().path().or(delta.old_file().path());
         if only.is_some_and(|only| !named.is_some_and(|path| path.to_string_lossy() == only)) {
             continue;
         }
-        let Ok(Some(patch)) = Patch::from_diff(diff, index) else { continue };
+        // libgit2 gives an unmerged path no content on either side, so there
+        // are never lines to show for one, and that is not "nothing changed"
+        // either: it is the one file here that most needs reading.
+        if delta.status() == git2::Delta::Conflicted {
+            out.note = Some(
+                "Conflicted. Resolve it in an editor or a terminal: omarepos shows no diff for \
+                 a file in conflict, and will not stage one."
+                    .to_string(),
+            );
+            continue;
+        }
+        let patch = Patch::from_diff(diff, index).map_err(|err| unreadable(repo, &err))?;
+        let binary =
+            delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary();
+        let Some(patch) = patch else {
+            out.binary |= binary;
+            continue;
+        };
         if patch.num_hunks() == 0 {
             // Read now that the patch exists: it is building the patch that
             // tells libgit2 whether a file is binary.
-            let binary =
-                delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary();
             out.binary |= binary;
             let moved = match delta.status() {
                 git2::Delta::Renamed => Some("Renamed"),
@@ -666,7 +801,7 @@ fn append_patch(diff: &Diff<'_>, only: Option<&str>, out: &mut FileDiff) {
             for line_index in 0..lines_in_hunk {
                 if out.lines.len() >= MAX_LINES || out.bytes >= MAX_BYTES {
                     out.truncated = true;
-                    return;
+                    return Ok(());
                 }
                 let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
                 let text = shown(line.content());
@@ -675,6 +810,7 @@ fn append_patch(diff: &Diff<'_>, only: Option<&str>, out: &mut FileDiff) {
             }
         }
     }
+    Ok(())
 }
 
 /// Exactly what a push of the checked-out branch would send, and where.
@@ -1443,6 +1579,123 @@ mod tests {
         assert_eq!((marked(&copy, '+'), marked(&copy, '-')), (1, 1));
         let source = patch_for(&dir, &head, "a.txt", None).unwrap();
         assert_eq!((marked(&source, '+'), marked(&source, '-')), (2, 2));
+    }
+
+    // ---- what could not be read is not reported as nothing ------------------
+
+    /// A remote whose `README.md` has been edited twice since the first
+    /// commit, and a clone of it made with `how`.
+    fn cloned(name: &str, how: &[&str]) -> (Fleet, PathBuf) {
+        let f = fleet(name);
+        f.remote_commits("second", |seed| write(&seed.join("README.md"), "one\ntwo\n"));
+        f.remote_commits("third", |seed| write(&seed.join("README.md"), "one\ntwo\nthree\n"));
+        git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
+        let url = format!("file://{}", f.remote.display());
+        let mut args = vec!["clone", "-q"];
+        args.extend(how);
+        args.extend([url.as_str(), "clone"]);
+        git(&f.root, &args);
+        let clone = f.root.join("clone");
+        (f, clone)
+    }
+
+    /// `git clone --filter=blob:none`, the usual advice for a large
+    /// repository. libgit2 does not fetch what is missing, and every commit
+    /// older than the checkout read "+0 −0" and "No textual changes."
+    #[test]
+    fn a_file_whose_content_is_not_here_is_unreadable_and_not_unchanged() {
+        let _guard = isolate();
+        let (_f, clone) = cloned("cm-blobless", &["--filter=blob:none"]);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+
+        let listed = load(&clone, &head, &Cancel::default()).unwrap();
+        assert_eq!(listed.total_files, 1);
+        assert!(listed.files[0].unreadable, "the row read +0 −0, as if it had been looked at");
+        assert_eq!(listed.unreadable, 1);
+
+        let why = patch_for(&clone, &head, "README.md", None).unwrap_err();
+        assert!(why.contains("partial clone"), "{why}");
+
+        // A commit that can be read is still read.
+        commit_file(&clone, "mine.txt", "mine\n", "mine");
+        let mine = git(&clone, &["rev-parse", "HEAD"]);
+        let listed = load(&clone, &mine, &Cancel::default()).unwrap();
+        assert_eq!((listed.unreadable, listed.insertions), (0, 1));
+    }
+
+    /// `--filter=tree:0`: the parent is there and its tree is not. Taken for
+    /// "no parent", a one-line commit read as the whole repository added.
+    #[test]
+    fn a_parent_that_cannot_be_read_is_not_taken_for_no_parent() {
+        let _guard = isolate();
+        let (_f, clone) = cloned("cm-treeless", &["--filter=tree:0"]);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+
+        assert!(load(&clone, &head, &Cancel::default()).is_err());
+        assert!(patch_for(&clone, &head, "README.md", None).is_err());
+    }
+
+    /// `--depth 1`: here there really is nothing to compare with, and git
+    /// itself shows the whole tree as added. It marks the commit as grafted;
+    /// so does the pane.
+    #[test]
+    fn the_commit_where_a_shallow_clone_stops_says_so() {
+        let _guard = isolate();
+        let (f, clone) = cloned("cm-shallow", &["--depth", "1"]);
+        let head = git(&clone, &["rev-parse", "HEAD"]);
+
+        let listed = load(&clone, &head, &Cancel::default()).unwrap();
+        assert!(listed.boundary);
+        assert_eq!(listed.insertions, 3, "compared with nothing, as git does");
+
+        // A first commit has no parent anywhere, and is not one of those.
+        let root = git(&f.seed, &["rev-list", "--max-parents=0", "HEAD"]);
+        assert!(!load(&f.seed, &root, &Cancel::default()).unwrap().boundary);
+    }
+
+    /// A file the user may not read: the row is there, and its count is not
+    /// zero but unknown.
+    #[test]
+    fn a_working_file_that_cannot_be_opened_is_unreadable_and_not_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = isolate();
+        let dir = scratch("cm-unreadable");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "secret.txt", "one\n", "first");
+        write(&dir.join("secret.txt"), "one\ntwo, and longer\n");
+        let locked = |mode| std::fs::set_permissions(dir.join("secret.txt"), std::fs::Permissions::from_mode(mode));
+        locked(0o000).unwrap();
+        if std::fs::read(dir.join("secret.txt")).is_ok() {
+            // Run as root, nothing is unreadable and there is nothing to test.
+            return;
+        }
+
+        let listed = load_working(&dir, &Cancel::default());
+        let diff = patch_working(&dir, "secret.txt", Some(Group::Unstaged));
+        locked(0o644).unwrap();
+
+        let listed = listed.unwrap();
+        assert_eq!(listed.files.len(), 1);
+        assert!(listed.files[0].unreadable);
+        assert_eq!(listed.unreadable, 1);
+        assert!(diff.is_err(), "the diff said: {:?}", diff.map(|d| d.lines.len()));
+    }
+
+    /// libgit2 gives a conflicted path no content on either side, so its diff
+    /// has no lines. The pane said "No textual changes." about the one file
+    /// that most needed reading.
+    #[test]
+    fn a_conflicted_files_diff_says_it_is_conflicted() {
+        let _guard = isolate();
+        let dir = stash_pop_conflict("cm-conflict-diff");
+        assert!(read(&dir.join("f.txt")).contains("<<<<<<<"));
+
+        for side in [Some(Group::Conflicted), None] {
+            let diff = patch_working(&dir, "f.txt", side).unwrap();
+            assert!(diff.lines.is_empty() && !diff.binary);
+            let note = diff.note.expect("it has to say something");
+            assert!(note.starts_with("Conflicted"), "{note}");
+        }
     }
 
     // ---- the commit box: nothing it cannot finish ---------------------------
