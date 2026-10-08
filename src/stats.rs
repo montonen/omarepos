@@ -382,13 +382,53 @@ fn only_on(
 fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> (usize, usize, usize) {
     let Ok(tree) = commit.tree() else { return (0, 0, 0) };
     let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
-    let Ok(diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
+    let Ok(mut diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
         return (0, 0, 0);
     };
+    if find_renames(&mut diff).is_err() {
+        return (0, 0, 0);
+    }
     match diff.stats() {
         Ok(stats) => (stats.insertions(), stats.deletions(), stats.files_changed()),
         Err(_) => (0, 0, 0),
     }
+}
+
+/// Past this many pairs of a removed file and an added one, only files moved
+/// without an edit are paired. Comparing contents is a couple of microseconds a
+/// pair, and every pair is compared: half a second for one commit at this size.
+const RENAME_PAIRS: usize = 250_000;
+
+/// Pair removed files with added ones, so that a move reads as a move. Without
+/// this a renamed file was its whole length removed and its whole length added
+/// again: one `git mv` of a directory put whoever ran it at the top of the
+/// page, and the commit pane, which does pair them, said +0 −0 of the same
+/// commit.
+///
+/// These are the renames `git log --shortstat` finds. The commit pane also
+/// looks for copies, which is the one place the two still differ: a file added
+/// as a copy of one the same commit edits is all new lines here and in git.
+fn find_renames(diff: &mut git2::Diff<'_>) -> Result<(), git2::Error> {
+    let (mut added, mut removed) = (0usize, 0usize);
+    for delta in diff.deltas() {
+        match delta.status() {
+            git2::Delta::Added => added += 1,
+            git2::Delta::Deleted => removed += 1,
+            _ => {}
+        }
+    }
+    if added == 0 || removed == 0 {
+        return Ok(());
+    }
+    let mut finds = git2::DiffFindOptions::new();
+    // libgit2 stops looking for an added file's source after a thousand
+    // candidates unless told how many there are, and a move of more files than
+    // that came out partly a move and partly a delete and an add.
+    finds.renames(true).rename_limit(added.max(removed));
+    if added.saturating_mul(removed) > RENAME_PAIRS {
+        finds.exact_match_only(true);
+    }
+    diff.find_similar(Some(&mut finds))
 }
 
 #[cfg(test)]
@@ -493,6 +533,22 @@ mod tests {
             }
         }
         (commits, insertions, deletions)
+    }
+
+    /// One of the commits listed under an author, found by its subject.
+    fn listed<'a>(result: &'a Contributions, summary: &str) -> &'a Commit {
+        result
+            .authors
+            .iter()
+            .flat_map(|author| author.repos.values())
+            .flat_map(|in_repo| in_repo.commits.iter())
+            .find(|commit| commit.summary == summary)
+            .unwrap_or_else(|| panic!("no commit called {summary:?} is listed"))
+    }
+
+    /// `n` lines that no other file has.
+    fn text(name: &str, n: usize) -> String {
+        (0..n).map(|i| format!("{name} line {i}\n")).collect()
     }
 
     // ---- which commits are walked -------------------------------------------
@@ -619,5 +675,67 @@ mod tests {
         f.remote_moves(2);
         git(&f.work, &["fetch", "--quiet"]);
         assert_eq!(totals(&contributions(&[&f.work])), (3, 3, 0), "main is two behind");
+    }
+
+    // ---- what a commit is counted as -----------------------------------------
+
+    #[test]
+    fn a_move_is_not_every_line_removed_and_added_again() {
+        let _guard = isolate();
+        let dir = scratch("stats-rename");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        write(&dir.join("src/big.txt"), &text("big", 100));
+        for i in 0..5 {
+            write(&dir.join(format!("src/f{i}.txt")), &text(&format!("f{i}"), 200));
+        }
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        git(&dir, &["mv", "src/big.txt", "src/renamed.txt"]);
+        git(&dir, &["commit", "-q", "-m", "rename one file"]);
+        git(&dir, &["mv", "src", "lib"]);
+        git(&dir, &["commit", "-q", "-m", "move the directory"]);
+        git(&dir, &["mv", "lib/f0.txt", "lib/zero.txt"]);
+        write(&dir.join("lib/zero.txt"), &text("f0", 200).replace("f0 line 7\n", "seven\n"));
+        git(&dir, &["commit", "-q", "-a", "-m", "rename and touch one line"]);
+        // A copy is new lines to git unless it is asked to look for copies,
+        // and the page is held to what git says unasked.
+        write(&dir.join("lib/f1-copy.txt"), &text("f1", 200));
+        write(&dir.join("lib/f1.txt"), &text("f1", 200).replace("f1 line 7\n", "seven\n"));
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "copy a file and touch the original"]);
+
+        let result = contributions(&[&dir]);
+        let churn = |summary: &str| {
+            let commit = listed(&result, summary);
+            (commit.insertions, commit.deletions)
+        };
+        assert_eq!(churn("rename one file"), (0, 0));
+        assert_eq!(churn("move the directory"), (0, 0));
+        assert_eq!(churn("rename and touch one line"), (1, 1));
+        assert_eq!(churn("copy a file and touch the original"), (201, 1));
+        assert_eq!(totals(&result), git_totals(&dir, &["HEAD"]));
+        assert_eq!(totals(&result), (5, 1302, 2));
+    }
+
+    /// libgit2 compares each added file with at most a thousand removed ones
+    /// unless told otherwise, so past a thousand files a move was partly a
+    /// move and partly a delete and an add.
+    #[test]
+    fn a_move_of_more_than_a_thousand_files_is_still_a_move() {
+        let _guard = isolate();
+        let dir = scratch("stats-rename-many");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for i in 0..1100 {
+            write(&dir.join(format!("old/f{i}.txt")), &text(&format!("f{i}"), 2));
+        }
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-q", "-m", "base"]);
+        git(&dir, &["mv", "old", "new"]);
+        git(&dir, &["commit", "-q", "-m", "move the lot"]);
+
+        let result = contributions(&[&dir]);
+        let moved = listed(&result, "move the lot");
+        assert_eq!((moved.insertions, moved.deletions), (0, 0));
+        assert_eq!(totals(&result), git_totals(&dir, &["HEAD"]));
     }
 }

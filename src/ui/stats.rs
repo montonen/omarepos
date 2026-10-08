@@ -406,8 +406,10 @@ fn tooltip(author: &Author) -> String {
             author.merges
         ));
     }
+    // Not "files touched": the figure is summed commit by commit, so ten
+    // commits to one file are ten.
     tip.push_str(&format!(
-        "\n{} files touched\nlast commit {}",
+        "\n{} file changes\nlast commit {}",
         thousands(author.files),
         relative_time(author.last_seen)
     ));
