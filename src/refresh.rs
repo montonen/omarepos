@@ -1605,6 +1605,45 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 
+    /// What git says of a repository the server will not show, with the
+    /// real git saying it: a server here answers every request "404", which
+    /// is what GitHub answers for a private repository the account may not
+    /// see. The words are git's, and what is added to them depends on them.
+    #[test]
+    fn a_remote_that_answers_not_found_is_said_to_be_that_or_out_of_sight() {
+        let _guard = isolate();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in server.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let f = fleet("rf-not-found");
+        let url = format!("http://127.0.0.1:{port}/acme/billing.git");
+        git(&f.work, &["remote", "set-url", "origin", &url]);
+
+        for pass in [Pass::One, Pass::Fleet] {
+            let report = fetch_only(&f.work, pass);
+            let Outcome::Failed(why) = &report.outcome else { panic!("{pass:?}: {report:?}") };
+            assert_eq!(
+                why,
+                &format!(
+                    "repository not found, or the account git signs in with has no access to it\n\
+                     git said: fatal: repository '{url}/' not found"
+                ),
+                "{pass:?}"
+            );
+            assert!(!report.fetched, "{pass:?}");
+        }
+    }
+
     // ---- fetching is not updating ----------------------------------------
 
     fn fetch_only(dir: &Path, pass: Pass) -> Report {

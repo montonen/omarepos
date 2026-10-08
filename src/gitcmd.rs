@@ -491,7 +491,34 @@ fn explain(stderr: &str, stdout: &str) -> String {
             }
         }
     }
+    if says_not_found(&said) {
+        return format!("{NOT_FOUND}\ngit said: {said}");
+    }
     said
+}
+
+/// What goes in front of git's "repository not found".
+///
+/// Taken at its word, that sentence sends the reader to check the address,
+/// and with git's habit of printing the address with a slash on the end, to
+/// suspect the slash. But GitHub, and most hosts that keep private
+/// repositories, answer one the account may not see exactly as they answer
+/// one that is not there, so as not to say which names exist. Then the
+/// address is right and the remote was reached, and what is wrong is who git
+/// signed in as. git says as much only over ssh ("make sure you have the
+/// correct access rights"), on lines after the one that is kept.
+///
+/// In front, on a line of its own: a toast shows the first line, and the rest
+/// behind a button.
+const NOT_FOUND: &str = "repository not found, or the account git signs in with has no access to it";
+
+/// Whether this is how a remote says there is no such repository: git's
+/// sentence for it over https, which has the address in the middle, or the
+/// remote's own over ssh.
+fn says_not_found(said: &str) -> bool {
+    let said = said.trim().to_lowercase();
+    said == "error: repository not found."
+        || (said.starts_with("fatal: repository '") && said.ends_with("' not found"))
 }
 
 #[cfg(test)]
@@ -852,6 +879,43 @@ mod tests {
             ),
             "fatal: early EOF"
         );
+    }
+
+    /// A host that has private repositories answers one the account may not
+    /// see as it answers one that is not there, and git passes that on.
+    #[test]
+    fn a_repository_that_is_not_found_may_be_one_that_may_not_be_seen() {
+        // Over https, in git's words for a 404. The remote's own line is
+        // not the one that is kept.
+        assert_eq!(
+            explain(
+                "remote: Repository not found.\n\
+                 fatal: repository 'https://example.invalid/acme/billing.git/' not found\n",
+                ""
+            ),
+            "repository not found, or the account git signs in with has no access to it\n\
+             git said: fatal: repository 'https://example.invalid/acme/billing.git/' not found"
+        );
+        // Over ssh, in the remote's words. git's advice about access rights
+        // comes on the lines after, which are not kept either.
+        assert_eq!(
+            explain(
+                "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n\n\
+                 Please make sure you have the correct access rights\nand the repository exists.\n",
+                ""
+            ),
+            "repository not found, or the account git signs in with has no access to it\n\
+             git said: ERROR: Repository not found."
+        );
+        // Nothing is added to what is some other trouble.
+        for other in [
+            "fatal: '/srv/git/billing.git' does not appear to be a git repository\n",
+            "fatal: unable to access 'https://example.invalid/x.git/': Could not resolve host: example.invalid\n",
+            "fatal: couldn't find remote ref refs/heads/gone\n",
+            "error: pathspec 'not found' did not match any file(s) known to git\n",
+        ] {
+            assert_eq!(explain(other, ""), other.trim(), "{other}");
+        }
     }
 
     /// The README promises a hook's refusal "quoted back as git wrote it".

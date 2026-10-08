@@ -377,6 +377,14 @@ card keeps its `fetch failed` pill; `f`, `p` or `Ctrl+Shift+R` try again, and a
 fetch that works clears it. A remote that could not be reached is different,
 and is tried on every pass.
 
+When a remote says a repository is not found, the card and the toast say
+`repository not found, or the account git signs in with has no access to it`,
+with git's own line under it. Both are possible and git names only the first:
+a host with private repositories answers one the account may not see exactly
+as it answers one that is not there. If the repository exists, the address is
+probably right (git prints it with a slash on the end either way) and the
+thing to check is which account or key git uses for that remote.
+
 ### What it will and will not do
 
 The only write it ever performs is a fast-forward of the checked-out branch. A

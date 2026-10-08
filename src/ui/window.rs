@@ -3028,6 +3028,11 @@ fn refused_by_remote(err: &str) -> bool {
     ]
     .iter()
     .any(|sign| err.contains(sign))
+        // Over https it is git that says so, with the address in the middle
+        // of the sentence, and that is the line that is kept. The sign above
+        // is the remote's own line, which is not: a repository GitHub would
+        // not show was asked for again on every pass.
+        || (err.contains("repository '") && err.contains("' not found"))
 }
 
 /// The selection checkbox of a card, found by walking down from its flow box
@@ -3091,6 +3096,11 @@ mod tests {
             "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled",
             "git@example.invalid: Permission denied (publickey).",
             "remote: Repository not found.",
+            // What is kept of that over https: git's line, which has the
+            // address in the middle of it. Alone, as a state file written
+            // before the line above it was added still has it, and with it.
+            "fatal: repository 'https://example.invalid/acme/billing.git/' not found",
+            "repository not found, or the account git signs in with has no access to it\ngit said: fatal: repository 'https://example.invalid/acme/billing.git/' not found",
             "fatal: '/srv/git/billing.git' does not appear to be a git repository",
             "fatal: unable to access 'https://example.invalid/x.git/': The requested URL returned error: 403",
         ] {
