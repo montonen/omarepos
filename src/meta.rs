@@ -70,6 +70,18 @@ pub fn path() -> PathBuf {
     base.join("omarepos/repos.toml")
 }
 
+/// Tags as read from the file, minus any NUL. A tag goes into labels, and a
+/// label takes no NUL: written by hand as `"a\u0000b"`, one would be cut
+/// short on every card, and stop a debug build.
+fn without_nuls(mut repos: BTreeMap<String, RepoMeta>) -> BTreeMap<String, RepoMeta> {
+    for meta in repos.values_mut() {
+        for tag in &mut meta.tags {
+            tag.retain(|c| c != '\0');
+        }
+    }
+    repos
+}
+
 /// Trim, drop empties, and fold case-insensitive duplicates into one spelling.
 pub fn normalize(tags: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -144,7 +156,7 @@ impl Meta {
     pub fn load() -> Self {
         let path = path();
         let unusable = |why: String| {
-            eprintln!("omarepos: ignoring {}: {why}", path.display());
+            note!("omarepos: ignoring {}: {why}", path.display());
             Self {
                 repos: BTreeMap::new(),
                 load_error: Some(crate::config::why_unusable(&path, &why)),
@@ -158,7 +170,7 @@ impl Meta {
             Err(err) => return unusable(err.to_string()),
         };
         let mut meta = match toml::from_str::<File>(&text) {
-            Ok(file) => Self { repos: file.repos, ..Self::default() },
+            Ok(file) => Self { repos: without_nuls(file.repos), ..Self::default() },
             Err(err) => unusable(err.to_string()),
         };
         meta.on_disk = std::cell::RefCell::new(Some(text));
@@ -179,7 +191,7 @@ impl Meta {
         };
         match parsed {
             Ok(file) => {
-                *self = Self { repos: file.repos, ..Self::default() };
+                *self = Self { repos: without_nuls(file.repos), ..Self::default() };
                 *self.on_disk.borrow_mut() = disk;
                 Reread::Loaded
             }

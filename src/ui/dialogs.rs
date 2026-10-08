@@ -802,7 +802,7 @@ fn complain(said: &str) {
             toast.set_timeout(0);
             dialog.add_toast(toast);
         }
-        None => eprintln!("omarepos: {said}"),
+        None => note!("omarepos: {said}"),
     }
 }
 
@@ -847,7 +847,7 @@ fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
         }
         node = current.parent();
     }
-    eprintln!("omarepos: {text}");
+    note!("omarepos: {text}");
 }
 
 /// Edit the tags on one or more repositories. With several repos the entry

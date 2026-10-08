@@ -49,8 +49,8 @@ pub fn install(window: &adw::ApplicationWindow) {
         };
         match find_button(window.upcast_ref(), wanted, unseen) {
             Some(button) if button.is_sensitive() => button.emit_clicked(),
-            Some(_) => eprintln!("omarepos: {wanted:?} is not sensitive"),
-            None => eprintln!("omarepos: no button says {wanted:?}"),
+            Some(_) => note!("omarepos: {wanted:?} is not sensitive"),
+            None => note!("omarepos: no button says {wanted:?}"),
         }
     });
     window.add_action(&press);
@@ -73,7 +73,7 @@ pub fn install(window: &adw::ApplicationWindow) {
             None => ("", wanted),
         };
         let Some(keyval) = gtk::gdk::Key::from_name(name) else {
-            eprintln!("omarepos: no key is called {name:?}");
+            note!("omarepos: no key is called {name:?}");
             return;
         };
         let mut state = gtk::gdk::ModifierType::empty();
@@ -120,7 +120,7 @@ pub fn install(window: &adw::ApplicationWindow) {
                 at = widget.parent().filter(|_| widget.is::<gtk::Text>());
             }
         }
-        eprintln!("omarepos: nothing took {wanted:?}");
+        note!("omarepos: nothing took {wanted:?}");
     });
     window.add_action(&key);
 
@@ -136,7 +136,7 @@ pub fn install(window: &adw::ApplicationWindow) {
         };
         match find_row(window.upcast_ref(), title) {
             Some(found) => set_row(&found, value),
-            None => eprintln!("omarepos: no row is titled {title:?}"),
+            None => note!("omarepos: no row is titled {title:?}"),
         }
     });
     window.add_action(&row);
@@ -153,7 +153,7 @@ pub fn install(window: &adw::ApplicationWindow) {
                 alert.emit_by_name::<()>("response", &[&id]);
                 alert.close();
             }
-            None => eprintln!("omarepos: no dialog is asking anything"),
+            None => note!("omarepos: no dialog is asking anything"),
         }
     });
     window.add_action(&respond);
@@ -167,7 +167,7 @@ pub fn install(window: &adw::ApplicationWindow) {
         let Some(n) = n.and_then(|n| n.str()).and_then(|n| n.parse::<u32>().ok()) else { return };
         match find_dropdown(window.upcast_ref()) {
             Some(dropdown) => dropdown.set_selected(n),
-            None => eprintln!("omarepos: no drop-down is on screen"),
+            None => note!("omarepos: no drop-down is on screen"),
         }
     });
     window.add_action(&choose);
@@ -199,7 +199,7 @@ pub fn install(window: &adw::ApplicationWindow) {
                     row.activate();
                 }
             }
-            None => eprintln!("omarepos: no row {row} in list {list} ({} lists on screen)", lists.len()),
+            None => note!("omarepos: no row {row} in list {list} ({} lists on screen)", lists.len()),
         }
     });
     window.add_action(&pick);
@@ -217,7 +217,7 @@ pub fn install(window: &adw::ApplicationWindow) {
         let mut areas = 0;
         paint_areas(window.upcast_ref(), &snapshot, &mut areas);
         let drawn = snapshot.to_node().is_some();
-        eprintln!("omarepos: painted {areas} drawing areas: {}", if drawn { "ok" } else { "nothing came of it" });
+        note!("omarepos: painted {areas} drawing areas: {}", if drawn { "ok" } else { "nothing came of it" });
     });
     window.add_action(&paint);
 
@@ -238,7 +238,7 @@ pub fn install(window: &adw::ApplicationWindow) {
                 field.insert_text(text, &mut at);
                 field.set_position(at);
             }
-            None => eprintln!("omarepos: there is no text field to type into"),
+            None => note!("omarepos: there is no text field to type into"),
         }
     });
     window.add_action(&type_);
@@ -290,7 +290,7 @@ fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everythin
     }
     walk(window.upcast_ref(), 0, everything, &mut out);
     if let Err(err) = std::fs::write(&path, out) {
-        eprintln!("omarepos: could not write the dump: {err}");
+        note!("omarepos: could not write the dump: {err}");
     }
 }
 
@@ -320,7 +320,7 @@ fn set_row(row: &adw::PreferencesRow, value: &str) {
     } else if let Some(spin) = row.downcast_ref::<adw::SpinRow>() {
         match value.parse::<f64>() {
             Ok(number) => spin.set_value(number),
-            Err(_) => eprintln!("omarepos: {value:?} is not a number"),
+            Err(_) => note!("omarepos: {value:?} is not a number"),
         }
     } else if let Some(entry) = row.downcast_ref::<adw::EntryRow>() {
         entry.set_text(value);
@@ -328,7 +328,7 @@ fn set_row(row: &adw::PreferencesRow, value: &str) {
     } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
         expander.set_expanded(value != "off");
     } else {
-        eprintln!("omarepos: do not know how to set a {}", row.type_().name());
+        note!("omarepos: do not know how to set a {}", row.type_().name());
     }
 }
 

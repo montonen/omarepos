@@ -301,10 +301,10 @@ pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, Trouble>) {
     match toml::to_string_pretty(errors) {
         Ok(body) => {
             if let Err(err) = std::fs::write(&path, body) {
-                eprintln!("omarepos: could not record fetch failures: {err}");
+                note!("omarepos: could not record fetch failures: {err}");
             }
         }
-        Err(err) => eprintln!("omarepos: could not encode fetch failures: {err}"),
+        Err(err) => note!("omarepos: could not encode fetch failures: {err}"),
     }
 }
 
@@ -338,7 +338,7 @@ pub fn load_known_repos() -> Option<std::collections::BTreeSet<String>> {
 pub fn save_known_repos(known: &std::collections::BTreeSet<String>) {
     let body: String = known.iter().map(|path| format!("{path}\n")).collect();
     if let Err(err) = replace_file(&known_repos_path(), &body) {
-        eprintln!("omarepos: could not record which repositories have been seen: {err}");
+        note!("omarepos: could not record which repositories have been seen: {err}");
     }
 }
 
@@ -364,7 +364,7 @@ pub fn record_refresh(at: i64) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Err(err) = std::fs::write(&path, at.to_string()) {
-        eprintln!("omarepos: could not record the refresh time: {err}");
+        note!("omarepos: could not record the refresh time: {err}");
     }
 }
 
@@ -529,7 +529,7 @@ impl Config {
     }
 
     fn unusable(path: &Path, why: &str) -> Self {
-        eprintln!("omarepos: ignoring {}: {why}", path.display());
+        note!("omarepos: ignoring {}: {why}", path.display());
         Self { load_error: Some(why_unusable(path, why)), ..Self::default() }
     }
 

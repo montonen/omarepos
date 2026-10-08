@@ -1040,6 +1040,18 @@ impl Ui {
         let (rx, reports) = scan::spawn(roots, extras, depth);
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
+            // Whatever becomes of this future, the scan it stands for is over
+            // when it is, unless a newer scan has taken over meanwhile.
+            let _over = OnDrop({
+                let ui = Rc::clone(&ui);
+                move || {
+                    if ui.generation.get() == generation && ui.scanning.replace(false) {
+                        ui.spinner.stop();
+                        ui.spinner.set_visible(ui.refreshing.get());
+                        ui.update_status();
+                    }
+                }
+            });
             // Roots that seed a tag write to the metadata store as repos come
             // in; saving once at the end keeps it to a single write.
             let mut seeded_any = false;
@@ -1593,6 +1605,18 @@ impl Ui {
         }
     }
 
+    /// A fetch, of the fleet or of one repository, has ended. Safe to say
+    /// twice: the future says it when it is done, and again when it goes.
+    fn refresh_is_over(&self) {
+        if !self.refreshing.replace(false) {
+            return;
+        }
+        self.refresh_cancel.borrow_mut().take();
+        self.spinner.stop();
+        self.spinner.set_visible(self.scanning.get());
+        self.update_status();
+    }
+
     /// Call off the pass across the fleet, if one is under way.
     fn cancel_refresh(&self) {
         if let Some(cancel) = self.refresh_cancel.borrow().as_ref() {
@@ -1642,7 +1666,11 @@ impl Ui {
             return;
         }
         let due = match self.last_refresh.get() {
-            Some(last) => now_seconds() - last >= settings.interval().as_secs() as i64,
+            // Saturating: the stamp is read from a file, and a file can say
+            // anything.
+            Some(last) => {
+                now_seconds().saturating_sub(last) >= settings.interval().as_secs() as i64
+            }
             None => true,
         };
         if due {
@@ -1749,6 +1777,10 @@ impl Ui {
 
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
+            let _over = OnDrop({
+                let ui = Rc::clone(&ui);
+                move || ui.refresh_is_over()
+            });
             let mut summary = Summary::default();
             for _ in 0..unseen {
                 summary.add(&refresh::Outcome::Skipped(refresh::Skip::Unseen));
@@ -1781,22 +1813,22 @@ impl Ui {
                             ui.reload_graph_pages(&report.path);
                         }
                         match &report.outcome {
-                            refresh::Outcome::Failed(err) => eprintln!(
+                            refresh::Outcome::Failed(err) => note!(
                                 "omarepos: {} failed: {err} ({})",
                                 report.name,
                                 report.path.display()
                             ),
-                            refresh::Outcome::Refused(why) => eprintln!(
+                            refresh::Outcome::Refused(why) => note!(
                                 "omarepos: {} fetched but not updated: {why} ({})",
                                 report.name,
                                 report.path.display()
                             ),
-                            refresh::Outcome::FastForwarded(n) => eprintln!(
+                            refresh::Outcome::FastForwarded(n) => note!(
                                 "omarepos: {} fast-forwarded {n} commits ({})",
                                 report.name,
                                 report.path.display()
                             ),
-                            refresh::Outcome::Skipped(skip) => eprintln!(
+                            refresh::Outcome::Skipped(skip) => note!(
                                 "omarepos: {} left alone: {} ({})",
                                 report.name,
                                 skip.reason(),
@@ -1810,10 +1842,7 @@ impl Ui {
                 }
             }
 
-            ui.refreshing.set(false);
-            ui.spinner.stop();
-            ui.spinner.set_visible(false);
-            ui.refresh_cancel.borrow_mut().take();
+            ui.refresh_is_over();
             // A one-off look is at somebody else's repositories. What it
             // could not fetch, and when it last fetched, is not the fleet's
             // record to keep.
@@ -2541,21 +2570,32 @@ impl Ui {
         );
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
+            // The page that asked is told how it went when this future goes,
+            // whichever way it goes: it is showing "Fetching…" until then.
+            let reached = Rc::new(Cell::new(false));
+            let _over = OnDrop({
+                let ui = Rc::clone(&ui);
+                let reached = Rc::clone(&reached);
+                let mut done = done;
+                move || {
+                    ui.refresh_is_over();
+                    if let Some(done) = done.take() {
+                        done(reached.get());
+                    }
+                }
+            });
             let mut said = format!("{name}: nothing to do");
-            let mut reached = false;
             while let Ok(event) = rx.recv().await {
                 match event {
                     refresh::Event::Repo(report) => {
                         ui.note_outcome(&report);
-                        reached |= report.fetched;
+                        reached.set(reached.get() | report.fetched);
                         said = format!("{name}: {}", ui::outcome_text(&report.outcome));
                     }
                     refresh::Event::Done => break,
                 }
             }
-            ui.refreshing.set(false);
-            ui.spinner.stop();
-            ui.spinner.set_visible(false);
+            ui.refresh_is_over();
             if !ui.cfg.borrow().one_off() {
                 crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
             }
@@ -2564,9 +2604,6 @@ impl Ui {
             // failed changes what the card says without changing the
             // repository. The whole fleet used to be scanned to learn it.
             ui.reread(vec![path], true);
-            if let Some(done) = done {
-                done(reached);
-            }
         });
     }
 
@@ -2717,6 +2754,21 @@ impl Ui {
                     .add_toast(ui::toast(&format!("Copied {path}")));
             }
         }
+    }
+}
+
+/// Runs what it was given when it goes out of scope, however that happens.
+///
+/// glib catches a panic in a future it is running: the program goes on and
+/// the future is simply gone, with whatever its last lines were going to put
+/// right left as it was. For the three futures here those lines are what
+/// says a scan or a fetch is over. Without them the spinner turned for good
+/// and every later fetch was told "already busy".
+struct OnDrop<F: FnMut()>(F);
+
+impl<F: FnMut()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
     }
 }
 

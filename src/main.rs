@@ -1,5 +1,18 @@
 //! omarepos — an Omarchy-styled overview of every git repo on your machine.
 
+/// Say something on stderr, and do not mind if nobody is there to hear it.
+/// `eprintln!` panics when the write fails, and stderr fails for dull reasons:
+/// the terminal the program was started from has been closed, or the pipe it
+/// was started into has stopped reading. Most of these are said from inside a
+/// callback, where a panic ends the program, and in the middle of a pass
+/// across the fleet, where it left the window saying "fetching 1/44" for good.
+macro_rules! note {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 mod commit;
 mod config;
 mod git;
@@ -47,34 +60,36 @@ fn main() -> glib::ExitCode {
     }
     let mut cfg = config::Config::load();
     let mut roots: Vec<String> = Vec::new();
-    let mut args = std::env::args().skip(1);
+    // Lossily: `std::env::args` panics on an argument that is not Unicode,
+    // and a path may be anything.
+    let mut args = std::env::args_os().skip(1).map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                print!("{USAGE}");
+                out(USAGE);
                 return glib::ExitCode::SUCCESS;
             }
             "-V" | "--version" => {
-                println!("omarepos {}", env!("CARGO_PKG_VERSION"));
+                out(concat!("omarepos ", env!("CARGO_PKG_VERSION"), "\n"));
                 return glib::ExitCode::SUCCESS;
             }
             "-r" | "--root" => match args.next() {
                 Some(path) => roots.push(path),
                 None => {
-                    eprintln!("omarepos: --root needs a path");
+                    note!("omarepos: --root needs a path");
                     return glib::ExitCode::FAILURE;
                 }
             },
             "-d" | "--depth" => match args.next().and_then(|n| n.parse::<usize>().ok()) {
                 Some(depth) => cfg.depth_override = Some(depth.max(1)),
                 None => {
-                    eprintln!("omarepos: --depth needs a number");
+                    note!("omarepos: --depth needs a number");
                     return glib::ExitCode::FAILURE;
                 }
             },
             other => {
-                eprintln!("omarepos: unknown argument {other}\n");
-                print!("{USAGE}");
+                note!("omarepos: unknown argument {other}\n");
+                out(USAGE);
                 return glib::ExitCode::FAILURE;
             }
         }
@@ -145,12 +160,19 @@ fn main() -> glib::ExitCode {
     // what it read from the config file are not what the user is about to
     // look at.
     if app.register(gtk::gio::Cancellable::NONE).is_ok() && app.is_remote() {
-        eprintln!("omarepos: already running; that window has been brought forward");
+        note!("omarepos: already running; that window has been brought forward");
     }
 
     // GTK's own argument parsing would choke on the flags handled above.
     let argv: [&str; 0] = [];
     app.run_with_args(&argv)
+}
+
+/// Standard output, for the two things asked for there, written without
+/// minding a reader that has gone (`omarepos --help | head -1`).
+fn out(text: &str) {
+    use std::io::Write as _;
+    let _ = write!(std::io::stdout(), "{text}");
 }
 
 /// Whether the file this process was started from has since been replaced,

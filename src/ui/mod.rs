@@ -262,7 +262,7 @@ pub fn open_folder(dir: &Path) {
         &uri,
         None::<&gtk::gio::AppLaunchContext>,
     ) {
-        eprintln!("omarepos: could not open {uri}: {err}");
+        note!("omarepos: could not open {uri}: {err}");
     }
 }
 
