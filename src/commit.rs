@@ -239,18 +239,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         if cancel.stopped() {
             return Err("cancelled".into());
         }
-        let binary = delta.new_file().is_binary() || delta.old_file().is_binary();
-        let (adds, dels) = if binary {
-            (0, 0)
-        } else {
-            match Patch::from_diff(&diff, index) {
-                Ok(Some(patch)) => {
-                    let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
-                    (adds, dels)
-                }
-                _ => (0, 0),
-            }
-        };
+        let (adds, dels, binary) = measure(&diff, index);
         insertions += adds;
         deletions += dels;
 
@@ -433,6 +422,11 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
     // way. Stable, so the order within each kind is kept.
     files.sort_by_key(|f| !f.group.blocks_update());
     files.truncate(MAX_FILES);
+    if let Some(workdir) = repo.workdir() {
+        for file in files.iter_mut().filter(|file| file.group == Group::Untracked) {
+            file.binary = looks_binary(&workdir.join(&file.path));
+        }
+    }
 
     Ok(Detail {
         id: String::new(),
@@ -451,6 +445,43 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         deletions,
         counts,
     })
+}
+
+/// One delta's added and removed lines, and whether the file is binary.
+///
+/// libgit2 finds out that a file is binary while it builds the patch, and
+/// marks the delta then. The flag used to be read one statement before the
+/// patch was built, so it was false for every file: the list never said
+/// "binary", and an image was a row with a status letter and an empty cell,
+/// which is also what a file that was only renamed looks like.
+fn measure(diff: &Diff<'_>, index: usize) -> (usize, usize, bool) {
+    let patch = Patch::from_diff(diff, index);
+    let binary = diff.get_delta(index).is_some_and(|delta| {
+        delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary()
+    });
+    match patch {
+        Ok(Some(patch)) if !binary => {
+            let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
+            (adds, dels, false)
+        }
+        _ => (0, 0, binary),
+    }
+}
+
+/// Whether a file in the working tree is binary, by the rule git and libgit2
+/// share: a NUL among its first 8000 bytes. For untracked files, which are
+/// listed without a patch being built. Only a regular file is opened: a
+/// symbolic link is not followed to whatever it names, which may be a pipe
+/// that never answers.
+fn looks_binary(path: &Path) -> bool {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return false;
+    }
+    let mut start = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(8000).read_to_end(&mut start))
+        .is_ok_and(|_| start.contains(&0))
 }
 
 /// Turn a diff's deltas into file changes, assigning each to a group. The group
@@ -475,19 +506,15 @@ fn collect(
             git2::Delta::Conflicted => Group::Conflicted,
             _ => default_group,
         };
-        let binary = delta.new_file().is_binary() || delta.old_file().is_binary();
-        let (adds, dels) = if binary || group == Group::Untracked {
+        let (adds, dels, binary) = if group == Group::Untracked {
             // An untracked file has nothing to diff against; counting its whole
-            // length as additions would drown the totals.
-            (0, 0)
+            // length as additions would drown the totals. Nor is it read here
+            // to see whether it is binary: there can be thousands of them and
+            // the list keeps a few hundred. The ones it keeps are looked at
+            // once the cap has fallen.
+            (0, 0, false)
         } else {
-            match Patch::from_diff(diff, index) {
-                Ok(Some(patch)) => {
-                    let (_, adds, dels) = patch.line_stats().unwrap_or((0, 0, 0));
-                    (adds, dels)
-                }
-                _ => (0, 0),
-            }
+            measure(diff, index)
         };
         *insertions += adds;
         *deletions += dels;
@@ -1281,6 +1308,43 @@ mod tests {
         assert!(diff.truncated);
         let total: usize = diff.lines.iter().map(|line| line.text.len()).sum();
         assert!(total <= MAX_BYTES + MAX_LINE_BYTES, "{total} bytes reached the view");
+    }
+
+    // ---- the list and the diff beside it say the same thing ----------------
+
+    /// The row said nothing at all for an image: a status letter and an empty
+    /// cell, the same as a file that was only renamed.
+    #[test]
+    fn a_binary_file_says_so_in_the_list_and_not_only_in_the_diff() {
+        let _guard = isolate();
+        let dir = scratch("cm-binary");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "notes.txt", "one\n", "first");
+        write(&dir.join("logo.png"), "\u{89}PNG\0\0\0one\0\n");
+        write(&dir.join("notes.txt"), "one\ntwo\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "a logo"]);
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        assert!(git(&dir, &["show", "--numstat", "--format="]).contains("-\t-\tlogo.png"), "git calls it binary");
+
+        let listed = load(&dir, &head, &Cancel::default()).unwrap();
+        let rows: Vec<(&str, bool)> = listed.files.iter().map(|f| (f.path.as_str(), f.binary)).collect();
+        assert_eq!(rows, vec![("logo.png", true), ("notes.txt", false)]);
+        assert_eq!((listed.insertions, listed.deletions), (1, 0));
+
+        // The working tree has three ways to hold one: staged, edited, new.
+        write(&dir.join("logo.png"), "\u{89}PNG\0\0\0two\0\n");
+        write(&dir.join("staged.bin"), "\0\0staged\0");
+        git(&dir, &["add", "staged.bin"]);
+        write(&dir.join("new.bin"), "\0\0untracked\0");
+        write(&dir.join("new.txt"), "text\n");
+
+        let working = load_working(&dir, &Cancel::default()).unwrap();
+        let binary = |path: &str| working.files.iter().find(|f| f.path == path).map(|f| f.binary);
+        assert_eq!(binary("logo.png"), Some(true), "modified");
+        assert_eq!(binary("staged.bin"), Some(true), "staged");
+        assert_eq!(binary("new.bin"), Some(true), "untracked");
+        assert_eq!(binary("new.txt"), Some(false));
     }
 
     // ---- the commit box: nothing it cannot finish ---------------------------
