@@ -43,6 +43,17 @@ struct RawPalette {
     magenta: Option<String>,
 }
 
+/// Whether `value` is a colour this module can use: `#` and three or six hex
+/// digits. The test used to be the length alone, and a length counts bytes:
+/// `#fff` and a zero-width space pasted in from a web page is seven of them,
+/// and so are `#zzzzzz` and `#;}*{x;`. Each went into the stylesheet as
+/// written, and the first went on to `Palette::rgb`.
+fn is_hex(value: &str) -> bool {
+    matches!(value.len(), 4 | 7)
+        && value.starts_with('#')
+        && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// A fully resolved palette: no optionals left for the stylesheet to worry about.
 #[derive(Debug, Clone)]
 pub struct Palette {
@@ -107,7 +118,7 @@ impl Palette {
             value
                 .as_deref()
                 .map(str::trim)
-                .filter(|v| v.starts_with('#') && (v.len() == 7 || v.len() == 4))
+                .filter(|v| is_hex(v))
                 .unwrap_or(default)
                 .to_string()
         };
@@ -133,25 +144,24 @@ impl Palette {
         }
     }
 
-    /// Parsed `(r, g, b)` in 0.0..=1.0, for cairo drawing.
+    /// Parsed `(r, g, b)` in 0.0..=1.0, for cairo drawing. A digit that is not
+    /// a hex digit counts as zero, and anything that is not three or six of
+    /// them is black.
+    ///
+    /// It reads bytes and never slices the `str`. A slice that lands inside a
+    /// character panics, the three-digit branch counted characters where the
+    /// length had counted bytes, and this is called from GTK callbacks, which
+    /// a panic cannot unwind through: one non-ASCII character in a theme's
+    /// colour closed the application when a commit graph was opened.
     pub fn rgb(hex: &str) -> (f64, f64, f64) {
-        let h = hex.trim_start_matches('#');
-        let expand = |c: u8| -> u8 { (c << 4) | c };
-        let bytes: Vec<u8> = match h.len() {
-            3 => h
-                .chars()
-                .map(|c| expand(c.to_digit(16).unwrap_or(0) as u8))
-                .collect(),
-            6 => (0..3)
-                .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap_or(0))
-                .collect(),
-            _ => vec![0, 0, 0],
+        let h = hex.trim_start_matches('#').as_bytes();
+        let digit = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+        let [r, g, b] = match h.len() {
+            3 => [h[0], h[1], h[2]].map(|c| digit(c) * 17),
+            6 => [0, 2, 4].map(|i| (digit(h[i]) << 4) | digit(h[i + 1])),
+            _ => [0, 0, 0],
         };
-        (
-            bytes[0] as f64 / 255.0,
-            bytes[1] as f64 / 255.0,
-            bytes[2] as f64 / 255.0,
-        )
+        (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
     }
 
     /// The GTK stylesheet for this palette.
@@ -632,5 +642,63 @@ popover.menu contents, popover contents {{
             cyan = p.cyan,
             magenta = p.magenta,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    /// Put a theme where `Palette::load` looks for the active one. Only under
+    /// `isolate()`: the directory is emptied first, and without the fake state
+    /// home that would be the real one.
+    fn install(colors: &str) -> PathBuf {
+        let dir = state_dir();
+        assert!(dir.starts_with(base()), "isolate() comes first");
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir.join("theme/colors.toml"), colors);
+        dir
+    }
+
+    /// A colour was accepted on its length in bytes and a leading `#`. A
+    /// zero-width space after `#fff` makes seven bytes, an accented letter
+    /// and a digit make four, and neither is a colour; nor is a value that
+    /// closes the declaration it is written into.
+    #[test]
+    fn a_colour_that_is_not_hex_digits_is_not_taken_from_a_theme() {
+        let _guard = isolate();
+        install(
+            "background = \"#fff\u{200b}\"\n\
+             foreground = \"#é1\"\n\
+             accent = \"#;}*{x;\"\n\
+             red = \"#zzzzzz\"\n\
+             green = \" #40A02B \"\n\
+             cyan = \"#1ab\"\n",
+        );
+
+        let palette = Palette::load();
+        let builtin = Palette::fallback();
+        assert_eq!(palette.bg, builtin.bg);
+        assert_eq!(palette.fg, builtin.fg);
+        assert_eq!(palette.accent, builtin.accent);
+        assert_eq!(palette.red, builtin.red);
+        assert_eq!(palette.green, "#40A02B", "a colour with spaces round it is still one");
+        assert_eq!(palette.cyan, "#1ab");
+        assert!(!palette.stylesheet().contains("}*{"));
+    }
+
+    /// The first three of these panicked: two on a slice that ended inside a
+    /// character, one on an index past the two channels it had parsed.
+    #[test]
+    fn rgb_takes_any_string_without_panicking() {
+        for odd in ["#fff\u{200b}", "#é1", "#€", "é", "#", "", "#12345", "#zzzzzz"] {
+            let (r, g, b) = Palette::rgb(odd);
+            assert!([r, g, b].iter().all(|v| (0.0..=1.0).contains(v)), "{odd:?}");
+        }
+
+        assert_eq!(Palette::rgb("#0a2540"), (10.0 / 255.0, 37.0 / 255.0, 64.0 / 255.0));
+        assert_eq!(Palette::rgb("0A2540"), Palette::rgb("#0a2540"));
+        assert_eq!(Palette::rgb("#fa0"), Palette::rgb("#ffaa00"));
     }
 }
