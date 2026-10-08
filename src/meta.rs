@@ -20,12 +20,12 @@ pub struct RepoMeta {
     #[serde(rename = "seeded", skip_serializing_if = "Vec::is_empty")]
     pub seeded_legacy: Vec<String>,
     /// Roots, by the same key as `seeded_by`, whose tag was already on the
-    /// repository when they first asked for it: typed by hand, or put there by
-    /// another root. Such a root has a record like any other, so that deleting
-    /// the tag still sticks, but the tag is not its own to take away again.
-    /// Without this a root given the name of a hand-made tag removed that tag
-    /// when it was cleared or renamed. Ahead of `seeded_by` because the file
-    /// wants plain values before tables.
+    /// repository when they asked for it, typed there by hand. Such a root has
+    /// a record like any other, so that deleting the tag still sticks, but the
+    /// tag is not its own to take away again. Without this a root given the
+    /// name of a hand-made tag removed that tag when it was cleared or
+    /// renamed. Ahead of `seeded_by` because the file wants plain values
+    /// before tables.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub adopted: BTreeSet<String>,
     /// The tag each root applied, keyed by the root's absolute path. Keyed
