@@ -25,6 +25,26 @@
 //!   just wrote. On a pass across the whole fleet, where nobody chose the
 //!   repository, hooks and the other commands a repository's own config can
 //!   name are switched off; see [`Pass`].
+//!
+//! "The only write" is about the working tree and the branch. Three other
+//! things in a repository are touched by the two commands this runs, and the
+//! review found each of them described as not happening:
+//!
+//! - A fetch moves the remote-tracking branches, `origin/*`. That is what it
+//!   is for, and it is not nothing: `git push --force-with-lease` with no
+//!   value compares the remote against exactly those refs, so after a pass it
+//!   no longer protects a commit somebody pushed since the user last looked.
+//!   The pass has seen it on their behalf. git-push(1) says the same of
+//!   anything that fetches in the background, and
+//!   `push.useForceIfIncludes = true` restores the check. It is not fixed
+//!   here: fetching to somewhere else (`--prefetch`) would leave the cards and
+//!   the fast-forward with nothing to read.
+//! - A fetch rewrites `FETCH_HEAD`, and goes on into submodules. Both are
+//!   switched off; see [`FETCH`].
+//! - A fast-forward sets `ORIG_HEAD` to where the branch was, as any `git
+//!   merge` does, and so does an attempt git refuses. There is no switch for
+//!   it. After an update it is what makes `git reset --hard ORIG_HEAD` undo
+//!   the update, so it is left as git writes it rather than put back.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -177,6 +197,28 @@ impl Pass {
     }
 }
 
+/// The fetch, and the two things a plain `git fetch` does besides fetching.
+///
+/// `--no-write-fetch-head`: a fetch rewrites `.git/FETCH_HEAD`, and that file
+/// is the user's. `git fetch origin pull/42/head` followed by `git checkout
+/// FETCH_HEAD` is how a pull request gets looked at; a pass landing between
+/// the two made the second command check out the tip of the main branch
+/// instead, without a word. Nothing here reads the file, so nothing here
+/// writes it. git has had the switch since 2.29, for callers like this one.
+///
+/// `--no-recurse-submodules`: when a fetch brings in a commit that moves a
+/// submodule's pointer, git goes on to fetch inside the submodule, from the
+/// submodule's own remote. That is a second repository contacted and written
+/// to, which the README says does not happen, and it made the submodule's
+/// remote this repository's problem: one that had moved away failed the fetch
+/// of a repository that had itself fetched fine.
+const FETCH: [&str; 4] = [
+    "fetch",
+    "--quiet",
+    "--no-write-fetch-head",
+    "--no-recurse-submodules",
+];
+
 /// The fast-forward, and nothing but.
 ///
 /// `--no-overwrite-ignore`: without it git replaces an ignored file that is in
@@ -274,7 +316,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(skip));
     }
 
-    if let Err(err) = options.pass.git(path, &["fetch", "--quiet"], options.timeout) {
+    if let Err(err) = options.pass.git(path, &FETCH, options.timeout) {
         return report(Outcome::Failed(err));
     }
     fetched.set(true);
@@ -846,5 +888,104 @@ mod tests {
             assert!(matches!(got, Outcome::Failed(_)), "{pass:?}: {got:?}");
             assert_eq!(marker.exists(), runs, "{pass:?}");
         }
+    }
+
+    // ---- what a fetch leaves alone ----------------------------------------
+
+    /// `git fetch origin pull/42/head`, then `git checkout FETCH_HEAD`, is how
+    /// a pull request is looked at. A pass that lands between the two must not
+    /// change what the second one checks out.
+    #[test]
+    fn a_fetch_leaves_fetch_head_naming_what_the_user_fetched() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let f = fleet(&format!("rf-fetch-head-{pass:?}"));
+            git(&f.seed, &["checkout", "-q", "-b", "pr-42"]);
+            commit_file(&f.seed, "pr.txt", "under review\n", "PR 42");
+            git(&f.seed, &["push", "-q", "origin", "pr-42"]);
+            git(&f.seed, &["checkout", "-q", "main"]);
+            git(&f.work, &["fetch", "-q", "origin", "refs/heads/pr-42"]);
+            let under_review = git(&f.work, &["rev-parse", "FETCH_HEAD"]);
+            assert_eq!(under_review, f.remote_ref("refs/heads/pr-42"));
+            f.remote_moves(1);
+
+            let got = refresh_one(&f.work, &options(false, pass)).outcome;
+
+            assert!(matches!(got, Outcome::Behind(1)), "{pass:?}: {got:?}");
+            assert_eq!(git(&f.work, &["rev-parse", "FETCH_HEAD"]), under_review, "{pass:?}");
+        }
+    }
+
+    /// A repository with a library vendored as a submodule at `vendor/lib`,
+    /// checked out in the clone under test.
+    struct Vendored {
+        f: Fleet,
+        lib_seed: PathBuf,
+    }
+
+    fn vendored(name: &str) -> Vendored {
+        let f = fleet(name);
+        let lib = f.root.join("lib.git");
+        let lib_seed = f.root.join("lib-seed");
+        git(&f.root, &["init", "-q", "--bare", "-b", "main", "lib.git"]);
+        git(&f.root, &["clone", "-q", lib.to_str().unwrap(), "lib-seed"]);
+        commit_file(&lib_seed, "lib.txt", "v1\n", "library v1");
+        git(&lib_seed, &["push", "-q", "-u", "origin", "main"]);
+        git(&f.seed, &["submodule", "--quiet", "add", lib.to_str().unwrap(), "vendor/lib"]);
+        git(&f.seed, &["commit", "-q", "-m", "vendor the library"]);
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["pull", "-q", "--ff-only"]);
+        git(&f.work, &["submodule", "--quiet", "update", "--init"]);
+        Vendored { f, lib_seed }
+    }
+
+    impl Vendored {
+        /// The library gets a commit and upstream moves its pointer to it.
+        /// Returns the library's new commit.
+        fn pointer_moves(&self) -> String {
+            commit_file(&self.lib_seed, "lib.txt", "v2\n", "library v2");
+            git(&self.lib_seed, &["push", "-q", "origin", "main"]);
+            self.f.remote_commits("bump the library", |seed| {
+                git(&seed.join("vendor/lib"), &["pull", "-q", "--ff-only"]);
+            });
+            git(&self.lib_seed, &["rev-parse", "HEAD"])
+        }
+
+        fn module(&self) -> PathBuf {
+            self.f.work.join("vendor/lib")
+        }
+    }
+
+    /// Left to its default, a fetch that brings in a commit moving a submodule
+    /// pointer goes on to fetch inside the submodule, from the submodule's own
+    /// remote.
+    #[test]
+    fn a_fetch_does_not_go_on_into_a_submodule() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let v = vendored(&format!("rf-submodule-fetch-{pass:?}"));
+            let arrived = v.pointer_moves();
+            let got = refresh_one(&v.f.work, &options(false, pass)).outcome;
+            assert!(matches!(got, Outcome::Behind(1)), "{pass:?}: {got:?}");
+            let (has, _) = try_git(&v.module(), &["cat-file", "-e", &arrived]);
+            assert!(!has, "{pass:?}: the fetch went on into the submodule");
+        }
+    }
+
+    /// Going on into the submodule also made its remote this repository's
+    /// problem: one that had moved or gone away failed the fetch of a
+    /// repository that had itself fetched without trouble.
+    #[test]
+    fn a_submodule_that_cannot_be_fetched_does_not_fail_the_repository() {
+        let _guard = isolate();
+        let v = vendored("rf-submodule-unreachable");
+        let gone = v.f.root.join("moved-away.git");
+        git(&v.module(), &["remote", "set-url", "origin", gone.to_str().unwrap()]);
+        v.pointer_moves();
+
+        let report = refresh_one(&v.f.work, &options(false, Pass::Fleet));
+
+        assert!(matches!(report.outcome, Outcome::Behind(1)), "{:?}", report.outcome);
+        assert!(report.fetched);
     }
 }
