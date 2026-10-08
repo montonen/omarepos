@@ -1042,6 +1042,9 @@ fn push(repo: &Path, armed: &PushPlan) -> Result<String, PushError> {
         }
         Err(why) => return Err(PushError::Stale(format!("{why} Nothing was pushed."))),
     }
+    // The plan above is libgit2's reading of this directory. The push is
+    // git's, and git can be told to look elsewhere.
+    acts_here(repo).map_err(PushError::Git)?;
 
     let refspec = format!("refs/heads/{}:{}", armed.branch, armed.destination);
     let mut args = vec!["push", "--no-follow-tags"];
@@ -1135,6 +1138,89 @@ pub fn tree(files: &[FileChange]) -> Vec<Node> {
 /// be a test suite.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// The variables through which whatever started the application can send git
+/// to another repository than the one it is run in.
+const REDIRECTS: [&str; 5] =
+    ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"];
+
+/// Make sure a git run in `dir` would act on the repository in `dir`.
+///
+/// Every write here names its repository by the directory git is run in, and
+/// git lets its environment outrank that. libgit2, which reads everything on
+/// screen and makes every check before a write, does not look at the
+/// environment at all. So with `GIT_DIR` inherited from wherever the
+/// application was started (a shell inside a linked worktree's `!` alias or
+/// hook, a dotfiles wrapper, `git --git-dir=… <something that launches this>`),
+/// the pane showed one repository while stage, commit and push went to
+/// another, and said they had worked.
+///
+/// The question is put to git itself, through the runner the write will use,
+/// so that the answer is about what that write would do: a relative
+/// `GIT_INDEX_FILE=.git/index`, which a hook's environment carries, points at
+/// this repository's own index and is let through, and a runner that clears
+/// these variables makes the answer "here" without this function changing.
+/// Nothing is asked when none of them is set, which is every ordinary start.
+fn acts_here(dir: &Path) -> Result<(), String> {
+    let set: Vec<&str> =
+        REDIRECTS.into_iter().filter(|name| std::env::var_os(name).is_some()).collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    let refusal = |what: String| {
+        format!(
+            "omarepos was started with {} set, and git obeys that before the directory it is \
+             run in. {what} Nothing was done. Start omarepos from an environment without {}.",
+            set.join(" and "),
+            if set.len() == 1 { "it" } else { "them" }
+        )
+    };
+
+    let repo = crate::git::open_here(dir)?;
+    let index = repo.index().map_err(|err| err.message().to_string())?;
+    let objects = repo.commondir().join("objects");
+    let here = [Some(repo.path()), repo.workdir(), index.path(), Some(objects.as_path())];
+    let asked = [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--show-toplevel",
+        "--git-path",
+        "index",
+        "--git-path",
+        "objects",
+    ];
+    let said = crate::gitcmd::run(dir, &asked, std::time::Duration::from_secs(5))
+        .map_err(|why| refusal(format!("Asked where it would act, git said: {why}")))?;
+    let there: Vec<&Path> = said.lines().map(Path::new).collect();
+    if there.len() != here.len() {
+        return Err(refusal("git would not say where it would act.".to_string()));
+    }
+    for (there, here) in there.into_iter().zip(here) {
+        let Some(here) = here else { continue };
+        if resolved(there) != resolved(here) {
+            return Err(refusal(format!(
+                "It would act on {} and not on {}.",
+                there.display(),
+                here.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A path with its symbolic links followed, for comparing two spellings of
+/// one place. The last part need not exist: a repository has no index file
+/// until something is staged in it.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(whole) = path.canonicalize() {
+        return whole;
+    }
+    match (path.parent().map(Path::canonicalize), path.file_name()) {
+        (Some(Ok(parent)), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// What a commit was refused for, as a sentence rather than a subprocess error.
 pub fn why_not_commit(path: &Path, staged: usize, message: &str) -> Option<String> {
     if message.trim().is_empty() {
@@ -1196,6 +1282,8 @@ fn conflicted_among(repo: &Path, files: &[String]) -> Option<String> {
 /// conditional includes and not others, and reads neither `author.*` nor the
 /// environment git honours.
 pub fn identity(repo: &Path) -> Result<String, String> {
+    // Asked of another repository, the answer would be that one's.
+    acts_here(repo)?;
     let said = crate::gitcmd::run(repo, &["var", "GIT_AUTHOR_IDENT"], std::time::Duration::from_secs(5))?;
     // "Name <email> 1791399981 +0200": the date is not part of who.
     match said.trim().rsplit_once('>') {
@@ -1232,7 +1320,7 @@ pub fn spawn_write(
         // away. Either would settle a merge by accident: the first commits the
         // conflict markers, the second silently keeps this side and drops the
         // other.
-        if let Err(why) = crate::git::open_here(&repo) {
+        if let Err(why) = crate::git::open_here(&repo).and_then(|_| acts_here(&repo)) {
             let _ = tx.send_blocking(Err(why));
             return;
         }
@@ -1288,7 +1376,7 @@ pub fn spawn_commit(
 ) -> async_channel::Receiver<Result<String, String>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        if let Err(why) = crate::git::open_here(&repo) {
+        if let Err(why) = crate::git::open_here(&repo).and_then(|_| acts_here(&repo)) {
             let _ = tx.send_blocking(Err(why));
             return;
         }
@@ -1488,6 +1576,93 @@ mod tests {
         assert_eq!(identity(&f.work), Ok("Fixture <fixture@example.invalid>".to_string()));
         git(&f.work, &["config", "author.name", "Somebody Else"]);
         assert_eq!(identity(&f.work), Ok("Somebody Else <fixture@example.invalid>".to_string()));
+    }
+
+    // ---- a write lands in the repository on screen, or nowhere ---------------
+
+    /// A variable in this process's environment for as long as the value
+    /// lives, taken out again however the test ends: left behind, it would
+    /// send every later test's git to the wrong repository.
+    struct Inherited(&'static str);
+
+    impl Inherited {
+        fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
+            // SAFETY: under the isolation lock, like every reader of it.
+            unsafe { std::env::set_var(name, value) };
+            Self(name)
+        }
+    }
+
+    impl Drop for Inherited {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
+
+    /// The application started from a shell that has `GIT_DIR` exported: a
+    /// linked worktree's hook or `!` alias, a dotfiles wrapper. libgit2 goes
+    /// on showing the repository asked for; git acts on the one named.
+    ///
+    /// Each write may be refused, or may be made in the repository on screen
+    /// (which is what a runner that clears the variable gives). What it may
+    /// not do is succeed somewhere else.
+    #[test]
+    fn an_inherited_git_dir_does_not_send_a_write_to_another_repository() {
+        let _guard = isolate();
+        let elsewhere = fleet("cm-env-elsewhere");
+        let shown = fleet("cm-env-shown");
+        // Something for a misdirected push and a misdirected commit to take.
+        commit_file(&elsewhere.work, "ahead.txt", "x\n", "unpushed, elsewhere");
+        write(&elsewhere.work.join("theirs.txt"), "theirs\n");
+        git(&elsewhere.work, &["add", "theirs.txt"]);
+        let (their_head, their_remote) = (elsewhere.head(), elsewhere.remote_ref("refs/heads/main"));
+        // And what the pane shows: a file to stage, and a commit to push.
+        commit_file(&shown.work, "mine.txt", "mine\n", "ready");
+        write(&shown.work.join("secret.txt"), "secret\n");
+        write(&shown.work.join("second.txt"), "second\n");
+        git(&shown.work, &["add", "second.txt"]);
+        let armed = plan(&shown).unwrap();
+        let before = shown.head();
+
+        let inherited = Inherited::set("GIT_DIR", elsewhere.work.join(".git").as_os_str());
+        let staged_it = recv(spawn_write(shown.work.clone(), Write::Stage, vec!["secret.txt".to_string()]));
+        let committed = recv(spawn_commit(shown.work.clone(), "second".to_string()));
+        let pushed = push(&shown.work, &armed);
+        let who = identity(&shown.work);
+        drop(inherited);
+
+        // Nothing of the repository on screen reached the other one.
+        assert_eq!(elsewhere.head(), their_head, "the commit was made in another repository");
+        assert_eq!(staged(&elsewhere.work), "theirs.txt", "the file was staged in another repository");
+        assert_eq!(elsewhere.remote_ref("refs/heads/main"), their_remote, "another repository was pushed");
+        // And each answer is true of the one on screen.
+        assert_eq!(staged_it.is_ok(), staged(&shown.work).contains("secret.txt"), "{staged_it:?}");
+        assert_eq!(committed.is_ok(), shown.head() != before, "{committed:?}");
+        assert_eq!(pushed.is_ok(), shown.remote_ref("refs/heads/main") == armed.tip, "{pushed:?}");
+        if let Err(why) = &staged_it {
+            assert!(why.contains("GIT_DIR"), "a refusal has to name what is in the way: {why}");
+        }
+        assert!(who.is_err() || who == Ok("Fixture <fixture@example.invalid>".to_string()), "{who:?}");
+    }
+
+    /// What a `pre-commit` hook's environment carries: the index, by a path
+    /// relative to the work tree. Run in the repository, that is the
+    /// repository's own index, and nothing to refuse.
+    #[test]
+    fn an_inherited_variable_that_points_at_this_repository_is_let_through() {
+        let _guard = isolate();
+        let dir = scratch("cm-env-harmless");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "README.md", "one\n", "first");
+        write(&dir.join("notes.txt"), "x\n");
+
+        let inherited = Inherited::set("GIT_INDEX_FILE", std::ffi::OsStr::new(".git/index"));
+        let staged_it = recv(spawn_write(dir.clone(), Write::Stage, vec!["notes.txt".to_string()]));
+        drop(inherited);
+
+        assert_eq!(staged_it, Ok(()));
+        assert_eq!(staged(&dir), "notes.txt");
     }
 
     // ---- nothing reaches through a redirected work tree --------------------
