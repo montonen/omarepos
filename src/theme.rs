@@ -89,6 +89,7 @@ fn whole(colour: Rgb) -> Rgb {
     (byte(colour.0), byte(colour.1), byte(colour.2))
 }
 
+/// A colour as the stylesheet writes one.
 fn hex(colour: Rgb) -> String {
     let byte = |v: f64| (v * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}", byte(colour.0), byte(colour.1), byte(colour.2))
@@ -370,6 +371,17 @@ window.omarepos headerbar button:hover {{
   background-color: alpha(@om_accent, 0.18);
 }}
 
+/* The reset above also took away the one thing that shows a toggle is on.
+   Adwaita marks a pressed flat button with a background and nothing else,
+   and this stylesheet is loaded at application priority, where it outranks
+   the theme's whatever the selectors say. The needs-attention filter looked
+   the same on and off, and "6 shown" in the status bar was the only sign of
+   why the grid was short. This comes after `:hover`, which weighs the same,
+   so a toggle shows as on while the pointer that pressed it is still there. */
+window.omarepos headerbar button:checked {{
+  background-color: alpha(@om_accent, 0.30);
+}}
+
 .om-title {{
   font-weight: 700;
   letter-spacing: 1px;
@@ -440,9 +452,10 @@ dropdown.om-sort > button {{
 }}
 
 /* A muted theme accent cannot carry the highlight on its own, so once
-   anything is selected the rest of the grid steps back. A little: opacity
-   fades the text along with the card, and these are the cards read next, to
-   choose the second one. At 0.42 no stock theme kept a name at 4.5:1. */
+   anything is selected the rest of the grid steps back. Only a little,
+   because opacity fades the text along with the card, and these are the
+   cards read next, to choose the second one. At 0.42 no stock theme kept a
+   name at 4.5:1. */
 flowbox.om-flow.om-has-selection .om-card:not(.om-selected) {{
   opacity: {stepped_back};
 }}
@@ -465,7 +478,19 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
   color: @om_fg;
 }}
 
-.om-quick-tag {{
+/* The quick-tag toggles live in the header, so each rule is also written at
+   the weight of the header's rules plus the class. As a bare class they lost
+   to the reset there: a chip had no fill until it was on and never a border,
+   and took the header's hover wash for its own.
+
+   The fills are under the tag's name and over the header's colour, and are
+   held to what leaves the name at 4.5:1 there. Two of the three had never
+   been drawn as written, and 16% of the foreground under the pointer would
+   have been 4.28 on rose-pine. The one that was drawn, 40% accent in the
+   card colour on a chip that is on, left the name at 3.16 on everforest;
+   the border says on, now that there is one. */
+.om-quick-tag,
+window.omarepos headerbar button.om-quick-tag {{
   border-radius: 999px;
   padding: 2px 12px;
   font-size: 0.82rem;
@@ -476,12 +501,14 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
   box-shadow: none;
 }}
 
-.om-quick-tag:hover {{
-  background-color: alpha(@om_fg, 0.16);
+.om-quick-tag:hover,
+window.omarepos headerbar button.om-quick-tag:hover {{
+  background-color: alpha(@om_fg, 0.12);
 }}
 
-.om-quick-tag:checked {{
-  background-color: mix(@om_raised, @om_accent, 0.40);
+.om-quick-tag:checked,
+window.omarepos headerbar button.om-quick-tag:checked {{
+  background-color: alpha(@om_accent, 0.18);
   border-color: @om_accent;
   color: @om_fg;
 }}
@@ -808,6 +835,9 @@ mod tests {
     /// what is tested is that no state of the interface takes them under 3:1,
     /// which is where several used to leave them.
     const FLOOR: f64 = 3.0;
+
+    /// What WCAG asks between an icon and what it is drawn on.
+    const ICON: f64 = 3.0;
 
     /// Stock Omarchy palettes as `Palette::load` resolves them, copied here
     /// so that the tests do not depend on what is installed: the one this was
@@ -1206,6 +1236,14 @@ mod tests {
         let mut all = rows(sheet);
         all.push(("followed from a search", over(followed, page)));
         all
+    }
+
+    /// How much a selector weighs when two rules set the same property: its
+    /// classes and pseudo-classes first, then its element names. There are no
+    /// ids in this stylesheet. `:not()` weighs what is inside it.
+    fn weight(selector: &str) -> (usize, usize) {
+        let classes = selector.matches(['.', ':']).count() - selector.matches(":not(").count();
+        (classes, elements(selector).len())
     }
 
     const PILLS: [&str; 6] = ["branch", "clean", "dirty", "ahead", "behind", "danger"];
@@ -1726,5 +1764,76 @@ brown = "#743d1e"
                 "`{selector}` has a font-size of {size}"
             );
         }
+    }
+
+    /// The header's reset for buttons cleared the background of every one of
+    /// them in every state, and a background is all that marks a flat toggle
+    /// as on. The quick-tag chips, which are in the header too, were written
+    /// as bare classes and lost most of their own rules to the same reset.
+    /// Which rule wins is a matter of weight and then of order, so that is
+    /// what is checked.
+    #[test]
+    fn a_toggle_in_the_header_shows_that_it_is_on() {
+        let sheet = Sheet::of(&Palette::fallback());
+        let place = |selector: &str| {
+            sheet
+                .rules
+                .iter()
+                .position(|(written, _, _)| written == selector)
+                .unwrap_or_else(|| panic!("no rule for `{selector}`"))
+        };
+        let button = |state: &str| format!("window.omarepos headerbar button{state}");
+        let chip = |state: &str| format!("window.omarepos headerbar button.om-quick-tag{state}");
+
+        assert_eq!(sheet.colour(&button(""), "background").3, 0.0);
+        assert!(sheet.colour(&button(":checked"), "background-color").3 > 0.0);
+        assert!(weight(&button(":checked")) > weight(&button("")));
+        // On weighs what under-the-pointer weighs, and the pointer is on a
+        // toggle that has just been pressed: the later rule has to be on.
+        assert_eq!(weight(&button(":checked")), weight(&button(":hover")));
+        assert!(place(&button(":checked")) > place(&button(":hover")));
+
+        for state in ["", ":hover", ":checked"] {
+            assert!(weight(&chip(state)) > weight(&button(state)), "a chip{state}");
+            // The class alone says the same, for a chip that is anywhere else.
+            assert_eq!(
+                sheet.value(&format!(".om-quick-tag{state}"), "background-color"),
+                sheet.value(&chip(state), "background-color")
+            );
+        }
+        assert_eq!(weight(&chip(":checked")), weight(&chip(":hover")));
+        assert!(place(&chip(":checked")) > place(&chip(":hover")));
+    }
+
+    /// A chip's fill is under a tag's name, and a header button's is under
+    /// its icon or its label. A chip that was on had 40% accent there, 3.16:1
+    /// for the name on everforest.
+    #[test]
+    fn what_is_on_a_header_button_can_be_read_in_every_state() {
+        let mut names = Measured::new("a tag's name on its chip", AA);
+        let mut labels = Measured::new("a header button's label under the pointer", AA);
+        // The toggles are icons. The one labelled button that is ever "on"
+        // is the Tags menu, for as long as its menu is open in front of it.
+        let mut icons = Measured::new("a header toggle's icon when it is on", ICON);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let bar = sheet.solid("window.omarepos headerbar", "background-color");
+            let on = |rule: &str| over(sheet.colour(rule, "background-color"), bar);
+
+            let chip = "window.omarepos headerbar button.om-quick-tag";
+            let name = sheet.solid(chip, "color");
+            let states = [("off", ""), ("under the pointer", ":hover"), ("on", ":checked")];
+            for (state, pseudo) in states {
+                names.add(&palette, state, ratio(name, on(&format!("{chip}{pseudo}"))));
+            }
+
+            let button = "window.omarepos headerbar button";
+            let ink = sheet.solid(button, "color");
+            labels.add(&palette, "", ratio(ink, on(&format!("{button}:hover"))));
+            icons.add(&palette, "", ratio(ink, on(&format!("{button}:checked"))));
+        }
+        names.check();
+        labels.check();
+        icons.check();
     }
 }
