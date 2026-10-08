@@ -495,19 +495,25 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
   padding: 4px 12px;
 }}
 
-listbox.om-results,
-listbox.om-results > row {{
+/* The CSS node of a GtkListBox is called `list`. These rules were written for
+   `listbox`, a name GTK accepts without a word and matches to nothing, so the
+   commit graph, the file list and the search results were never themed:
+   Adwaita painted them its own grey, or white, over the theme's background,
+   and kept its own colour for the text and icons inside them. */
+list.om-results,
+list.om-results > row {{
   background-color: transparent;
+  color: @om_fg;
 }}
 
-listbox.om-results > row {{
-  padding: 0;
+/* No padding here. A row in the graph or the search results carries `om-row`
+   itself and takes its side padding from that rule, further down, which a
+   padding set on this selector would outrank. */
+list.om-results > row {{
   min-height: 0;
   border-radius: 6px;
 }}
 
-/* The commit you followed a search result to. It has to be findable at a
-   glance in a list of three hundred near-identical rows. */
 .om-detail {{
   background-color: @om_sunken;
   border-top: 1px solid @om_border;
@@ -521,9 +527,12 @@ textview.om-diff text {{
 }}
 
 /* A group whose changes do not block an update steps back from the ones that
-   do — the view is usually being read to answer "what must I clean up". */
-listbox.om-results > row.om-aside {{
-  opacity: 0.70;
+   do — the view is usually being read to answer "what must I clean up". It
+   steps back as far as a card does and no further. The 0.70 written here
+   was never drawn; it would have put the heading at 3.34:1 on rose-pine and
+   the note beside it at 2.72. */
+list.om-results > row.om-aside {{
+  opacity: {stepped_back};
 }}
 
 .om-commit {{
@@ -565,16 +574,22 @@ paned > separator {{
   min-height: 2px;
 }}
 
-listbox.om-results > row:selected {{
+list.om-results > row:selected {{
   background-color: alpha(@om_fg, 0.10);
 }}
 
-listbox.om-results > row.om-target {{
-  background-color: mix(@om_raised, @om_accent, 0.38);
+/* The commit you followed a search result to. It has to be findable at a
+   glance in a list of three hundred near-identical rows, and then it has to
+   be read. The bar down its edge is what finds it; the tint goes under its
+   text, so it is a light one, mixed into the background the row lies on. At
+   0.38 of the accent, as first written and never drawn, the summary of that
+   one commit would have been at 3.26:1 on everforest and its sha at 2.26. */
+list.om-results > row.om-target {{
+  background-color: mix(@om_bg, @om_accent, 0.14);
   box-shadow: inset 3px 0 0 0 @om_accent;
 }}
 
-listbox.om-results > row:focus-visible {{
+list.om-results > row:focus-visible {{
   outline: 2px solid @om_fg;
   outline-offset: -2px;
 }}
@@ -586,6 +601,13 @@ listbox.om-results > row:focus-visible {{
 
 .om-row:hover {{
   background-color: alpha(@om_fg, 0.07);
+}}
+
+/* In the file list `om-row` is on the line inside the row and not on the row,
+   so there the pointer would light a selected row a second time, on top of
+   the selection. A selected row in the graph does not change under it. */
+list.om-results > row:selected .om-row:hover {{
+  background-color: transparent;
 }}
 
 .om-sha {{
@@ -1081,6 +1103,37 @@ mod tests {
     /// The rule that steps a card back once another is ticked.
     const STEPS_BACK: &str = "flowbox.om-flow.om-has-selection .om-card:not(.om-selected)";
 
+    /// Every background a row of the commit graph, the file list or the
+    /// search results can have, over the page the list lies on.
+    fn rows(sheet: &Sheet) -> Vec<(&'static str, Solid)> {
+        let page = sheet.solid("scrolledwindow.om-grid", "background-color");
+        let of = |rule: &str| sheet.colour(rule, "background-color");
+        let pointer = of(".om-row:hover");
+        let selected = over(of("list.om-results > row:selected"), page);
+        vec![
+            ("at rest", over(of("list.om-results > row"), over(of("list.om-results"), page))),
+            ("under the pointer", over(pointer, page)),
+            ("selected", selected),
+            // In the file list the pointer is over the line inside the row,
+            // which has a background of its own to lay on the selection.
+            (
+                "selected, under the pointer",
+                over(of("list.om-results > row:selected .om-row:hover"), selected),
+            ),
+            ("followed from a search", over(of("list.om-results > row.om-target"), page)),
+        ]
+    }
+
+    /// The element names in a selector: `list` and `row` in
+    /// `list.om-results > row:selected`.
+    fn elements(selector: &str) -> Vec<&str> {
+        selector
+            .split([' ', '>'])
+            .filter_map(|compound| compound.split(['.', ':']).next())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
     /// Put a theme where `Palette::load` looks for the active one. Only under
     /// `isolate()`: the directory is emptied first, and without the fake state
     /// home that would be the real one.
@@ -1364,5 +1417,81 @@ brown = "#743d1e"
         }
         names.check();
         muted.check();
+    }
+
+    /// Seven selectors began with `listbox`. A GtkListBox's node is `list`,
+    /// GTK takes an element name it has never heard of without complaint,
+    /// and so the rules for three of the four main views applied to nothing
+    /// for as long as they existed. The names below are the ones GTK's
+    /// documentation gives the widgets this stylesheet addresses.
+    #[test]
+    fn every_element_a_selector_names_is_one_gtk_has() {
+        const NODES: [&str; 18] = [
+            "window", "headerbar", "button", "entry", "dropdown", "popover", "contents",
+            "flowbox", "flowboxchild", "scrolledwindow", "checkbutton", "check", "list", "row",
+            "textview", "text", "paned", "separator",
+        ];
+        let sheet = Sheet::of(&Palette::fallback());
+        for (selector, _, _) in &sheet.rules {
+            for element in elements(selector) {
+                assert!(NODES.contains(&element), "`{element}` in `{selector}`");
+            }
+        }
+
+        // The lists show the page under them, and take the theme's colour
+        // for whatever in them has no colour of its own: Adwaita's rule for
+        // `list` sets both.
+        assert_eq!(sheet.colour("list.om-results", "background-color").3, 0.0);
+        assert_eq!(
+            sheet.solid("list.om-results", "color"),
+            sheet.solid("window.omarepos", "color")
+        );
+
+        // The rules for a row of these lists outrank `.om-row`, which is on
+        // the row itself in the graph and the search results and gives it
+        // its 6px at either end. They must leave padding to it.
+        assert_eq!(sheet.value(".om-row", "padding"), "0 6px");
+        for (selector, property, _) in &sheet.rules {
+            assert!(
+                !(selector.starts_with("list.om-results > row") && property == "padding"),
+                "`{selector}` sets a padding"
+            );
+        }
+    }
+
+    /// With the list rules matching at last, a row gets the backgrounds they
+    /// describe. The one written for the commit a search led to mixed 38% of
+    /// the accent under that commit's text.
+    #[test]
+    fn the_text_in_a_row_reads_whatever_state_the_row_is_in() {
+        let mut summaries = Measured::new("a commit's summary in its row", AA);
+        let mut muted = Measured::new("the sha, author and date in a row", FLOOR);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            for (state, row) in rows(&sheet) {
+                summaries.add(&palette, state, ratio(sheet.solid(".om-summary", "color"), row));
+                for rule in [".om-sha", ".om-meta"] {
+                    muted.add(&palette, state, ratio(sheet.solid(rule, "color"), row));
+                }
+            }
+        }
+        summaries.check();
+        muted.check();
+    }
+
+    #[test]
+    fn the_heading_of_a_group_set_aside_can_still_be_read() {
+        let mut headings = Measured::new("the heading of a group set aside", AA);
+        let mut notes = Measured::new("the note beside it", FLOOR);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let page = sheet.solid("scrolledwindow.om-grid", "background-color");
+            let opacity = sheet.number("list.om-results > row.om-aside", "opacity");
+            let on_it = |rule: &str| ratio(faded(sheet.solid(rule, "color"), opacity, page), page);
+            headings.add(&palette, "", on_it(".om-name"));
+            notes.add(&palette, "", on_it(".om-meta"));
+        }
+        headings.check();
+        notes.check();
     }
 }
