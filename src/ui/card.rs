@@ -133,6 +133,10 @@ pub fn build(
             .max_width_chars(34)
             .build();
         label.add_css_class("om-meta");
+        // The line gives way in the middle; the page it stands for does not.
+        if let Some(page) = &info.web {
+            label.set_tooltip_text(Some(&format!("o opens {page}")));
+        }
         card.append(&label);
     }
 
@@ -150,15 +154,24 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
     let popover = gtk::Popover::builder().has_arrow(false).build();
     let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
-    let items = [
+    // Offered only where there is a page to open, and saying where it is:
+    // the site by name, the address itself in the tooltip.
+    let on_the_web = info
+        .web
+        .as_deref()
+        .map(|page| format!("Open on {}", crate::git::web_site(page)));
+    let mut items = vec![
         ("Commit graph", Action::CommitGraph),
         ("Contributions", Action::Contributions),
         ("Tags…", Action::EditTags),
         ("Open in terminal", Action::OpenTerminal),
         ("Open in editor", Action::OpenEditor),
         ("Open folder", Action::OpenFolder),
-        ("Copy path", Action::CopyPath),
     ];
+    if let Some(label) = &on_the_web {
+        items.push((label.as_str(), Action::OpenWeb));
+    }
+    items.push(("Copy path", Action::CopyPath));
     for (label, action) in items {
         let button = gtk::Button::builder()
             .label(label)
@@ -166,6 +179,9 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
             .build();
         if let Some(child) = button.child().and_downcast::<gtk::Label>() {
             child.set_xalign(0.0);
+        }
+        if matches!(action, Action::OpenWeb) {
+            button.set_tooltip_text(info.web.as_deref());
         }
         let info = info.clone();
         let on_action = Rc::clone(&on_action);

@@ -17,6 +17,13 @@
 use adw::prelude::*;
 use gtk::gio;
 
+/// Whether this window is being driven by a script rather than a person.
+/// What would leave the window (a browser being opened) asks, and says what
+/// it would have done instead of doing it.
+pub fn driven() -> bool {
+    std::env::var_os("OMAREPOS_DUMP").is_some()
+}
+
 pub fn install(window: &adw::ApplicationWindow) {
     let Some(path) = std::env::var_os("OMAREPOS_DUMP") else { return };
     // `dump` writes what is on screen; `dump-all` everything there is, with

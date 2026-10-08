@@ -13,7 +13,8 @@
 #     scripts/walk/walk.sh quick      one repository instead of eight
 #
 # Needs Hyprland (hyprctl), python3, gdbus and busctl. Exits non-zero when
-# the program stopped anywhere, having printed where and the panic.
+# the program stopped anywhere, having printed where and the panic, or did
+# not say what it was expected to.
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(dirname "$(dirname "$HERE")")
 export OMAREPOS_WALK_DIR=${OMAREPOS_WALK_DIR:-$REPO/target/walk}
@@ -24,7 +25,7 @@ QUICK=$1
 "$HERE/fixtures.sh" || exit 2
 
 X() { python3 "$HERE/drive.py" "$@" 2>&1 | grep -v "^$"; }
-STEPS=0; DEATHS=0
+STEPS=0; DEATHS=0; WRONG=0
 config() { printf 'roots = [\n    { path = "%s/fleet", tag = "JM" },\n]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"; }
 boot() { config; X start >/dev/null; }
 step() { # what it is, then the commands
@@ -38,6 +39,11 @@ step() { # what it is, then the commands
     cp "$W/app.log" "$W/stopped-$DEATHS.log"; boot
   fi
 }
+# How often the program has said it would open the one page there is among
+# the fixtures, had it been allowed to leave the window; and whether the step
+# just taken added as many to that as it should have.
+asked() { grep -cF "would open https://git.example.invalid/acme/widgets" "$W/app.log"; }
+asks() { [ "$(asked)" = $(( $1 + $2 )) ] || { WRONG=$((WRONG+1)); echo "WRONG: $3"; }; }
 open_repo() { X keys Escape Escape Escape ctrl+f; X type "$1"; sleep 0.35; X keys Return; sleep 1.3; }
 # A tag file giving the first five repositories these tags, in turn.
 tags() { : > "$W/config/omarepos/repos.toml"; local i=0 n; n=$(echo "$1" | wc -w)
@@ -62,6 +68,12 @@ step "close it" "X keys Escape"
 step "slash to filter" "X keys ctrl+l slash Escape"
 step "l with no terminal" "X keys ctrl+l l"
 step "e with no terminal" "X keys e"
+N=$(asked); step "o where the remote is a directory" "X keys ctrl+f; X type alpha; sleep 0.4; X keys ctrl+l o; sleep 0.3; X keys Escape Escape"
+asks $N 0 "o opened a page for a remote that is a directory"
+N=$(asked); step "o where there is a page" "X keys ctrl+f; X type widgets; sleep 0.4; X keys ctrl+l o; sleep 0.3; X keys Escape Escape"
+asks $N 1 "o on a card did not ask for its page"
+N=$(asked); step "card menu: open on the web" 'X press "!Open on git.example.invalid"'
+asks $N 1 "the card's menu did not ask for the page"
 WAIT=2 step "f on a card" "X keys ctrl+l f"
 WAIT=2 step "p on a card" "X keys ctrl+l p"
 WAIT=4 step "refresh the fleet" "X keys ctrl+shift+r"
@@ -89,6 +101,7 @@ for repo in $REPOS; do
   step "$repo: reload" "X keys ctrl+r; sleep 0.9"
   WAIT=2 step "$repo: fetch" "X pick 0:1; X keys f"
   WAIT=2 step "$repo: update" "X pick 0:1; X keys p"
+  step "$repo: o" "X pick 0:1; X keys o"
   step "$repo: shortcuts" "X keys shift+question; sleep 0.3; X keys Escape"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
   step "$repo: 14 days" "X choose 1; sleep 1"
@@ -97,6 +110,14 @@ for repo in $REPOS; do
   step "$repo: open a commit from there" "X pick 0:0!; sleep 1.2"
   step "$repo: back out" "X keys Escape Escape Escape Escape"
 done
+
+# ---- a repository with a page on the web: the button and the key
+step "widgets: open" "open_repo widgets"
+N=$(asked); step "widgets: the button in the header" 'X press "Open on git.example.invalid"'
+asks $N 1 "the button on a graph page did not ask for the page"
+N=$(asked); step "widgets: o" "X pick 0:0; X keys o"
+asks $N 1 "o in a graph did not ask for the page"
+step "widgets: back" "X keys Escape Escape Escape"
 
 # ---- a commit made and pushed from the pane
 step "alpha: stage, commit, push" "open_repo alpha; X pick 0:0; X keys Tab space; sleep 0.8; X keys c; X type 'walked'; X keys Return; sleep 1.5; X press 'Push'; sleep 2"
@@ -170,5 +191,5 @@ step "a root that is not there, and one that is a file" "printf 'roots = [\"/non
 step "settings on that" "X act settings; sleep 0.5; X keys Escape"
 
 X stop
-echo "steps: $STEPS   stopped: $DEATHS"
-[ "$DEATHS" = 0 ]
+echo "steps: $STEPS   stopped: $DEATHS   wrong: $WRONG"
+[ "$DEATHS" = 0 ] && [ "$WRONG" = 0 ]

@@ -64,14 +64,17 @@ scripts/walk/walk.sh
 It builds fixture repositories under `target/walk` (one of each kind: ahead,
 behind, no commits yet, merges and long branch names, a detached HEAD, a
 conflict, an index nothing can read, odd file names, a binary, a NUL late in
-a text file), starts a debug build on a hidden Hyprland workspace with a
+a text file, a remote with a page on the web at a host that does not exist),
+starts a debug build on a hidden Hyprland workspace with a
 scratch configuration, and then uses every page and every action once: the
 grid and its filter, every commit and file of every repository, staging, a
 commit and a push, the commit search, contributions, tags and the tag editor,
 light, broken and missing themes, Settings row by row, and the config and tag
 files broken and mended under the running window. After each of some five
 hundred steps it runs the drawing code and checks that the program is still
-there; it exits non-zero, with the panic, if it is not. `walk.sh quick` does
+there; it exits non-zero, with the panic, if it is not. A window driven this
+way opens no browser: it writes down the page it would have opened, and the
+walk checks that each way of asking wrote the right one. `walk.sh quick` does
 one repository instead of eight. It needs Hyprland, `python3`, `gdbus` and
 `busctl`, takes about ten minutes, puts nothing on screen and touches nothing
 of yours: everything goes over D-Bus to actions that only a debug build has,
@@ -147,14 +150,15 @@ omarepos [options]
 | `F1`, or `?` on the grid and in a graph | The whole keyboard, written down |
 | `l` on a focused card, or in a graph | Open a terminal there — lazygit |
 | `e` | Open it in your editor |
+| `o` | Open its page on the web — GitHub, or wherever the remote is |
 | `p` | Fetch and fast-forward that repo |
 | `f` | Fetch only, leaving your files alone |
 | `Space` in the changed files | Stage or unstage that file |
 | `c` in the changed files | Write a commit message |
 | `Enter` in the message | Commit what is staged |
 
-`l`, `e`, `p` and `f` act once for each press. A key held down, or one that
-sticks, does not open a terminal per repeat or start a second fetch.
+`l`, `e`, `o`, `p` and `f` act once for each press. A key held down, or one
+that sticks, does not open a terminal per repeat or start a second fetch.
 
 The filter matches repo name, path, branch and remote. Every word typed has to
 be found, in any order, so `acme billing` finds the billing repository under
@@ -170,10 +174,27 @@ gone, `no remote` for a repository that has nowhere to push — and `+2 branches
 when other local branches hold such commits. Those are the cases that used to
 read "clean". Each card's checkbox adds it to the contributions scope — once
 anything is ticked the rest of the grid dims, so the selection stays visible
-while you scroll. The `⋮` menu holds the terminal, editor and clipboard actions. **Open in terminal**
+while you scroll. The `⋮` menu holds the terminal, editor, web page and clipboard actions. **Open in terminal**
 starts lazygit in the repository when it is installed, and leaves you in a shell
 there when you quit it — so it is both, not one instead of the other. Change or
 disable that in settings.
+
+**Open on GitHub** — in the same menu, on `o`, and on the globe in a commit
+graph's header — sends your browser to the repository's page. The address is
+worked out from the remote the card names (`origin`, or the first one there
+is): `git@github.com:acme/widgets.git` and `https://github.com/acme/widgets.git`
+both become `https://github.com/acme/widgets`. A user name or token written
+into the remote is left out, and so is an ssh port; an `http://` remote keeps
+its port, being a web address already. The tooltip shows exactly what will be
+opened, and the menu names the site: GitHub, GitLab, Bitbucket, Codeberg and
+Azure DevOps by name, anything else by its host.
+
+It is not offered where no page can be worked out: a repository with no remote,
+a remote that is a directory, and an ssh remote whose host has no dot in it —
+that is a name from `~/.ssh/config`, and only ssh knows which host it stands
+for. Pressing `o` there says so. Elsewhere the address is the convention every
+common forge keeps (the host, then the path), which a server of your own may
+not follow.
 
 ## Adding repositories
 

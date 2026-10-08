@@ -44,6 +44,11 @@ pub struct Host {
     pub on_detail_toggled: Rc<dyn Fn(bool)>,
     pub on_terminal: Rc<dyn Fn()>,
     pub on_editor: Rc<dyn Fn()>,
+    /// The repository's page on the web, if its remote has one: whether there
+    /// is a button for it, and what the button says it opens.
+    pub web: Option<String>,
+    /// Opens that page, or says why there is none.
+    pub on_web: Rc<dyn Fn()>,
     /// Opens the contributions page scoped to this repository.
     pub on_contributions: Rc<dyn Fn(PathBuf)>,
     /// Fetch this repository, and fast-forward it too when the flag is set.
@@ -94,6 +99,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         on_detail_toggled,
         on_terminal,
         on_editor,
+        web,
+        on_web,
         on_contributions,
         on_pull,
         on_written,
@@ -104,6 +111,18 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     let title = adw::WindowTitle::new(name, &tildify(path));
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
+
+    // Outermost, being the one button here that leaves the window.
+    if let Some(page) = &web {
+        let open = gtk::Button::builder()
+            .icon_name("web-browser-symbolic")
+            .tooltip_text(format!("Open on {} (o)\n{page}", crate::git::web_site(page)))
+            .has_frame(false)
+            .build();
+        let on_web = Rc::clone(&on_web);
+        open.connect_clicked(move |_| on_web());
+        header.pack_end(&open);
+    }
 
     let contributions = gtk::Button::builder()
         .icon_name("system-users-symbolic")
@@ -302,6 +321,12 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 gtk::gdk::Key::e => {
                     if presses.first(key) {
                         on_editor();
+                    }
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::o => {
+                    if presses.first(key) {
+                        on_web();
                     }
                     glib::Propagation::Stop
                 }

@@ -432,8 +432,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // without reaching for the mouse.
         let keys = gtk::EventControllerKey::new();
         let nav = Rc::clone(&ui);
-        // The four letters below each start something outside the window, and
-        // a held key arrives as a run of presses.
+        // The letters below each start something outside the window, and a
+        // held key arrives as a run of presses.
         let presses = ui::OncePerPress::default();
         keys.connect_key_pressed(move |controller, key, _, state| {
             nav.enter_keyboard_nav();
@@ -468,6 +468,14 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             if key == gdk::Key::e && ui::unmodified(state) {
                 if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
                     nav.editor_opener(&path)();
+                }
+                return glib::Propagation::Stop;
+            }
+
+            // `o` opens the repository's page on the web.
+            if key == gdk::Key::o && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.open_web(&path);
                 }
                 return glib::Propagation::Stop;
             }
@@ -2518,6 +2526,12 @@ impl Ui {
             on_detail_toggled,
             on_terminal: self.terminal_opener(path),
             on_editor: self.editor_opener(path),
+            web: self.web_page(path).ok(),
+            on_web: {
+                let ui = Rc::clone(self);
+                let path = path.to_path_buf();
+                Rc::new(move || ui.open_web(&path))
+            },
             on_contributions,
             on_pull,
             on_written,
@@ -2727,6 +2741,38 @@ impl Ui {
         })
     }
 
+    /// The page on the web of the repository at `path`, or the sentence that
+    /// says why there is none to open.
+    fn web_page(&self, path: &Path) -> Result<String, String> {
+        let repos = self.repos.borrow();
+        let Some(info) = repos.iter().find(|repo| repo.path == path) else {
+            return Err(format!("{} is not among the repositories any more", path.display()));
+        };
+        match (&info.web, &info.remote) {
+            (Some(page), _) => Ok(page.clone()),
+            (None, Some(remote)) => Err(format!(
+                "{}: no web page can be worked out from its remote, {remote}",
+                info.name
+            )),
+            (None, None) => Err(format!("{} has no remote, and so no page to open", info.name)),
+        }
+    }
+
+    /// Send the browser to that page. Every way of asking comes through
+    /// here — the key, the card's menu, the button on a graph page — and the
+    /// page is looked up in what the window knows now: a card's menu and a
+    /// graph page each hold a copy of the repository from when they were
+    /// built.
+    fn open_web(&self, path: &Path) {
+        match self.web_page(path) {
+            Ok(page) => match ui::open_web(&page) {
+                Ok(()) => self.toasts.add_toast(ui::toast(&format!("Opening {page}"))),
+                Err(why) => ui::complain(&self.toasts, &why),
+            },
+            Err(why) => self.toasts.add_toast(ui::toast(&why)),
+        }
+    }
+
     fn open_contributions(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
             self.toasts
@@ -2747,6 +2793,7 @@ impl Ui {
             Action::OpenTerminal => self.terminal_opener(&info.path)(),
             Action::OpenEditor => self.editor_opener(&info.path)(),
             Action::OpenFolder => ui::open_folder(&info.path),
+            Action::OpenWeb => self.open_web(&info.path),
             Action::CopyPath => {
                 let path = info.path.display().to_string();
                 self.window.clipboard().set_text(&path);

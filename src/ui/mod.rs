@@ -27,6 +27,8 @@ pub enum Action {
     OpenTerminal,
     OpenEditor,
     OpenFolder,
+    /// The repository's page on the web, where its remote has one.
+    OpenWeb,
     CopyPath,
 }
 
@@ -264,6 +266,26 @@ pub fn open_folder(dir: &Path) {
     ) {
         note!("omarepos: could not open {uri}: {err}");
     }
+}
+
+/// Send the desktop's browser to `page`, an address from
+/// [`crate::git::web_url`].
+///
+/// With the display's launch context, which is what lets the compositor
+/// bring the browser forward. A browser that is already running takes the
+/// address as a new tab, and without the context that tab opens on a
+/// workspace nobody is looking at.
+pub fn open_web(page: &str) -> Result<(), String> {
+    // A walk presses every key there is, and nothing it presses may leave
+    // the window. It reads what would have been opened out of the log.
+    #[cfg(debug_assertions)]
+    if debug::driven() {
+        note!("omarepos: would open {page}");
+        return Ok(());
+    }
+    let context = gtk::gdk::Display::default().map(|display| display.app_launch_context());
+    gtk::gio::AppInfo::launch_default_for_uri(page, context.as_ref())
+        .map_err(|err| format!("Could not open {page}: {err}"))
 }
 
 /// Start something that outlives the click that started it: a terminal, an

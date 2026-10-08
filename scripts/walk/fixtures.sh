@@ -35,6 +35,9 @@ remote alpha; ( cd alpha && echo one > one.txt && git add . && git commit -q -m 
 remote beta
 git clone -q "$W/remotes/beta.git" "$W/seed-beta" && ( cd "$W/seed-beta" && echo two > two.txt && git add . && git commit -q -m "Add two upstream" && git push -q )
 remote gamma
+# A remote that is on the web as far as its URL says, at a host that is not
+# there: .invalid never resolves, so a fetch fails at once.
+start widgets; ( cd widgets && git remote add origin https://git.example.invalid/acme/widgets.git )
 # No commits yet, with a file waiting.
 git init -q -b main delta && echo hello > delta/first.txt
 # Branches and merges, long ref names, odd file names, a binary, a file with

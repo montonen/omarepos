@@ -92,6 +92,9 @@ pub struct RepoInfo {
     /// even when the remote moved an hour ago.
     pub upstream_when: Option<i64>,
     pub remote: Option<String>,
+    /// The page that remote has on the web, when its URL says where one is;
+    /// see [`web_url`].
+    pub web: Option<String>,
     pub local_branches: usize,
     pub stashes: usize,
     pub tracked_files: usize,
@@ -692,6 +695,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
         upstream: None,
         upstream_when: None,
         remote: None,
+        web: None,
         local_branches: 0,
         stashes: 0,
         tracked_files: 0,
@@ -821,10 +825,12 @@ pub fn inspect(path: &Path) -> RepoInfo {
         }
     }
 
-    info.remote = repo
+    // One remote for both: the page `o` opens is the page of the remote the
+    // card names. Origin, or the first there is when nothing is called that.
+    let remote_url = repo
         .find_remote("origin")
         .ok()
-        .and_then(|r| r.url().ok().map(prettify_remote))
+        .and_then(|r| r.url().ok().map(str::to_string))
         .or_else(|| {
             repo.remotes().ok().and_then(|names| {
                 names
@@ -832,9 +838,11 @@ pub fn inspect(path: &Path) -> RepoInfo {
                     .filter_map(|n| n.ok().flatten())
                     .next()
                     .and_then(|n| repo.find_remote(n).ok())
-                    .and_then(|r| r.url().ok().map(prettify_remote))
+                    .and_then(|r| r.url().ok().map(str::to_string))
             })
         });
+    info.remote = remote_url.as_deref().map(prettify_remote);
+    info.web = remote_url.as_deref().and_then(web_url);
 
     // libgit2's reading of `user.*`, which is git's own for the plain case and
     // for `includeIf gitdir:` and `onbranch:`. This comment used to say it was
@@ -1034,10 +1042,274 @@ fn prettify_remote(url: &str) -> String {
     url.to_string()
 }
 
+/// Hosts that take git over ssh under one name and serve their pages under
+/// another.
+const SSH_ONLY_HOSTS: &[(&str, &str)] = &[
+    ("ssh.github.com", "github.com"),
+    ("altssh.gitlab.com", "gitlab.com"),
+    ("altssh.bitbucket.org", "bitbucket.org"),
+];
+
+/// Where a remote's repository is on the web, for a browser to be sent to, or
+/// nothing when the remote does not say.
+///
+/// A remote's URL is an address for git. That the page for people is at the
+/// same host and path is only a convention, but it is one GitHub, GitLab,
+/// Bitbucket, Codeberg, Gitea and sourcehut all keep, so that is what this
+/// builds: `https://`, the host, the path, without `.git`.
+///
+/// What it leaves out matters as much:
+///
+/// - Whoever the URL logs in as, and above all a token written into an
+///   `https://` remote. A browser keeps every address it is handed.
+/// - The port of an ssh remote, which no web server is listening on. An
+///   `http://` remote keeps its port and its `http`: there the remote is a
+///   web address already, and the server's own.
+///
+/// And it answers nothing at all for a remote that is a directory or a
+/// `file://` URL, for one that names no repository, and for an ssh remote
+/// whose host has no dot in it. That last is a name out of `~/.ssh/config`:
+/// which host it stands for is ssh's to know, and a guess would open somebody
+/// else's page.
+pub fn web_url(remote: &str) -> Option<String> {
+    let url = remote.trim();
+    // Nothing a browser, or whatever starts it, could read as two things.
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+
+    // The scheme, where it is the web's already; who@host:port; the path.
+    let (scheme, authority, path) = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            match scheme.to_ascii_lowercase().as_str() {
+                "https" => (Some("https"), authority, path),
+                "http" => (Some("http"), authority, path),
+                "ssh" | "git" | "git+ssh" | "ssh+git" => (None, authority, path),
+                // `file://`, and anything else nobody browses.
+                _ => return None,
+            }
+        }
+        // `who@host:path`, the way scp writes it. Git takes a colon that
+        // comes after a slash to be part of a directory's name, and so does
+        // this.
+        None => {
+            let (authority, path) = url.split_once(':')?;
+            if authority.contains('/') {
+                return None;
+            }
+            (None, authority, path)
+        }
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = host.to_ascii_lowercase();
+    let path = path.trim_matches('/');
+    if host.is_empty() || path.is_empty() || host.starts_with("git-codecommit.") {
+        return None;
+    }
+
+    let Some(scheme) = scheme else {
+        let host = host.split_once(':').map_or(host.as_str(), |(host, _port)| host);
+        let named = host.contains('.')
+            && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        if !named {
+            return None;
+        }
+        // Azure DevOps writes an ssh remote as `v3/organisation/project/
+        // repository` and the page as something else again.
+        if host == "ssh.dev.azure.com" || host == "vs-ssh.visualstudio.com" {
+            let parts: Vec<&str> = path.split('/').collect();
+            return match parts.as_slice() {
+                ["v3", organisation, project, repository] => Some(format!(
+                    "https://dev.azure.com/{organisation}/{project}/_git/{repository}"
+                )),
+                _ => None,
+            };
+        }
+        let host = SSH_ONLY_HOSTS
+            .iter()
+            .find(|(ssh, _)| *ssh == host)
+            .map_or(host, |(_, web)| web);
+        return Some(format!("https://{host}/{path}"));
+    };
+    Some(format!("{scheme}://{host}/{path}"))
+}
+
+/// What to call the site a page from [`web_url`] is on: the name it goes by
+/// where everybody knows it by one, and its host otherwise. A company's own
+/// GitHub or GitLab gets its host, because "Open on GitHub" would name the
+/// wrong place.
+pub fn web_site(page: &str) -> &str {
+    let rest = page.split_once("://").map_or(page, |(_, rest)| rest);
+    let host = rest.split('/').next().unwrap_or(rest);
+    let host = host
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(host, |(host, _port)| host);
+    match host {
+        "github.com" | "gist.github.com" => "GitHub",
+        "gitlab.com" => "GitLab",
+        "bitbucket.org" => "Bitbucket",
+        "codeberg.org" => "Codeberg",
+        "dev.azure.com" => "Azure DevOps",
+        _ => host,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testkit::*;
+
+    #[test]
+    fn a_remote_becomes_the_page_a_browser_can_open() {
+        let cases: &[(&str, Option<&str>)] = &[
+            // The everyday spellings of one repository.
+            ("https://github.com/acme/widgets.git", Some("https://github.com/acme/widgets")),
+            ("https://github.com/acme/widgets", Some("https://github.com/acme/widgets")),
+            ("https://github.com/acme/widgets.git/", Some("https://github.com/acme/widgets")),
+            ("git@github.com:acme/widgets.git", Some("https://github.com/acme/widgets")),
+            ("ssh://git@github.com/acme/widgets.git", Some("https://github.com/acme/widgets")),
+            ("git+ssh://git@github.com/acme/widgets.git", Some("https://github.com/acme/widgets")),
+            ("git://git.example.org/acme/widgets.git", Some("https://git.example.org/acme/widgets")),
+            ("  git@github.com:acme/widgets.git\n", Some("https://github.com/acme/widgets")),
+            ("HTTPS://github.com/acme/widgets.git", Some("https://github.com/acme/widgets")),
+            // A host is the same host however it is capitalised. A path is not.
+            ("git@GitHub.com:Acme/Widgets.git", Some("https://github.com/Acme/Widgets")),
+            // An ssh port is ssh's, and no web server is listening on it. An
+            // http remote's port is the web server's own, and so is its
+            // choice of http.
+            (
+                "ssh://git@git.example.org:2222/acme/widgets.git",
+                Some("https://git.example.org/acme/widgets"),
+            ),
+            (
+                "http://git.example.org:3000/acme/widgets.git",
+                Some("http://git.example.org:3000/acme/widgets"),
+            ),
+            ("http://localhost:3000/acme/widgets.git", Some("http://localhost:3000/acme/widgets")),
+            // Whoever the remote logs in as is not the browser's to be told,
+            // a token least of all: a browser keeps what it is handed.
+            (
+                "https://jm:ghp_0123456789abcdef@github.com/acme/widgets.git",
+                Some("https://github.com/acme/widgets"),
+            ),
+            (
+                "https://jm:p@ss@github.com/acme/widgets.git",
+                Some("https://github.com/acme/widgets"),
+            ),
+            (
+                "https://acme@dev.azure.com/acme/Shop/_git/widgets",
+                Some("https://dev.azure.com/acme/Shop/_git/widgets"),
+            ),
+            // Subgroups, a namespace with a tilde, a path from the root.
+            (
+                "git@gitlab.com:acme/platform/widgets.git",
+                Some("https://gitlab.com/acme/platform/widgets"),
+            ),
+            ("git@git.sr.ht:~jm/widgets", Some("https://git.sr.ht/~jm/widgets")),
+            ("git@git.example.org:/acme/widgets.git", Some("https://git.example.org/acme/widgets")),
+            // Hosts that take ssh under one name and serve pages under another.
+            (
+                "git@ssh.dev.azure.com:v3/acme/Shop/widgets",
+                Some("https://dev.azure.com/acme/Shop/_git/widgets"),
+            ),
+            (
+                "acme@vs-ssh.visualstudio.com:v3/acme/Shop/widgets",
+                Some("https://dev.azure.com/acme/Shop/_git/widgets"),
+            ),
+            ("git@ssh.dev.azure.com:acme/widgets", None),
+            (
+                "ssh://git@ssh.github.com:443/acme/widgets.git",
+                Some("https://github.com/acme/widgets"),
+            ),
+            (
+                "ssh://git@altssh.gitlab.com:443/acme/widgets.git",
+                Some("https://gitlab.com/acme/widgets"),
+            ),
+            // A directory is not on the web, whatever it is called.
+            ("/srv/git/widgets.git", None),
+            ("../widgets", None),
+            ("./with:colon/widgets", None),
+            ("file:///srv/git/widgets.git", None),
+            // A name out of ~/.ssh/config. Which host it stands for is ssh's
+            // to know, and a guess would open somebody else's page.
+            ("work:acme/widgets.git", None),
+            ("git@github-work:acme/widgets.git", None),
+            ("ssh://git@forge/acme/widgets.git", None),
+            // Git is served here and nothing else is.
+            ("https://git-codecommit.eu-north-1.amazonaws.com/v1/repos/widgets", None),
+            ("ssh://git-codecommit.eu-north-1.amazonaws.com/v1/repos/widgets", None),
+            // No repository named, no host named, a transport nobody browses.
+            ("", None),
+            ("https://github.com", None),
+            ("https://github.com/", None),
+            ("git@github.com:", None),
+            ("https:///acme/widgets", None),
+            ("ftp://git.example.org/acme/widgets.git", None),
+            // Nothing a browser would read as more than one thing.
+            ("https://github.com/acme/wid gets", None),
+            ("https://github.com/acme/wid\tgets", None),
+            ("git@git hub.com:acme/widgets", None),
+        ];
+        for (remote, page) in cases {
+            assert_eq!(web_url(remote).as_deref(), *page, "{remote:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_is_called_by_the_name_its_site_goes_by() {
+        for (page, site) in [
+            ("https://github.com/acme/widgets", "GitHub"),
+            ("https://gist.github.com/0123abcd", "GitHub"),
+            ("https://gitlab.com/acme/platform/widgets", "GitLab"),
+            ("https://bitbucket.org/acme/widgets", "Bitbucket"),
+            ("https://codeberg.org/acme/widgets", "Codeberg"),
+            ("https://dev.azure.com/acme/Shop/_git/widgets", "Azure DevOps"),
+            // A company's own GitHub is not GitHub the site: say which.
+            ("https://github.example.org/acme/widgets", "github.example.org"),
+            ("http://git.example.org:3000/acme/widgets", "git.example.org"),
+            ("http://localhost:3000/acme/widgets", "localhost"),
+        ] {
+            assert_eq!(web_site(page), site, "{page}");
+        }
+    }
+
+    #[test]
+    fn a_repository_knows_the_page_of_the_remote_its_card_names() {
+        let _guard = isolate();
+        let dir = scratch("git-web-page");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", "a\n", "one");
+        assert_eq!(inspect(&dir).web, None, "no remote, no page");
+
+        // Not origin, but the only one there is.
+        git(&dir, &["remote", "add", "upstream", "git@git.example.org:acme/widgets.git"]);
+        let info = inspect(&dir);
+        assert_eq!(info.remote.as_deref(), Some("git.example.org/acme/widgets"));
+        assert_eq!(info.web.as_deref(), Some("https://git.example.org/acme/widgets"));
+
+        // Origin wins once there is one, for the page as for the name.
+        git(&dir, &["remote", "add", "origin", "https://jm:secret@forge.example.org/jm/widgets.git"]);
+        let info = inspect(&dir);
+        assert_eq!(info.remote.as_deref(), Some("forge.example.org/jm/widgets"));
+        assert_eq!(info.web.as_deref(), Some("https://forge.example.org/jm/widgets"));
+
+        // Shorthand that git rewrites is followed to where git goes.
+        git(&dir, &["config", "url.git@git.example.org:.insteadOf", "eg:"]);
+        git(&dir, &["remote", "set-url", "origin", "eg:acme/gadgets.git"]);
+        let info = inspect(&dir);
+        assert_eq!(info.remote.as_deref(), Some("git.example.org/acme/gadgets"));
+        assert_eq!(info.web.as_deref(), Some("https://git.example.org/acme/gadgets"));
+
+        // A clone of a directory has a remote and no page.
+        let f = fleet("git-web-page-local");
+        let info = inspect(&f.work);
+        assert!(info.remote.is_some());
+        assert_eq!(info.web, None);
+    }
 
     /// (ahead of the upstream, on no remote, other branches with work on none)
     fn standing(path: &Path) -> (usize, usize, usize) {
