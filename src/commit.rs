@@ -69,7 +69,7 @@ impl Change {
 /// Which part of a repository's state a file change belongs to. For a commit
 /// there is only one; for the working tree the distinction is the point —
 /// untracked files are the one kind that does not block a fast-forward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Group {
     Committed,
     Staged,
@@ -97,7 +97,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
     pub path: String,
     /// Where it came from, for a rename or copy.
@@ -120,7 +120,7 @@ pub enum Target {
     Working,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detail {
     pub id: String,
     pub short_id: String,
@@ -396,14 +396,14 @@ fn is_partial(repo: &Repository) -> bool {
 }
 
 /// One line of a unified diff.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     /// git's own marker: ' ', '+', '-', or '@' for a hunk header.
     pub origin: char,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileDiff {
     pub lines: Vec<Line>,
     pub truncated: bool,

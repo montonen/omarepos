@@ -1,6 +1,7 @@
 //! The commit detail pane: what the selected commit changed.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -182,26 +183,36 @@ pub fn pane(
 
     let generation = Rc::new(RefCell::new(0u64));
     let running: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
-    // Which commit the file list belongs to, so selecting a file knows what to
-    // diff, and a patch load of its own that can be abandoned the same way.
+    // The commit asked for last. A read takes a moment, so this is not always
+    // the one whose files are on screen: the viewer knows that one.
     let showing: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
-    let patching: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
-    let patch_generation = Rc::new(RefCell::new(0u64));
-    // What the rows on screen were built from. A row carries its path and no
-    // more, and the diff for a renamed file needs to know where it came from.
-    let listed: Rc<RefCell<Option<Box<Detail>>>> = Rc::new(RefCell::new(None));
-    let staged_count = Rc::new(std::cell::Cell::new(0usize));
+    let viewer = Rc::new(Viewer {
+        buffer: buffer.clone(),
+        dark,
+        listed: RefCell::new(None),
+        rendered: RefCell::new(None),
+        reading: RefCell::new(None),
+        generation: Cell::new(0),
+    });
+    // Set while the loader empties the list and fills it again. The list
+    // reports each step of that as a change of selection: to nothing, then to
+    // whichever row it took for itself. Neither is the user's doing, and the
+    // loader says what to show once it has put the selection back.
+    let rebuilding = Rc::new(Cell::new(false));
+    // Which groups are folded, for as long as the same commit is on show.
+    let folds: Rc<RefCell<HashMap<Group, bool>>> = Rc::new(RefCell::new(HashMap::new()));
+    let staged_count = Rc::new(Cell::new(0usize));
     // One write at a time. git reads the index again after a pre-commit hook
     // has run, so a file staged while "Committing…" was on screen went into a
     // commit whose message had been written without it.
-    let busy = Rc::new(std::cell::Cell::new(false));
+    let busy = Rc::new(Cell::new(false));
 
     // Reloading after a write: the same path the pane already uses, so there is
     // one way for its contents to arrive.
     let reload: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     {
-        let showing = Rc::clone(&showing);
+        let viewer = Rc::clone(&viewer);
         let staged_count = Rc::clone(&staged_count);
         let reload = Rc::clone(&reload);
         let message = message.clone();
@@ -210,7 +221,7 @@ pub fn pane(
         let busy = Rc::clone(&busy);
         let files_for_commit = files.clone();
         commit_button.connect_clicked(move |button| {
-            let Some((repo, Target::Working)) = showing.borrow().clone() else { return };
+            let Some(repo) = viewer.working() else { return };
             let text = message.text().to_string();
             if let Some(reason) = commit::why_not_commit(&repo, staged_count.get(), &text) {
                 tell(&totals, &reason);
@@ -256,50 +267,15 @@ pub fn pane(
     }
 
     {
-        let showing = Rc::clone(&showing);
-        let patching = Rc::clone(&patching);
-        let patch_generation = Rc::clone(&patch_generation);
-        let buffer = buffer.clone();
-        let listed = Rc::clone(&listed);
+        let viewer = Rc::clone(&viewer);
+        let rebuilding = Rc::clone(&rebuilding);
         files.connect_row_selected(move |_, row| {
-            let Some(row) = row else { return };
-            let Some((side, path)) = row_file(row) else { return };
-            let path_for_render = path.clone();
-            let Some((repo, target)) = showing.borrow().clone() else { return };
-            // Where the list says the file came from. Without it the diff of a
-            // renamed file is read as that of a new one, every line added.
-            let from = listed.borrow().as_ref().and_then(|detail| {
-                let group = side.unwrap_or(Group::Committed);
-                let file = detail.files.iter().find(|file| file.group == group && file.path == path)?;
-                file.from.clone()
-            });
-
-            let mine = {
-                let mut counter = patch_generation.borrow_mut();
-                *counter += 1;
-                *counter
-            };
-            if let Some(cancel) = patching.borrow_mut().take() {
-                cancel.stop();
+            if rebuilding.get() {
+                return;
             }
-            buffer.set_text("Reading…");
-
-            let patch_generation = Rc::clone(&patch_generation);
-            let patching = Rc::clone(&patching);
-            let buffer = buffer.clone();
-            glib::spawn_future_local(async move {
-                let path = path_for_render;
-                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone(), from, side);
-                *patching.borrow_mut() = Some(cancel);
-                let Ok(result) = rx.recv().await else { return };
-                if *patch_generation.borrow() != mine {
-                    return;
-                }
-                match result {
-                    Ok(diff) => render_diff(&buffer, &diff, &path, dark),
-                    Err(err) => buffer.set_text(&err),
-                }
-            });
+            // With no row, too: a group folded over the selected file takes
+            // the selection away, and its diff should not stay behind.
+            viewer.show(row);
         });
     }
 
@@ -310,6 +286,7 @@ pub fn pane(
         let reload = Rc::clone(&reload);
         let staged_count = Rc::clone(&staged_count);
         let on_changed = Rc::clone(&on_changed);
+        let viewer = Rc::clone(&viewer);
         Rc::new(move |repo: PathBuf, target: Target| {
             let mine = {
                 let mut counter = generation.borrow_mut();
@@ -319,7 +296,16 @@ pub fn pane(
             if let Some(cancel) = running.borrow_mut().take() {
                 cancel.stop();
             }
-            tell(&totals, "Reading…");
+            // Asked for what was asked for last: a re-read, after a write
+            // here or on the way back to the window. There is no cursor to
+            // wait for then, and nothing on screen is replaced before there
+            // is something to replace it with.
+            let asked = (repo.clone(), target.clone());
+            let again = showing.borrow().as_ref() == Some(&asked);
+            *showing.borrow_mut() = Some(asked);
+            if !again {
+                tell(&totals, "Reading…");
+            }
 
             let generation = Rc::clone(&generation);
             let running = Rc::clone(&running);
@@ -328,68 +314,112 @@ pub fn pane(
             let body = body.clone();
             let body_scroller = body_scroller.clone();
             let files = files.clone();
+            let scroller = scroller.clone();
             let totals = totals.clone();
-            let showing = Rc::clone(&showing);
-            let buffer = buffer.clone();
             let commit_box = commit_box.clone();
             let staged_count = Rc::clone(&staged_count);
             let reload = Rc::clone(&reload);
             let on_changed = Rc::clone(&on_changed);
             let busy = Rc::clone(&busy);
             let who = who.clone();
-            let listed = Rc::clone(&listed);
+            let viewer = Rc::clone(&viewer);
+            let rebuilding = Rc::clone(&rebuilding);
+            let folds = Rc::clone(&folds);
 
             glib::spawn_future_local(async move {
-                glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
-                if *generation.borrow() != mine {
-                    return;
+                if !again {
+                    glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
+                    if *generation.borrow() != mine {
+                        return;
+                    }
                 }
 
-                *showing.borrow_mut() = Some((repo.clone(), target.clone()));
-                let (rx, cancel) = commit::spawn(repo, target);
+                let (rx, cancel) = commit::spawn(repo.clone(), target.clone());
                 *running.borrow_mut() = Some(cancel);
                 let Ok(result) = rx.recv().await else { return };
                 if *generation.borrow() != mine {
                     return;
                 }
 
-                // Before the rows: selecting one, below, reads this.
-                *listed.borrow_mut() = result.as_ref().ok().cloned();
-                files.remove_all();
-                buffer.set_text("");
-
-                let working = matches!(*showing.borrow(), Some((_, Target::Working)));
-                commit_box.set_visible(working);
+                let working = target == Target::Working;
                 if working {
-                    if let Some((repo, _)) = showing.borrow().clone() {
-                        let who = who.clone();
-                        glib::spawn_future_local(async move {
-                            match commit::spawn_identity(repo).recv().await {
-                                Ok(Ok(identity)) => {
-                                    who.set_label(&format!("as {identity}"));
-                                    who.set_tooltip_text(Some(&format!(
-                                        "A commit made here is recorded as {identity}"
-                                    )));
-                                }
-                                Ok(Err(why)) => {
-                                    who.set_label("no identity");
-                                    who.set_tooltip_text(Some(&why));
-                                }
-                                Err(_) => {}
+                    let who = who.clone();
+                    let repo = repo.clone();
+                    glib::spawn_future_local(async move {
+                        match commit::spawn_identity(repo).recv().await {
+                            Ok(Ok(identity)) => {
+                                who.set_label(&format!("as {identity}"));
+                                who.set_tooltip_text(Some(&format!(
+                                    "A commit made here is recorded as {identity}"
+                                )));
                             }
-                        });
-                    }
+                            Ok(Err(why)) => {
+                                who.set_label("no identity");
+                                who.set_tooltip_text(Some(&why));
+                            }
+                            Err(_) => {}
+                        }
+                    });
                 }
+                if let Ok(detail) = &result {
+                    // From the counts taken before the list was capped:
+                    // Commit takes everything staged, listed or not.
+                    staged_count.set(detail.counts.staged);
+                }
+
+                // Whether the rows on screen are this commit's already, and
+                // whether they still say what is true of it.
+                let (same, unchanged) = match viewer.listed.borrow().as_ref() {
+                    Some(listed) if listed.repo == repo && listed.target == target => {
+                        (true, listed.result == result)
+                    }
+                    _ => (false, false),
+                };
+                if unchanged {
+                    // Coming back to the window re-reads the working tree, and
+                    // most of the time finds what it left. The list used to be
+                    // emptied and rebuilt regardless, which put the selection
+                    // on the first file, the diff at its top and the groups
+                    // back as they started, every time the pointer returned.
+                    // A file can have changed without its counts changing, so
+                    // the diff on show is read again: quietly, and redrawn
+                    // only if it differs.
+                    tell(&totals, &result.as_ref().map(|detail| summary(detail)).unwrap_or_default());
+                    viewer.show(files.selected_row().as_ref());
+                    return;
+                }
+
+                // A re-read that did find something new, which after a stage
+                // or an unstage is every time. The user is somewhere in this
+                // list, and is put back there once it has been rebuilt.
+                let place = same.then(|| Place::of(&files));
+                let offset = scroller.vadjustment().value();
+                if !same {
+                    folds.borrow_mut().clear();
+                }
+                // The message box goes when this is not the working tree, and
+                // after the commit that emptied the tree the keyboard is in it.
+                let typing = commit_box.focus_child().is_some();
+
+                *viewer.listed.borrow_mut() = Some(Listed {
+                    repo: repo.clone(),
+                    target: target.clone(),
+                    result: result.clone(),
+                });
+                rebuilding.set(true);
+                files.remove_all();
+                commit_box.set_visible(working);
+
                 // Staging only exists for the working tree; a commit's files
                 // are already committed.
                 let writer: Option<Rc<dyn Fn(Write, String)>> = working.then(|| {
-                    let showing = Rc::clone(&showing);
+                    let viewer = Rc::clone(&viewer);
                     let reload = Rc::clone(&reload);
                     let on_changed = Rc::clone(&on_changed);
                     let totals = totals.clone();
                     let busy = Rc::clone(&busy);
                     Rc::new(move |what: Write, file: String| {
-                        let Some((repo, _)) = showing.borrow().clone() else { return };
+                        let Some(repo) = viewer.working() else { return };
                         if busy.replace(true) {
                             return;
                         }
@@ -415,17 +445,15 @@ pub fn pane(
                     }) as Rc<dyn Fn(Write, String)>
                 });
 
-                match result {
+                match &result {
                     Ok(detail) => {
-                        // From the counts taken before the list was capped:
-                        // Commit takes everything staged, listed or not.
-                        staged_count.set(detail.counts.staged);
                         subject.set_label(&detail.summary);
                         subject.set_tooltip_text(Some(&format!(
                             "{}\n{} <{}>\n{}",
                             detail.summary, detail.author, detail.email, detail.id
                         )));
-                        meta.set_label(&describe(&detail));
+                        meta.set_label(&describe(detail));
+                        meta.set_tooltip_text(None);
                         // A commit has its message here. The working tree has
                         // none, and where its list is known to differ from
                         // what git would say, this is the place that says so:
@@ -465,7 +493,7 @@ pub fn pane(
                             }
                             let mut members = Vec::new();
                             for node in commit::tree(&in_group) {
-                                let row = row(&node, writer.as_ref());
+                                let row = row(&node, group, writer.as_ref());
                                 members.push(row.clone());
                                 files.append(&row);
                             }
@@ -477,22 +505,12 @@ pub fn pane(
                             if group != Group::Committed {
                                 // Inserted above its rows once they exist, so
                                 // the heading has something to hide.
-                                let heading = group_heading(group, in_group.len(), total, members);
+                                let heading =
+                                    group_heading(group, in_group.len(), total, members, &folds);
                                 files.insert(&heading, position);
                                 added += 1;
                             }
                             position += added;
-                        }
-                        // Browse mode will not pick a starting row on its own
-                        // when the first one is not selectable, so the first
-                        // actual file is chosen here.
-                        let mut index = 0;
-                        while let Some(candidate) = files.row_at_index(index) {
-                            if candidate.is_selectable() {
-                                files.select_row(Some(&candidate));
-                                break;
-                            }
-                            index += 1;
                         }
                         if detail.total_files > detail.files.len() {
                             let more = gtk::Label::builder()
@@ -509,7 +527,7 @@ pub fn pane(
                             row.set_activatable(false);
                             files.append(&row);
                         }
-                        tell(&totals, &summary(&detail));
+                        tell(&totals, &summary(detail));
                     }
                     Err(err) => {
                         subject.set_label(if working {
@@ -521,10 +539,80 @@ pub fn pane(
                         subject.set_tooltip_text(None);
                         // The reason can be a sentence, and the line holds a
                         // few words of one.
-                        tell(&meta, &err);
+                        tell(&meta, err);
                         body_scroller.set_visible(false);
                         tell(&totals, "");
                     }
+                }
+
+                // Which row to be on. For a commit that was not on show
+                // before, the first file there is. A row that is folded away
+                // does not count: a working tree of nothing but a dozen
+                // untracked files opens with its one group folded, and used
+                // to open with a hidden row selected, its diff on show under
+                // no name, and Tab and Space going to a file never seen.
+                // Coming back to the same commit, it is the row the user was
+                // on, or the nearest to it of those that are left.
+                let rows: HashMap<String, gtk::ListBoxRow> = named_rows(&files).into_iter().collect();
+                let chosen = match &place {
+                    Some(place) => place.back(place.selected, &rows, is_shown_file),
+                    None => first_row(&files, is_shown_file),
+                };
+                match &chosen {
+                    Some(row) => files.select_row(Some(row)),
+                    // Whichever row the list took for itself while it was
+                    // being filled.
+                    None => {
+                        if let Some(stray) = files.selected_row() {
+                            files.unselect_row(&stray);
+                        }
+                    }
+                }
+                rebuilding.set(false);
+                viewer.show(chosen.as_ref());
+
+                // And the keyboard, if it was in the list, or in the message
+                // box that has just gone. On the selected row it stays with
+                // the selection, which is what the arrow keys keep it with;
+                // on a heading, a folder or another file's button it goes
+                // back there, or as near as there still is. Straight away,
+                // not once the list has been laid out: a key pressed in
+                // between would go nowhere.
+                let keyboard = place.as_ref().and_then(|place| {
+                    let at = place.focused?;
+                    Some(if place.selected == Some(at) {
+                        chosen.clone()
+                    } else {
+                        place.back(Some(at), &rows, is_shown).or_else(|| chosen.clone())
+                    })
+                });
+                let back_to = match &keyboard {
+                    Some(row) => Some(row.clone()),
+                    None if typing && !working => Some(chosen.clone()),
+                    None => None,
+                };
+                if let (Some(row), true) = (back_to, files.is_mapped()) {
+                    match row.or_else(|| first_row(&files, is_shown)) {
+                        Some(row) => row.grab_focus(),
+                        None => files.grab_focus(),
+                    };
+                }
+
+                // The list is where it was scrolled to, as far as its new
+                // length allows, and the row the keyboard is on is in view.
+                // Only once the rows have been given their places: before
+                // that there is nothing to measure.
+                if same {
+                    let generation = Rc::clone(&generation);
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                        if *generation.borrow() != mine {
+                            return;
+                        }
+                        scroller.vadjustment().set_value(offset);
+                        if let Some(row) = keyboard.flatten() {
+                            reveal(&scroller, &row);
+                        }
+                    });
                 }
             });
         })
@@ -602,12 +690,17 @@ pub fn pane(
                 return;
             }
             // Browse selection keeps a row current, so focusing the list lands
-            // on the file already being shown.
-            if let Some(row) = files.selected_row() {
-                row.grab_focus();
-            } else {
-                files.grab_focus();
-            }
+            // on the file already being shown. Failing that, on the first row
+            // there is, which is a heading when every group is folded: Space
+            // there unfolds it. Never on a row that is folded away.
+            let row = files
+                .selected_row()
+                .filter(|row| row.get_visible())
+                .or_else(|| first_row(&files, |row| row.get_visible()));
+            match row {
+                Some(row) => row.grab_focus(),
+                None => files.grab_focus(),
+            };
         })
     };
 
@@ -627,10 +720,19 @@ fn group_heading(
     count: usize,
     total: usize,
     members: Vec<gtk::ListBoxRow>,
+    folds: &Rc<RefCell<HashMap<Group, bool>>>,
 ) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
-    let open = group.blocks_update() || count <= FOLD_UNTRACKED_PAST;
+    // As it was left, if this commit has been on show before. The list is
+    // rebuilt after every stage and whenever the working tree is found
+    // changed, and each time a group the user had opened shut again. Once
+    // drawn, a group stays as it is until the user says otherwise: it does not
+    // fold itself either, when an eleventh untracked file turns up.
+    let open = *folds
+        .borrow_mut()
+        .entry(group)
+        .or_insert(group.blocks_update() || count <= FOLD_UNTRACKED_PAST);
     let chevron = gtk::Image::from_icon_name(if open {
         "pan-down-symbolic"
     } else {
@@ -669,16 +771,25 @@ fn group_heading(
         "Untracked files do not hold an update back. Where an incoming commit adds a file of \
          the same name, git refuses rather than overwrite it, and the card says which"
     }));
-    let shown = std::cell::Cell::new(open);
+    let shown = Cell::new(open);
+    let folds = Rc::clone(folds);
     toggle.connect_clicked(move |_| {
         let now = !shown.get();
         shown.set(now);
+        folds.borrow_mut().insert(group, now);
         chevron.set_icon_name(Some(if now {
             "pan-down-symbolic"
         } else {
             "pan-end-symbolic"
         }));
         for member in &members {
+            // A row folded away does not stay selected. It would go on being
+            // the file the diff is of, and the one Tab comes back to.
+            if !now && member.is_selected() {
+                if let Some(list) = member.parent().and_downcast::<gtk::ListBox>() {
+                    list.unselect_row(member);
+                }
+            }
             member.set_visible(now);
         }
     });
@@ -690,10 +801,243 @@ fn group_heading(
     let row = gtk::ListBoxRow::builder().child(&holder).build();
     row.set_selectable(false);
     row.set_activatable(false);
+    // So that the keyboard can be put back on it after the list is rebuilt.
+    row.set_widget_name(&format!("group:{}", side_token(group)));
     if !group.blocks_update() {
         row.add_css_class("om-aside");
     }
     row
+}
+
+/// What the file list on screen was built from. A row carries its path and
+/// which half of the file it stands for, and no more.
+struct Listed {
+    repo: PathBuf,
+    target: Target,
+    result: Result<Box<Detail>, String>,
+}
+
+/// One file's diff as it stands in the view.
+struct Rendered {
+    key: (PathBuf, Target, Option<Group>, String),
+    diff: Box<commit::FileDiff>,
+}
+
+/// The diff view, and the reading of what goes into it.
+struct Viewer {
+    buffer: gtk::TextBuffer,
+    dark: bool,
+    listed: RefCell<Option<Listed>>,
+    rendered: RefCell<Option<Rendered>>,
+    /// The read in flight, so that it can be abandoned.
+    reading: RefCell<Option<Cancel>>,
+    generation: Cell<u64>,
+}
+
+impl Viewer {
+    /// The repository, when it is its working tree that is listed.
+    fn working(&self) -> Option<PathBuf> {
+        match self.listed.borrow().as_ref() {
+            Some(Listed { repo, target: Target::Working, .. }) => Some(repo.clone()),
+            _ => None,
+        }
+    }
+
+    /// Show the diff of the file `row` stands for, or nothing for no row.
+    ///
+    /// Asked for the file that is already on show, which is what a re-read of
+    /// the list amounts to, it reads quietly: the view keeps what it has until
+    /// the new diff is in, and is redrawn only if that differs. Redrawing
+    /// starts the view again at its top, which is where it used to land every
+    /// time the window was come back to.
+    fn show(self: &Rc<Self>, row: Option<&gtk::ListBoxRow>) {
+        self.generation.set(self.generation.get() + 1);
+        let mine = self.generation.get();
+        if let Some(cancel) = self.reading.borrow_mut().take() {
+            cancel.stop();
+        }
+
+        let wanted = row.and_then(row_file).and_then(|(side, path)| {
+            let listed = self.listed.borrow();
+            let listed = listed.as_ref()?;
+            // Where the list says the file came from. Without it the diff of a
+            // renamed file is read as that of a new one, every line added.
+            let from = listed.result.as_ref().ok().and_then(|detail| {
+                let group = side.unwrap_or(Group::Committed);
+                let file = detail.files.iter().find(|file| file.group == group && file.path == path)?;
+                file.from.clone()
+            });
+            Some((listed.repo.clone(), listed.target.clone(), side, path, from))
+        });
+        let Some((repo, target, side, path, from)) = wanted else {
+            self.buffer.set_text("");
+            *self.rendered.borrow_mut() = None;
+            return;
+        };
+
+        let key = (repo.clone(), target.clone(), side, path.clone());
+        let again = self.rendered.borrow().as_ref().is_some_and(|rendered| rendered.key == key);
+        if !again {
+            self.buffer.set_text("Reading…");
+            *self.rendered.borrow_mut() = None;
+        }
+
+        let (rx, cancel) = commit::spawn_patch(repo, target, path.clone(), from, side);
+        *self.reading.borrow_mut() = Some(cancel);
+        let viewer = Rc::clone(self);
+        glib::spawn_future_local(async move {
+            let Ok(result) = rx.recv().await else { return };
+            if viewer.generation.get() != mine {
+                return;
+            }
+            match result {
+                Ok(diff) => {
+                    let same = viewer
+                        .rendered
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|rendered| rendered.key == key && rendered.diff == diff);
+                    if same {
+                        return;
+                    }
+                    render_diff(&viewer.buffer, &diff, &path, viewer.dark);
+                    *viewer.rendered.borrow_mut() = Some(Rendered { key, diff });
+                }
+                Err(err) => {
+                    viewer.buffer.set_text(&err);
+                    *viewer.rendered.borrow_mut() = None;
+                }
+            }
+        });
+    }
+}
+
+/// Where the user was in the file list, taken down before the list is emptied
+/// so that they can be put back when it has been filled again.
+struct Place {
+    /// Every row that can be found again, in order, by the name it was given:
+    /// files, folders and group headings.
+    names: Vec<String>,
+    selected: Option<usize>,
+    /// The row the keyboard was on or in, if it was in the list at all.
+    focused: Option<usize>,
+}
+
+impl Place {
+    fn of(files: &gtk::ListBox) -> Self {
+        let selected = files.selected_row();
+        let focused = files
+            .root()
+            .and_then(|root| root.focus())
+            .filter(|widget| widget.is_ancestor(files))
+            .and_then(|widget| {
+                // The row itself, or the stage button inside it.
+                widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
+                    widget
+                        .ancestor(gtk::ListBoxRow::static_type())
+                        .and_downcast::<gtk::ListBoxRow>()
+                })
+            });
+        let mut place = Place { names: Vec::new(), selected: None, focused: None };
+        for (name, row) in named_rows(files) {
+            if selected.as_ref() == Some(&row) {
+                place.selected = Some(place.names.len());
+            }
+            if focused.as_ref() == Some(&row) {
+                place.focused = Some(place.names.len());
+            }
+            place.names.push(name);
+        }
+        place
+    }
+
+    /// The row of the rebuilt list to go back to from the one that was at
+    /// `from`, among those `wanted` accepts.
+    fn back(
+        &self,
+        from: Option<usize>,
+        rows: &HashMap<String, gtk::ListBoxRow>,
+        wanted: impl Fn(&gtk::ListBoxRow) -> bool,
+    ) -> Option<gtk::ListBoxRow> {
+        let name = way_back(&self.names, from?, |name| rows.get(name).is_some_and(&wanted))?;
+        rows.get(&name).cloned()
+    }
+}
+
+/// A row that is not folded away. Its own flag, and not `is_visible()`, which
+/// is false for every row while the pane itself is closed: the list is filled
+/// then too.
+fn is_shown(row: &gtk::ListBoxRow) -> bool {
+    row.get_visible()
+}
+
+/// A file's row, not folded away: one that can be the selection.
+fn is_shown_file(row: &gtk::ListBoxRow) -> bool {
+    row.is_selectable() && row.get_visible()
+}
+
+/// The rows of the list that carry a name of their own, in order.
+fn named_rows(files: &gtk::ListBox) -> Vec<(String, gtk::ListBoxRow)> {
+    (0..)
+        .map_while(|index| files.row_at_index(index))
+        .filter_map(|row| {
+            let name = row.widget_name();
+            ["file:", "dir:", "group:"]
+                .iter()
+                .any(|kind| name.starts_with(kind))
+                .then(|| (name.to_string(), row))
+        })
+        .collect()
+}
+
+/// The first row of the list that `wanted` accepts.
+fn first_row(files: &gtk::ListBox, wanted: impl Fn(&gtk::ListBoxRow) -> bool) -> Option<gtk::ListBoxRow> {
+    (0..).map_while(|index| files.row_at_index(index)).find(|row| wanted(row))
+}
+
+/// The row to go back to once the list has been rebuilt, by name: `names` is
+/// the list as it was, `from` the row the user was on, and `there` says
+/// whether a row of that name is in the new list to be gone to.
+///
+/// The same row, if it is still there. A file that has just been staged is
+/// not: it has left its group. Then the next file of that group, below or
+/// failing that above, which is the next one to stage, and where the cursor
+/// stays in lazygit. When the group has run out, the same file in the group
+/// it went to, so that the key that staged it would unstage it and nothing
+/// else. And only then whatever is nearest.
+fn way_back(names: &[String], from: usize, there: impl Fn(&str) -> bool) -> Option<String> {
+    let was = names.get(from)?.as_str();
+    if there(was) {
+        return Some(was.to_string());
+    }
+    let around = || names[from + 1..].iter().chain(names[..from].iter().rev()).map(String::as_str);
+    if let Some((token, path)) = was.strip_prefix("file:").and_then(|rest| rest.split_once(':')) {
+        let own = format!("file:{token}:");
+        if let Some(next) = around().find(|name| name.starts_with(&own) && there(name)) {
+            return Some(next.to_string());
+        }
+        let moved = ["c", "s", "u", "n"]
+            .iter()
+            .filter(|other| **other != token)
+            .map(|other| format!("file:{other}:{path}"))
+            .find(|name| there(name));
+        if moved.is_some() {
+            return moved;
+        }
+    }
+    around().find(|name| there(name)).map(str::to_string)
+}
+
+/// Scroll the list just far enough for `row` to be in view, if it is not.
+fn reveal(scroller: &gtk::ScrolledWindow, row: &gtk::ListBoxRow) {
+    let Some(bounds) = row.compute_bounds(scroller) else { return };
+    let adjustment = scroller.vadjustment();
+    let (top, bottom) = (f64::from(bounds.y()), f64::from(bounds.y() + bounds.height()));
+    if top < 0.0 {
+        adjustment.set_value(adjustment.value() + top);
+    } else if bottom > adjustment.page_size() {
+        adjustment.set_value(adjustment.value() + bottom - adjustment.page_size());
+    }
 }
 
 /// The group travels on the row with the path, so that the diff asked for is
@@ -1029,7 +1373,11 @@ fn prefix(origin: char) -> &'static str {
     }
 }
 
-fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBoxRow {
+fn row(
+    node: &Node,
+    group: Group,
+    on_write: Option<&Rc<dyn Fn(Write, String)>>,
+) -> gtk::ListBoxRow {
     match node {
         Node::Dir { name, depth } => {
             let label = gtk::Label::builder()
@@ -1043,6 +1391,9 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             let row = gtk::ListBoxRow::builder().child(&label).build();
             row.set_selectable(false);
             row.set_activatable(false);
+            // The arrow keys stop on a folder's row too, and the keyboard is
+            // put back on it by name when the list is rebuilt.
+            row.set_widget_name(&format!("dir:{}:{depth}:{name}", side_token(group)));
             row
         }
         Node::File { file, display, depth } => {
@@ -1111,7 +1462,8 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
 
             let mut tip = file.path.clone();
             if let Some(from) = &file.from {
-                tip = format!("{tip}\nrenamed from {from}");
+                let how = if file.change == commit::Change::Copied { "copied" } else { "renamed" };
+                tip = format!("{tip}\n{how} from {from}");
             }
             if file.group == Group::Conflicted {
                 tip.push_str("\nConflicted — resolve it in a terminal");
@@ -1124,5 +1476,115 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             row.set_widget_name(&format!("file:{}:{}", side_token(file.group), file.path));
             row
         }
+    }
+}
+
+// Nothing here builds a widget or needs a display: these are the parts of
+// the pane that are reasoning about names, and can be checked as such.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// Where the selection goes when the list `before` is rebuilt as `after`,
+    /// with the user on `on`.
+    fn back(before: &[&str], on: &str, after: &[&str]) -> Option<String> {
+        let before = list(before);
+        let from = before.iter().position(|name| name == on).expect("the row was in the list");
+        way_back(&before, from, |name| name.starts_with("file:") && after.contains(&name))
+    }
+
+    const BEFORE: [&str; 9] = [
+        "group:s",
+        "file:s:done.rs",
+        "group:u",
+        "dir:u:0:src",
+        "file:u:src/a.rs",
+        "file:u:src/b.rs",
+        "file:u:src/c.rs",
+        "group:n",
+        "file:n:notes.txt",
+    ];
+
+    #[test]
+    fn a_row_that_is_still_there_is_gone_back_to() {
+        let after = BEFORE;
+        assert_eq!(back(&BEFORE, "file:u:src/b.rs", &after).as_deref(), Some("file:u:src/b.rs"));
+    }
+
+    /// Space, Space, Space down a group: each stage takes its file out of the
+    /// group, and the cursor is on the next one.
+    #[test]
+    fn after_a_stage_the_cursor_is_on_the_next_file_to_stage() {
+        let after = [
+            "group:s",
+            "file:s:done.rs",
+            "file:s:src/b.rs",
+            "group:u",
+            "file:u:src/a.rs",
+            "file:u:src/c.rs",
+            "group:n",
+            "file:n:notes.txt",
+        ];
+        assert_eq!(back(&BEFORE, "file:u:src/b.rs", &after).as_deref(), Some("file:u:src/c.rs"));
+    }
+
+    /// The last of its group: the one above it, not the first file of the
+    /// group below, whose button does something else.
+    #[test]
+    fn the_last_file_of_a_group_gives_way_to_the_one_above_it() {
+        let after = [
+            "group:s",
+            "file:s:done.rs",
+            "file:s:src/c.rs",
+            "group:u",
+            "file:u:src/a.rs",
+            "file:u:src/b.rs",
+            "group:n",
+            "file:n:notes.txt",
+        ];
+        assert_eq!(back(&BEFORE, "file:u:src/c.rs", &after).as_deref(), Some("file:u:src/b.rs"));
+    }
+
+    /// When the group has run out the cursor follows the file to where it
+    /// went, so that the same key puts it back and touches nothing else.
+    #[test]
+    fn the_only_file_of_a_group_is_followed_into_the_group_it_went_to() {
+        let before = ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
+        let after = ["group:s", "file:s:done.rs", "file:s:only.rs", "group:n", "file:n:notes.txt"];
+        assert_eq!(back(&before, "file:u:only.rs", &after).as_deref(), Some("file:s:only.rs"));
+
+        // And back again, from a Staged group that held nothing else.
+        let staged = ["group:s", "file:s:only.rs", "group:n", "file:n:notes.txt"];
+        let unstaged = ["group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
+        assert_eq!(back(&staged, "file:s:only.rs", &unstaged).as_deref(), Some("file:u:only.rs"));
+    }
+
+    /// A file that went away altogether, reverted in an editor: whatever is
+    /// nearest, below first.
+    #[test]
+    fn a_file_that_is_gone_gives_way_to_its_nearest_neighbour() {
+        let before = ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
+        let after = ["group:s", "file:s:done.rs", "group:n", "file:n:notes.txt"];
+        assert_eq!(back(&before, "file:u:only.rs", &after).as_deref(), Some("file:n:notes.txt"));
+        let after = ["group:s", "file:s:done.rs"];
+        assert_eq!(back(&before, "file:u:only.rs", &after).as_deref(), Some("file:s:done.rs"));
+        assert_eq!(back(&before, "file:u:only.rs", &[]), None);
+    }
+
+    /// A path may hold colons, and a name that is not a file's has no group
+    /// to keep to.
+    #[test]
+    fn names_are_taken_apart_at_the_first_colon_after_the_group() {
+        let before = ["file:u:a:b.txt", "file:u:z.txt"];
+        let after = ["file:s:a:b.txt"];
+        assert_eq!(back(&before, "file:u:a:b.txt", &after).as_deref(), Some("file:s:a:b.txt"));
+
+        let rows = list(&["group:u", "file:u:a.rs"]);
+        assert_eq!(way_back(&rows, 0, |name| name == "file:u:a.rs").as_deref(), Some("file:u:a.rs"));
+        assert_eq!(way_back(&rows, 5, |_| true), None, "no such row to start from");
     }
 }
