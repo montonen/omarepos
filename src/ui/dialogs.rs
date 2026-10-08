@@ -1,6 +1,6 @@
 //! Dialogs: where repositories are looked for, and how they are tagged.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -527,26 +527,30 @@ fn root_row(
     row.add_row(&tag);
     row.add_row(&include_self);
 
+    // Set while the first switch is moving the second. Setting a switch runs
+    // its handler there and then, as if it had been clicked, and the second
+    // one's handler writes what it is given as the user's choice.
+    let syncing = Rc::new(Cell::new(false));
+
     {
         let cfg = Rc::clone(&cfg);
         let on_change = Rc::clone(&on_change);
         let path = path.clone();
         let row = row.clone();
         let include_self = include_self.clone();
+        let syncing = Rc::clone(&syncing);
         nested.connect_active_notify(move |switch| {
             let on = switch.is_active();
-            cfg.borrow_mut().update_root(&path, |entry| {
-                entry.nested = on;
-                // The default flips with `nested`, so an untouched switch
-                // should keep following the default rather than freeze.
-                if !on {
-                    entry.include_self = None;
-                }
-            });
+            let shown = set_nested(&mut cfg.borrow_mut(), &path, on);
             include_self.set_sensitive(on);
-            if !on {
-                include_self.set_active(true);
-            }
+            // Show what the config now resolves to, in both directions.
+            // Turning this on used to leave the other switch reading on
+            // while the container was hidden; turning it off set the other
+            // one, whose handler then wrote `include_self = true` over the
+            // `None` just written above, saved and rescanned a second time.
+            syncing.set(true);
+            include_self.set_active(shown);
+            syncing.set(false);
             persist(&cfg);
             refresh_summary(&cfg, &path, &row);
             on_change();
@@ -583,6 +587,9 @@ fn root_row(
         let path = path.clone();
         let row = row.clone();
         include_self.connect_active_notify(move |switch| {
+            if syncing.get() {
+                return;
+            }
             let on = switch.is_active();
             cfg.borrow_mut().update_root(&path, |entry| {
                 entry.include_self = Some(on);
@@ -594,6 +601,23 @@ fn root_row(
     }
 
     row
+}
+
+/// Mark the root at `path` as a workspace, or as not one, and say what "Show
+/// the containing repository" has to read afterwards: what the root now
+/// resolves to.
+fn set_nested(cfg: &mut Config, path: &Path, on: bool) -> bool {
+    let mut shown = !on;
+    cfg.update_root(path, |entry| {
+        entry.nested = on;
+        // The default flips with `nested`, so an untouched switch should keep
+        // following the default rather than freeze.
+        if !on {
+            entry.include_self = None;
+        }
+        shown = entry.include_self.unwrap_or(!entry.nested);
+    });
+    shown
 }
 
 fn root_summary(root: &crate::config::Root) -> String {
@@ -840,4 +864,42 @@ pub fn edit_tags_among(
     });
 
     dialog.present(Some(parent.as_ref()));
+}
+
+/// The halves of the dialog that are about the configuration and not about
+/// widgets. Nothing here builds one, so nothing needs a display.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WORKSPACE: &str = "/work/acme";
+
+    fn with_one_root() -> Config {
+        Config { roots: vec![RootSpec::Simple(WORKSPACE.to_string())], ..Config::default() }
+    }
+
+    /// "Show the containing repository" was set once, when the row was built.
+    /// Turning "Look inside repositories" on changed what the root resolved
+    /// to and left that switch where it was, reading on over a subtitle that
+    /// said "container hidden".
+    #[test]
+    fn the_second_workspace_switch_is_told_what_the_root_now_resolves_to() {
+        let path = Path::new(WORKSPACE);
+        let mut cfg = with_one_root();
+        assert!(cfg.roots[0].resolve().include_self, "a plain root shows itself");
+
+        assert!(!set_nested(&mut cfg, path, true), "a workspace hides its container");
+        let root = cfg.roots[0].resolve();
+        assert!(root.nested && !root.include_self);
+
+        // A choice the user made is kept while the root stays a workspace...
+        cfg.update_root(path, |entry| entry.include_self = Some(true));
+        assert!(set_nested(&mut cfg, path, true));
+
+        // ...and is not carried out of it: off leaves a bare path, with
+        // nothing written that turning it on again would be stuck with.
+        assert!(set_nested(&mut cfg, path, false));
+        assert!(matches!(cfg.roots[0], RootSpec::Simple(_)), "{:?}", cfg.roots[0]);
+        assert!(!set_nested(&mut cfg, path, true));
+    }
 }
