@@ -546,6 +546,7 @@ fn pull(
             max_parallel: 1,
             timeout: std::time::Duration::from_secs(120),
             pass: crate::refresh::Pass::One,
+            cancel: crate::refresh::Cancel::default(),
         },
     );
     let toasts = toasts.clone();

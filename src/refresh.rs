@@ -27,6 +27,7 @@
 //!   name are switched off; see [`Pass`].
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -132,22 +133,43 @@ const UNATTENDED: [&str; 6] = [
     "protocol.ext.allow=never",
 ];
 
+/// Set to abandon a pass that is under way. Repositories not yet started are
+/// left alone, and one that has been fetched is not then fast-forwarded. A
+/// fetch or a fast-forward already running is allowed to finish: stopping git
+/// in the middle of either is worse than letting it end.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
     pub fast_forward: bool,
     pub max_parallel: usize,
     pub timeout: Duration,
     pub pass: Pass,
+    pub cancel: Cancel,
 }
 
 impl Pass {
-    fn git<'a>(self, args: &[&'a str]) -> Vec<&'a str> {
-        let mut all: Vec<&'a str> = match self {
-            Pass::One => Vec::new(),
-            Pass::Fleet => UNATTENDED.to_vec(),
-        };
-        all.extend_from_slice(args);
-        all
+    /// Run git for this kind of pass.
+    fn git(self, path: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+        match self {
+            Pass::One => crate::gitcmd::run(path, args, timeout),
+            Pass::Fleet => {
+                let mut all = UNATTENDED.to_vec();
+                all.extend_from_slice(args);
+                crate::gitcmd::run_fenced(path, &all, timeout)
+            }
+        }
     }
 }
 
@@ -196,6 +218,9 @@ pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<E
             let tx = tx.clone();
             handles.push(std::thread::spawn(move || {
                 loop {
+                    if options.cancel.stopped() {
+                        return;
+                    }
                     let next = {
                         let mut guard = match queue.lock() {
                             Ok(guard) => guard,
@@ -239,8 +264,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(skip));
     }
 
-    let fetch = options.pass.git(&["fetch", "--quiet"]);
-    if let Err(err) = crate::gitcmd::run(path, &fetch, options.timeout) {
+    if let Err(err) = options.pass.git(path, &["fetch", "--quiet"], options.timeout) {
         return report(Outcome::Failed(err));
     }
 
@@ -282,8 +306,13 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(Skip::Dirty));
     }
 
-    let merge = options.pass.git(&FAST_FORWARD);
-    match crate::gitcmd::run(path, &merge, FAST_FORWARD_PATIENCE) {
+    // Called off while this repository was being fetched: it stays fetched,
+    // and where it was.
+    if options.cancel.stopped() {
+        return report(Outcome::Behind(behind));
+    }
+
+    match options.pass.git(path, &FAST_FORWARD, FAST_FORWARD_PATIENCE) {
         Ok(_) => report(Outcome::FastForwarded(behind)),
         Err(err) => report(Outcome::Refused(err)),
     }
@@ -427,7 +456,13 @@ mod tests {
     use crate::testkit::*;
 
     fn options(fast_forward: bool, pass: Pass) -> Options {
-        Options { fast_forward, max_parallel: 1, timeout: Duration::from_secs(30), pass }
+        Options {
+            fast_forward,
+            max_parallel: 1,
+            timeout: Duration::from_secs(30),
+            pass,
+            cancel: Cancel::default(),
+        }
     }
 
     /// What a pass across the whole fleet does to the repository under test.
@@ -623,6 +658,32 @@ mod tests {
         assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
     }
 
+    // ---- a pass can be called off -----------------------------------------
+
+    #[test]
+    fn a_pass_that_is_called_off_starts_nothing_more_and_updates_nothing() {
+        let _guard = isolate();
+        let f = fleet("refresh-called-off");
+        let before = f.head();
+        f.remote_moves(1);
+        let called_off = options(true, Pass::Fleet);
+        called_off.cancel.stop();
+
+        // A repository already being fetched when the pass is called off stays
+        // fetched, and where it was.
+        let got = refresh_one(&f.work, &called_off).outcome;
+        assert!(matches!(got, Outcome::Behind(1)), "{got:?}");
+        assert_eq!(f.head(), before);
+
+        // And nothing that had not started is started.
+        let rx = spawn(vec![f.work.clone(), f.seed.clone()], called_off);
+        let mut entered = 0;
+        while let Ok(Event::Repo(_)) = rx.recv_blocking() {
+            entered += 1;
+        }
+        assert_eq!(entered, 0);
+    }
+
     // ---- an update lands in the repository's own directory or nowhere ------
 
     #[test]
@@ -700,12 +761,7 @@ mod tests {
         git(&f.work, &["config", "filter.slow.smudge", "sh -c 'sleep 1; cat'"]);
         git(&f.work, &["config", "filter.slow.clean", "cat"]);
 
-        let hurried = Options {
-            fast_forward: true,
-            max_parallel: 1,
-            timeout: Duration::from_secs(1),
-            pass: Pass::Fleet,
-        };
+        let hurried = Options { timeout: Duration::from_secs(1), ..options(true, Pass::Fleet) };
         let got = refresh_one(&f.work, &hurried).outcome;
 
         assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");

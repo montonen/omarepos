@@ -7,6 +7,11 @@
 //! expects everywhere. Driving the same `git` they drive means their setup
 //! applies unchanged, and a thing they cannot do by hand is not something
 //! omarepos pretends it can do either.
+//!
+//! Two things are added to their setup, both so that nothing waits on a prompt
+//! nobody will answer: `GIT_TERMINAL_PROMPT=0`, and ssh's batch options, which
+//! are appended to the ssh command they configured rather than put in its
+//! place.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -42,6 +47,82 @@ const KEEP: usize = 1 << 20;
 /// The signal goes to git's whole process group, so a hook or filter it
 /// started stops with it.
 pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+    exec(dir, args, timeout, true)
+}
+
+/// As [`run`], for a pass nobody is watching. The one difference is whose
+/// word is taken for the ssh command: see [`ssh_command`].
+pub fn run_fenced(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
+    exec(dir, args, timeout, false)
+}
+
+/// What ssh has to be told so that it fails instead of waiting on a prompt
+/// nobody will answer.
+const BATCH: &str = "-o BatchMode=yes -o ConnectTimeout=10";
+
+/// The value to give `GIT_SSH_COMMAND`, or `None` to leave git to its own
+/// devices.
+///
+/// The variable used to be set to plain `ssh` with the batch options, always.
+/// But it outranks `core.sshCommand`, which is how a per-client key is usually
+/// chosen (often through the same `includeIf` that sets the identity), so a
+/// fetch or a push from here went out with the default key: failing where a
+/// hand-typed one works, or worse, succeeding as the wrong account. The batch
+/// options are now added to whatever the user configured.
+///
+/// `own_config` says whether the repository's own config is believed. For a
+/// repository the user pointed at, it is, as it would be for a command they
+/// typed. On a pass across the fleet it is not: an ssh command is a command,
+/// and a repository does not get to name one for a run nobody is watching.
+fn ssh_command(dir: &Path, args: &[&str], own_config: bool) -> Option<String> {
+    // Set by the user for this session: theirs, untouched.
+    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
+        return None;
+    }
+    let plain = || Some(format!("ssh {BATCH}"));
+    if !talks_to_a_remote(args) {
+        return plain();
+    }
+    let asked = Command::new("git")
+        .current_dir(dir)
+        .args(["config", "--show-scope", "--get", "core.sshCommand"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let Some((scope, configured)) = asked.as_deref().and_then(|line| line.split_once('\t')) else {
+        return plain();
+    };
+    if !own_config && matches!(scope, "local" | "worktree") {
+        return plain();
+    }
+    // A wrapper script may not take ssh's options; only ssh itself gets them.
+    let program = configured.split_whitespace().next().unwrap_or_default();
+    if Path::new(program).file_name().is_some_and(|name| name == "ssh") {
+        Some(format!("{configured} {BATCH}"))
+    } else if own_config || !matches!(scope, "local" | "worktree") {
+        None
+    } else {
+        plain()
+    }
+}
+
+/// Whether this is `fetch` or `push`, looking past any leading `-c key=value`.
+fn talks_to_a_remote(args: &[&str]) -> bool {
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if *arg == "-c" {
+            rest.next();
+            continue;
+        }
+        return matches!(*arg, "fetch" | "push");
+    }
+    false
+}
+
+fn exec(dir: &Path, args: &[&str], timeout: Duration, own_config: bool) -> Result<String, String> {
     let mut command = Command::new("git");
     command
         .current_dir(dir)
@@ -55,8 +136,8 @@ pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, Strin
         // nobody can answer, and the worker thread is gone for good.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0");
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10");
+    if let Some(ssh) = ssh_command(dir, args, own_config) {
+        command.env("GIT_SSH_COMMAND", ssh);
     }
 
     let mut child = command.spawn().map_err(|err| format!("git: {err}"))?;
@@ -310,6 +391,84 @@ mod tests {
         // And the repository still takes a command.
         let (ok, said) = try_git(&f.work, &["add", "-A"]);
         assert!(ok, "{said}");
+    }
+
+    // ---- whose ssh --------------------------------------------------------
+
+    /// Something to stand in for ssh: it writes down how it was called, and
+    /// fails, so nothing waits on a network.
+    fn recording(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let log = dir.join(format!("{name}.log"));
+        let script = dir.join("bin").join(name);
+        write(&script, &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 1\n", log.display()));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, log)
+    }
+
+    fn ssh_repo(name: &str) -> PathBuf {
+        let dir = repo(name);
+        git(&dir, &["remote", "add", "origin", "git@host.invalid:me/repo.git"]);
+        dir
+    }
+
+    /// `core.sshCommand` is how a per-client key is usually chosen. The
+    /// variable this module sets outranks it, and used to replace it.
+    #[test]
+    fn a_configured_ssh_is_kept_and_only_given_the_batch_options() {
+        let _guard = isolate();
+        let dir = ssh_repo("gitcmd-ssh-configured");
+        let (ssh, log) = recording(&dir, "ssh");
+        git(&dir, &["config", "core.sshCommand", &format!("{} -i id_work", ssh.display())]);
+
+        let _ = run(&dir, &["fetch", "--quiet"], PATIENT);
+
+        let called = read(&log);
+        assert!(called.contains("-i id_work"), "the configured key was dropped: {called}");
+        assert!(called.contains("BatchMode=yes"), "and it must still not wait on a prompt: {called}");
+    }
+
+    #[test]
+    fn a_wrapper_that_is_not_ssh_is_left_exactly_as_configured() {
+        let _guard = isolate();
+        let dir = ssh_repo("gitcmd-ssh-wrapper");
+        let (wrapper, log) = recording(&dir, "corp-ssh-wrapper");
+        git(&dir, &["config", "core.sshCommand", wrapper.to_str().unwrap()]);
+
+        let _ = run(&dir, &["fetch", "--quiet"], PATIENT);
+
+        let called = read(&log);
+        assert!(called.contains("host.invalid"), "the wrapper was not used: {called}");
+        assert!(!called.contains("BatchMode"), "it may not take ssh's options: {called}");
+    }
+
+    /// On a pass nobody is watching, a repository's own config does not get to
+    /// name the command; the user's config still does.
+    #[test]
+    fn a_fleet_pass_takes_the_ssh_command_from_the_user_not_from_the_repository() {
+        let _guard = isolate();
+        let dir = ssh_repo("gitcmd-ssh-fenced");
+        let (theirs, their_log) = recording(&dir, "repo-says-run-this");
+        git(&dir, &["config", "core.sshCommand", theirs.to_str().unwrap()]);
+
+        let _ = run_fenced(&dir, &["fetch", "--quiet"], PATIENT);
+        assert!(!their_log.exists(), "the repository's own command ran unattended");
+
+        // The same setting coming from outside the repository is the user's.
+        git(&dir, &["config", "--unset", "core.sshCommand"]);
+        let (mine, my_log) = recording(&dir, "ssh");
+        // SAFETY: under the isolation lock, and taken out again below.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_COUNT", "1");
+            std::env::set_var("GIT_CONFIG_KEY_0", "core.sshCommand");
+            std::env::set_var("GIT_CONFIG_VALUE_0", format!("{} -i id_work", mine.display()));
+        }
+        let _ = run_fenced(&dir, &["-c", "core.hooksPath=/dev/null", "fetch", "--quiet"], PATIENT);
+        unsafe {
+            for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"] {
+                std::env::remove_var(name);
+            }
+        }
+        assert!(read(&my_log).contains("-i id_work"), "{}", read(&my_log));
     }
 
     #[test]

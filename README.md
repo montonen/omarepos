@@ -241,7 +241,9 @@ With `fetch` off it only re-reads local state. With `fetch` on, ahead/behind
 stops going stale. With `fast_forward` on it also moves the checked-out branch.
 
 `Ctrl+Shift+R` runs a pass immediately, whatever the schedule says. The pass
-never pushes.
+never pushes. Changing a refresh setting, or the scan roots, calls off a pass
+that is under way: repositories it had not reached are left alone, and one
+that was being fetched is not then fast-forwarded.
 
 ### What it will and will not do
 
@@ -315,7 +317,11 @@ fetch either; it reports the failure and moves on.
 
 Prompts are disabled (`GIT_TERMINAL_PROMPT=0`, and SSH in batch mode), so a
 repository whose credentials have expired fails quickly instead of parking a
-worker on a prompt nobody can answer. The fetch has `timeout_seconds` as a
+worker on a prompt nobody can answer. The batch options are added to the ssh
+command you have configured, not put in its place: a `core.sshCommand` that
+picks a key per client, set globally or through `includeIf`, is still what
+runs. A repository's *own* `core.sshCommand` is believed when you act on that
+repository, and not on a pass across the fleet. The fetch has `timeout_seconds` as a
 backstop.
 
 The fast-forward does not share that timeout. It is a local write to your

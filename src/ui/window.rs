@@ -114,6 +114,9 @@ struct Ui {
     /// The repositories the user has seen; see `config::known_repos_path`.
     /// `None` until the first scan has recorded what was already here.
     known: RefCell<Option<BTreeSet<String>>>,
+    /// The way to call off the pass across the fleet that is under way, when
+    /// one is.
+    refresh_cancel: RefCell<Option<refresh::Cancel>>,
     refreshing: Cell<bool>,
     refresh_progress: Cell<(usize, usize)>,
     /// Unix seconds of the last completed fetch pass.
@@ -322,6 +325,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         checked_overdue: Cell::new(false),
         fetch_errors: RefCell::new(crate::config::load_fetch_errors()),
         known: RefCell::new(crate::config::load_known_repos()),
+        refresh_cancel: RefCell::new(None),
         refreshing: Cell::new(false),
         refresh_progress: Cell::new((0, 0)),
         last_refresh: Cell::new(crate::config::last_refresh()),
@@ -1102,6 +1106,13 @@ impl Ui {
         }
     }
 
+    /// Call off the pass across the fleet, if one is under way.
+    fn cancel_refresh(&self) {
+        if let Some(cancel) = self.refresh_cancel.borrow().as_ref() {
+            cancel.stop();
+        }
+    }
+
     fn refresh_scope(&self) -> Vec<PathBuf> {
         let wanted: Vec<String> = self
             .cfg
@@ -1188,6 +1199,8 @@ impl Ui {
         self.spinner.start();
         self.update_status();
 
+        let cancel = refresh::Cancel::default();
+        *self.refresh_cancel.borrow_mut() = Some(cancel.clone());
         let rx = refresh::spawn(
             repos,
             refresh::Options {
@@ -1197,6 +1210,7 @@ impl Ui {
                 // Nobody picked these one by one, whether the timer started
                 // the pass or a key did.
                 pass: refresh::Pass::Fleet,
+                cancel: cancel.clone(),
             },
         );
 
@@ -1267,12 +1281,22 @@ impl Ui {
             ui.refreshing.set(false);
             ui.spinner.stop();
             ui.spinner.set_visible(false);
-            let finished = now_seconds();
-            ui.last_refresh.set(Some(finished));
-            crate::config::record_refresh(finished);
+            ui.refresh_cancel.borrow_mut().take();
             crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
-            if manual || summary.updated > 0 || summary.failed > 0 || summary.refused > 0 {
-                ui.toasts.add_toast(adw::Toast::new(&summary.line()));
+            if cancel.stopped() {
+                // Not stamped as a refresh: the fleet was not covered, and the
+                // next pass should not think it was.
+                ui.toasts.add_toast(adw::Toast::new(&format!(
+                    "Refresh stopped after {done} of {total}: {}",
+                    summary.line()
+                )));
+            } else {
+                let finished = now_seconds();
+                ui.last_refresh.set(Some(finished));
+                crate::config::record_refresh(finished);
+                if manual || summary.updated > 0 || summary.failed > 0 || summary.refused > 0 {
+                    ui.toasts.add_toast(adw::Toast::new(&summary.line()));
+                }
             }
             // Re-read local state so the cards show what the fetch changed.
             ui.start_scan();
@@ -1641,6 +1665,8 @@ impl Ui {
         let rescan = {
             let ui = Rc::clone(self);
             Rc::new(move || {
+                // What the pass in flight was started for no longer holds.
+                ui.cancel_refresh();
                 ui.schedule_refresh();
                 ui.start_scan();
             }) as Rc<dyn Fn()>
@@ -1649,7 +1675,15 @@ impl Ui {
             let ui = Rc::clone(self);
             // Refresh settings change nothing in the grid, so this re-arms the
             // timer and updates the status line, and stops there.
-            Rc::new(move || ui.schedule_refresh()) as Rc<dyn Fn()>
+            Rc::new(move || {
+                // A pass under way was started with the settings as they
+                // were. Switching fast-forward off, or the refresh off, while
+                // the status bar reads "fetching 3/44" has to mean something
+                // for the other forty-one; the next pass reads the settings
+                // afresh.
+                ui.cancel_refresh();
+                ui.schedule_refresh();
+            }) as Rc<dyn Fn()>
         };
         let restyle = {
             let ui = Rc::clone(self);
@@ -1815,6 +1849,7 @@ impl Ui {
                 max_parallel: 1,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
                 pass: refresh::Pass::One,
+                cancel: refresh::Cancel::default(),
             },
         );
         let ui = Rc::clone(self);
