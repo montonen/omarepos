@@ -649,6 +649,16 @@ pub fn inspect(path: &Path) -> RepoInfo {
     // no way to list them short of running it.
 
     if !info.bare {
+        // No `update_index`, on purpose. Without it libgit2 never writes back
+        // the stat data it has just refreshed, so a repository whose files
+        // were copied, restored or touched is hashed in full on every scan,
+        // until git rewrites its own index (a commit, a fast-forward, a plain
+        // `git status`). With it, libgit2 writes `.git/index` back from the
+        // copy it read when it started: a `git add` that landed while it was
+        // hashing is gone, the extensions git keeps there are dropped, and a
+        // held `index.lock` fails the whole read. Slow is the better failure.
+        // The cure, where one is wanted, is git's own `update-index --refresh`
+        // on a repository the user has asked to have updated.
         let mut opts = StatusOptions::new();
         opts.include_untracked(true)
             .recurse_untracked_dirs(false)
