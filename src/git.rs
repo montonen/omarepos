@@ -96,10 +96,18 @@ pub struct RepoInfo {
     pub tracked_files: usize,
     pub langs: Vec<LangShare>,
     pub last_commit: Option<Commit>,
-    /// Who commits here — `includeIf gitdir:` makes this differ per repository,
+    /// `user.name` and `user.email` as libgit2 reads the configuration for
+    /// this directory. `includeIf gitdir:` makes this differ per repository,
     /// and a misconfigured rule is otherwise silent until something is pushed
     /// under the wrong name.
+    ///
+    /// It is what is configured, not who git will record, and the card words
+    /// it that way. Only git knows the second, and nothing runs git during a
+    /// scan; the commit box asks it ([`crate::commit::identity`]).
     pub identity: Option<String>,
+    /// What is in plain sight that makes git likely to record somebody other
+    /// than `identity`; see [`identity_doubt`].
+    pub identity_doubt: Option<String>,
     /// Set when libgit2 could not read the repository at all: it does not
     /// open, it is not this directory's, or HEAD or the commit it names cannot
     /// be read. A narrower failure has a field of its own, so that it does not
@@ -472,6 +480,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
         langs: Vec::new(),
         last_commit: None,
         identity: None,
+        identity_doubt: None,
         error: None,
     };
 
@@ -609,8 +618,15 @@ pub fn inspect(path: &Path) -> RepoInfo {
             })
         });
 
-    // libgit2 evaluates conditional includes, so this is the same answer
-    // `git config` gives in that directory — no subprocess needed.
+    // libgit2's reading of `user.*`, which is git's own for the plain case and
+    // for `includeIf gitdir:` and `onbranch:`. This comment used to say it was
+    // "the same answer `git config` gives", and the card printed it as "Commits
+    // as". It is not the same answer where the identity is chosen by remote
+    // URL (`hasconfig:`, which libgit2 skips), by `author.*`, or by the
+    // environment, and there the card named the wrong person with full
+    // confidence. Asking git would settle it, and nothing runs git in a
+    // repository nobody has looked at yet; so the card says what this is, and
+    // `identity_doubt` says when not to lean on it.
     if let Ok(config) = repo.config().and_then(|mut c| c.snapshot()) {
         let name = config.get_str("user.name").ok().map(str::to_string);
         let email = config.get_str("user.email").ok().map(str::to_string);
@@ -620,6 +636,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
             (None, Some(email)) => Some(email),
             (None, None) => None,
         };
+        info.identity_doubt = identity_doubt(&config, &|name| std::env::var_os(name).is_some());
     }
     // Nothing here says which credential helper a fetch will use. The card
     // used to, from two exact config keys and a host cut out of the tidied-up
@@ -720,6 +737,51 @@ pub fn inspect(path: &Path) -> RepoInfo {
     }
 
     info
+}
+
+/// The first thing in sight that outranks `user.name` and `user.email`, or
+/// that libgit2 passed over on the way to them, worded to follow "git may
+/// record someone else:". `None` is not a guarantee: it means only that none
+/// of the usual ways was seen.
+///
+/// `in_environment` says whether a variable is set, and is a parameter so that
+/// a test can ask without changing the environment of every other test.
+fn identity_doubt(config: &git2::Config, in_environment: &dyn Fn(&str) -> bool) -> Option<String> {
+    // For the author and the committer, git takes these ahead of `user.*`.
+    for key in ["author.name", "author.email", "committer.name", "committer.email"] {
+        if config.get_str(key).is_ok() {
+            return Some(format!("{key} is set, and outranks user.*"));
+        }
+    }
+    for name in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] {
+        if in_environment(name) {
+            return Some(format!("{name} is set in the environment, and outranks the configuration"));
+        }
+    }
+    // libgit2 follows three kinds of conditional include and reads straight
+    // past any other, without a word. The rule itself is still listed as an
+    // ordinary entry, which is how one that was skipped can be told.
+    let mut entries = config.entries(Some("^includeif\\.")).ok()?;
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.name() else { continue };
+        let Some(condition) = name
+            .strip_prefix("includeif.")
+            .and_then(|rest| rest.strip_suffix(".path"))
+        else {
+            continue;
+        };
+        let followed = ["gitdir:", "gitdir/i:", "onbranch:"]
+            .iter()
+            .any(|kind| condition.starts_with(kind));
+        if !followed {
+            let kind = condition.split(':').next().unwrap_or(condition);
+            return Some(format!(
+                "the configuration has an includeIf \"{kind}:\" rule, which only git itself evaluates"
+            ));
+        }
+    }
+    None
 }
 
 fn short(oid: &git2::Oid) -> String {
@@ -901,6 +963,61 @@ mod tests {
         assert_eq!(info.error, None);
         assert!(info.unborn);
         assert_eq!((info.tree.staged, info.tree.untracked), (1, 1));
+    }
+
+    // ---- who commits here, as far as can be read without asking git --------
+
+    /// Who git itself says a commit made here would be recorded as.
+    fn recorded_as(repo: &Path) -> String {
+        crate::commit::identity(repo).unwrap()
+    }
+
+    #[test]
+    fn the_card_does_not_vouch_for_an_identity_only_git_can_decide() {
+        let _guard = isolate();
+
+        // The plain case, and a rule of the kind libgit2 does follow: its
+        // reading and git's agree, and nothing is in doubt.
+        let f = fleet("inspect-identity-gitdir");
+        let info = inspect(&f.work);
+        assert_eq!(info.identity.as_deref(), Some("Fixture <fixture@example.invalid>"));
+        assert_eq!(info.identity_doubt, None);
+        let client = f.root.join("client.inc");
+        write(&client, "[user]\n\temail = me@client.example\n");
+        let rule = format!("includeIf.gitdir:{}/.path", f.work.display());
+        git(&f.work, &["config", &rule, client.to_str().unwrap()]);
+        let info = inspect(&f.work);
+        assert_eq!(info.identity.as_deref(), Some("Fixture <me@client.example>"));
+        assert_eq!(info.identity.as_deref(), Some(recorded_as(&f.work).as_str()));
+        assert_eq!(info.identity_doubt, None);
+
+        // Chosen by remote URL, which libgit2 reads straight past: the card
+        // used to name the wrong person here, as "Commits as".
+        let f = fleet("inspect-identity-hasconfig");
+        let client = f.root.join("client.inc");
+        write(&client, "[user]\n\temail = me@client.example\n");
+        let rule = "includeIf.hasconfig:remote.*.url:**/remote.git.path";
+        git(&f.work, &["config", rule, client.to_str().unwrap()]);
+        assert_eq!(recorded_as(&f.work), "Fixture <me@client.example>");
+        let info = inspect(&f.work);
+        assert_eq!(info.identity.as_deref(), Some("Fixture <fixture@example.invalid>"));
+        let doubt = info.identity_doubt.expect("a rule it cannot evaluate is a reason to doubt");
+        assert!(doubt.contains("hasconfig"), "{doubt}");
+
+        // `author.*` outranks `user.*`, and libgit2 was never asked for it.
+        let f = fleet("inspect-identity-author");
+        git(&f.work, &["config", "author.email", "author@elsewhere.example"]);
+        assert_eq!(recorded_as(&f.work), "Fixture <author@elsewhere.example>");
+        let info = inspect(&f.work);
+        assert_eq!(info.identity.as_deref(), Some("Fixture <fixture@example.invalid>"));
+        assert!(info.identity_doubt.is_some_and(|doubt| doubt.contains("author.email")));
+
+        // And so does the environment git will be started in.
+        let repo = Repository::open(&f.seed).unwrap();
+        let config = repo.config().and_then(|mut c| c.snapshot()).unwrap();
+        assert_eq!(identity_doubt(&config, &|_| false), None);
+        let doubt = identity_doubt(&config, &|name| name == "GIT_COMMITTER_EMAIL").unwrap();
+        assert!(doubt.contains("GIT_COMMITTER_EMAIL"), "{doubt}");
     }
 
     #[test]

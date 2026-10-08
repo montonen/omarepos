@@ -99,8 +99,21 @@ pub fn build(
         .build();
     path.add_css_class("om-path");
     let mut where_tip = info.path.display().to_string();
+    // "Commits as", this used to say, of a reading taken without asking git.
+    // It is the configuration, so it is called that; who a commit is recorded
+    // as is git's to say, and the commit box is where git is asked.
     if let Some(identity) = &info.identity {
-        where_tip.push_str(&format!("\n\nCommits as {identity}"));
+        where_tip.push_str(&format!("\n\nConfigured to commit as {identity}"));
+        match &info.identity_doubt {
+            Some(doubt) => where_tip.push_str(&format!(
+                "\nBut git may record someone else: {doubt}. \
+                 The commit box, under Local changes, asks git."
+            )),
+            None => where_tip.push_str(
+                "\n(user.name and user.email, read without running git. \
+                 The commit box, under Local changes, asks git.)",
+            ),
+        }
     }
     where_tip.push_str("\n\nClick the card for its commit graph.");
     path.set_tooltip_text(Some(&where_tip));
