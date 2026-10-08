@@ -93,6 +93,10 @@ pub struct Report {
     pub name: String,
     pub path: PathBuf,
     pub outcome: Outcome,
+    /// Whether the fetch happened. A repository skipped before it has proved
+    /// nothing about its remote, and must not clear the record of a fetch that
+    /// failed last time.
+    pub fetched: bool,
 }
 
 pub enum Event {
@@ -250,7 +254,13 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
-    let report = |outcome| Report { name: name.clone(), path: path.to_path_buf(), outcome };
+    let fetched = std::cell::Cell::new(false);
+    let report = |outcome| Report {
+        name: name.clone(),
+        path: path.to_path_buf(),
+        outcome,
+        fetched: fetched.get(),
+    };
 
     let repo = match Repository::open(path) {
         Ok(repo) => repo,
@@ -267,6 +277,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     if let Err(err) = options.pass.git(path, &["fetch", "--quiet"], options.timeout) {
         return report(Outcome::Failed(err));
     }
+    fetched.set(true);
 
     // Re-open so the fetched refs are visible; libgit2 caches aggressively.
     let repo = match Repository::open(path) {

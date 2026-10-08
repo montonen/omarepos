@@ -101,8 +101,9 @@ impl RepoInfo {
         if self.ahead > 0 {
             return Some("unpushed commits of its own");
         }
-        // Untracked files do not block a fast-forward; git refuses rather than
-        // overwriting one, so they are not the user's problem here.
+        // Untracked files do not hold a fast-forward back. The exception, an
+        // incoming file of the same name, is one only git can see coming: it
+        // refuses, and the refusal is shown on the card when it happens.
         if self.tree.staged + self.tree.unstaged + self.tree.conflicted > 0 {
             return Some("uncommitted changes");
         }

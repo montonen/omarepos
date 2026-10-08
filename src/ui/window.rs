@@ -760,6 +760,7 @@ impl Ui {
                         if !one_off {
                             seeded_any |= ui.meta.borrow_mut().prune() > 0;
                             ui.reconcile_known();
+                            ui.forget_trouble_for_the_departed();
                         }
                         if seeded_any {
                             if let Err(err) = ui.meta.borrow().save() {
@@ -906,13 +907,21 @@ impl Ui {
             let cfg = self.cfg.borrow();
             cfg.refresh.enabled() && cfg.refresh.fast_forward
         };
+        // "Held back" is a statement about the refresh, and only true of a
+        // repository the refresh would have updated: one outside `only_tags`,
+        // or not yet seen, is not being held back by anything.
+        let in_scope: HashSet<PathBuf> =
+            crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref())
+                .0
+                .into_iter()
+                .collect();
         for info in &repos {
             let tags = self.meta.borrow().tags_for(&info.path).to_vec();
             let errors = self.fetch_errors.borrow();
             let ctx = card::Context {
                 tags: &tags,
                 selected: self.selected.borrow().contains(&info.path),
-                auto_update,
+                auto_update: auto_update && in_scope.contains(&info.path),
                 trouble: errors.get(&info.path.display().to_string()),
                 unseen: !self.is_known(&info.path),
             };
@@ -1075,6 +1084,19 @@ impl Ui {
         }
     }
 
+    /// A repository that is no longer on the grid cannot be shown its record,
+    /// and the record would otherwise sit in the state file for good.
+    fn forget_trouble_for_the_departed(&self) {
+        let here: HashSet<String> =
+            self.repos.borrow().iter().map(|repo| repo.path.display().to_string()).collect();
+        let mut errors = self.fetch_errors.borrow_mut();
+        let before = errors.len();
+        errors.retain(|path, _| here.contains(path));
+        if errors.len() != before {
+            crate::config::save_fetch_errors(&errors);
+        }
+    }
+
     /// At the end of a scan: on the first run, take everything found as seen;
     /// after that, forget repositories that are gone, so that something else
     /// appearing at the same path later is new again.
@@ -1102,6 +1124,36 @@ impl Ui {
                 if known.len() != before {
                     crate::config::save_known_repos(known);
                 }
+            }
+        }
+    }
+
+    /// Keep the record of what the last fetch or update of a repository could
+    /// not do, from one report. Every way a repository gets fetched goes
+    /// through here (the pass across the fleet, `p` and `f` on a card, and the
+    /// same keys on a graph page), so a card cannot go on saying "fetch failed"
+    /// about a repository that has since been fetched by hand. Returns whether
+    /// this is trouble the record did not already hold.
+    fn note_outcome(&self, report: &refresh::Report) -> bool {
+        let key = report.path.display().to_string();
+        let trouble = match &report.outcome {
+            refresh::Outcome::Failed(err) => Some(Trouble::Fetch(err.clone())),
+            refresh::Outcome::Refused(why) => Some(Trouble::Update { refused: why.clone() }),
+            _ => None,
+        };
+        let mut errors = self.fetch_errors.borrow_mut();
+        match trouble {
+            Some(trouble) => {
+                let new = errors.get(&key) != Some(&trouble);
+                errors.insert(key, trouble);
+                new
+            }
+            None => {
+                // Only a fetch that happened clears one that failed.
+                if report.fetched {
+                    errors.remove(&key);
+                }
+                false
             }
         }
     }
@@ -1166,7 +1218,7 @@ impl Ui {
         if self.refreshing.get() || self.spinner.is_visible() {
             if manual {
                 self.toasts
-                    .add_toast(adw::Toast::new("Already busy — try again in a moment"));
+                    .add_toast(ui::toast("Already busy — try again in a moment"));
             }
             return;
         }
@@ -1183,7 +1235,7 @@ impl Ui {
             crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref());
         if repos.is_empty() {
             if manual {
-                self.toasts.add_toast(adw::Toast::new(&if unseen > 0 {
+                self.toasts.add_toast(ui::toast(&if unseen > 0 {
                     format!("Nothing fetched: {unseen} new here, open each once to include it")
                 } else {
                     "Nothing in scope to fetch".to_string()
@@ -1221,56 +1273,41 @@ impl Ui {
                 summary.add(&refresh::Outcome::Skipped(refresh::Skip::Unseen));
             }
             let mut done = 0usize;
+            // Trouble that was not already on a card. A repository that fails
+            // the same way on every pass is said once, not every half hour.
+            let mut new_trouble = 0usize;
             while let Ok(event) = rx.recv().await {
                 match event {
                     refresh::Event::Repo(report) => {
                         done += 1;
                         ui.refresh_progress.set((done, total));
                         summary.add(&report.outcome);
-                        let key = report.path.display().to_string();
-                        match &report.outcome {
-                            refresh::Outcome::Failed(err) => {
-                                ui.fetch_errors
-                                    .borrow_mut()
-                                    .insert(key.clone(), Trouble::Fetch(err.clone()));
-                                eprintln!(
-                                    "omarepos: {} failed: {err} ({})",
-                                    report.name,
-                                    report.path.display()
-                                );
-                            }
-                            refresh::Outcome::Refused(why) => {
-                                ui.fetch_errors
-                                    .borrow_mut()
-                                    .insert(key.clone(), Trouble::Update { refused: why.clone() });
-                                eprintln!(
-                                    "omarepos: {} fetched but not updated: {why} ({})",
-                                    report.name,
-                                    report.path.display()
-                                );
-                            }
-                            refresh::Outcome::FastForwarded(n) => {
-                                eprintln!(
-                                    "omarepos: {} fast-forwarded {n} commits ({})",
-                                    report.name,
-                                    report.path.display()
-                                );
-                            }
-                            refresh::Outcome::Skipped(skip) => {
-                                eprintln!(
-                                    "omarepos: {} left alone: {} ({})",
-                                    report.name,
-                                    skip.reason(),
-                                    report.path.display()
-                                );
-                            }
-                            _ => {}
+                        if ui.note_outcome(&report) {
+                            new_trouble += 1;
                         }
-                        if !matches!(
-                            report.outcome,
-                            refresh::Outcome::Failed(_) | refresh::Outcome::Refused(_)
-                        ) {
-                            ui.fetch_errors.borrow_mut().remove(&key);
+                        match &report.outcome {
+                            refresh::Outcome::Failed(err) => eprintln!(
+                                "omarepos: {} failed: {err} ({})",
+                                report.name,
+                                report.path.display()
+                            ),
+                            refresh::Outcome::Refused(why) => eprintln!(
+                                "omarepos: {} fetched but not updated: {why} ({})",
+                                report.name,
+                                report.path.display()
+                            ),
+                            refresh::Outcome::FastForwarded(n) => eprintln!(
+                                "omarepos: {} fast-forwarded {n} commits ({})",
+                                report.name,
+                                report.path.display()
+                            ),
+                            refresh::Outcome::Skipped(skip) => eprintln!(
+                                "omarepos: {} left alone: {} ({})",
+                                report.name,
+                                skip.reason(),
+                                report.path.display()
+                            ),
+                            _ => {}
                         }
                         ui.update_status();
                     }
@@ -1286,7 +1323,7 @@ impl Ui {
             if cancel.stopped() {
                 // Not stamped as a refresh: the fleet was not covered, and the
                 // next pass should not think it was.
-                ui.toasts.add_toast(adw::Toast::new(&format!(
+                ui.toasts.add_toast(ui::toast(&format!(
                     "Refresh stopped after {done} of {total}: {}",
                     summary.line()
                 )));
@@ -1294,8 +1331,8 @@ impl Ui {
                 let finished = now_seconds();
                 ui.last_refresh.set(Some(finished));
                 crate::config::record_refresh(finished);
-                if manual || summary.updated > 0 || summary.failed > 0 || summary.refused > 0 {
-                    ui.toasts.add_toast(adw::Toast::new(&summary.line()));
+                if manual || summary.updated > 0 || new_trouble > 0 {
+                    ui.toasts.add_toast(ui::toast(&summary.line()));
                 }
             }
             // Re-read local state so the cards show what the fetch changed.
@@ -1756,7 +1793,7 @@ impl Ui {
     fn open_graph(self: &Rc<Self>, info: &RepoInfo) {
         if let Some(err) = &info.error {
             self.toasts
-                .add_toast(adw::Toast::new(&format!("{}: {err}", info.name)));
+                .add_toast(ui::toast(&format!("{}: {err}", info.name)));
             return;
         }
         self.accept(&info.path);
@@ -1778,6 +1815,7 @@ impl Ui {
             self.terminal_opener(&info.path),
             self.editor_opener(&info.path),
             on_contributions,
+            self.pull_recorder(),
         ));
     }
 
@@ -1786,7 +1824,7 @@ impl Ui {
         let (repos, scope) = self.contribution_scope();
         if repos.is_empty() {
             self.toasts
-                .add_toast(adw::Toast::new("No repositories to search"));
+                .add_toast(ui::toast("No repositories to search"));
             return;
         }
         let nav = self.nav.clone();
@@ -1814,6 +1852,7 @@ impl Ui {
                     Rc::clone(&open_terminal_there),
                     Rc::clone(&open_editor_there),
                     on_contributions,
+                    ui_for_terminal.pull_recorder(),
                 ));
             });
         self.nav.push(&ui::search::page(repos, scope, on_open));
@@ -1825,7 +1864,7 @@ impl Ui {
     /// says so.
     fn pull_one(self: &Rc<Self>, path: PathBuf, fast_forward: bool) {
         if self.refreshing.get() || self.spinner.is_visible() {
-            self.toasts.add_toast(adw::Toast::new("Already busy"));
+            self.toasts.add_toast(ui::toast("Already busy"));
             return;
         }
         // Asking for a repository by name is looking at it.
@@ -1858,6 +1897,7 @@ impl Ui {
             while let Ok(event) = rx.recv().await {
                 match event {
                     refresh::Event::Repo(report) => {
+                        ui.note_outcome(&report);
                         said = match &report.outcome {
                             refresh::Outcome::FastForwarded(n) => {
                                 format!("{name}: {n} commits pulled")
@@ -1881,9 +1921,19 @@ impl Ui {
             ui.refreshing.set(false);
             ui.spinner.stop();
             ui.spinner.set_visible(false);
-            ui.toasts.add_toast(adw::Toast::new(&said));
+            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+            ui::say(&ui.toasts, &said);
             ui.start_scan();
         });
+    }
+
+    /// What a graph page calls when a fetch or pull it started has finished.
+    fn pull_recorder(self: &Rc<Self>) -> Rc<dyn Fn(&refresh::Report)> {
+        let ui = Rc::clone(self);
+        Rc::new(move |report| {
+            ui.note_outcome(report);
+            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
+        })
     }
 
     /// Opening a terminal needs the configured terminal and runner, which the
@@ -1903,7 +1953,7 @@ impl Ui {
     fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
             self.toasts
-                .add_toast(adw::Toast::new("No repositories to report on"));
+                .add_toast(ui::toast("No repositories to report on"));
             return;
         }
         self.nav.push(&ui::stats::page(repos, scope));
@@ -1923,7 +1973,7 @@ impl Ui {
                 let path = info.path.display().to_string();
                 self.window.clipboard().set_text(&path);
                 self.toasts
-                    .add_toast(adw::Toast::new(&format!("Copied {path}")));
+                    .add_toast(ui::toast(&format!("Copied {path}")));
             }
         }
     }

@@ -195,11 +195,11 @@ pub fn pane(
             let Some((repo, Target::Working)) = showing.borrow().clone() else { return };
             let text = message.text().to_string();
             if let Some(reason) = commit::why_not_commit(&repo, staged_count.get(), &text) {
-                totals.set_label(&reason);
+                tell(&totals, &reason);
                 return;
             }
             button.set_sensitive(false);
-            totals.set_label("Committing…");
+            tell(&totals, "Committing…");
 
             let rx = commit::spawn_commit(repo, text);
             let button = button.clone();
@@ -213,14 +213,15 @@ pub fn pane(
                 match result {
                     Ok(Ok(sha)) => {
                         message.set_text("");
-                        totals.set_label(&format!("Committed {sha}"));
+                        tell(&totals, &format!("Committed {sha}"));
                         if let Some(reload) = reload.borrow().clone() {
                             reload();
                         }
                         on_changed(true);
                     }
                     // A hook that refuses is quoted rather than paraphrased.
-                    Ok(Err(err)) => totals.set_label(&err),
+                    // The label holds one line; the rest is in its tooltip.
+                    Ok(Err(err)) => tell(&totals, &err),
                     Err(_) => totals.set_label("The commit could not be started"),
                 }
             });
@@ -285,7 +286,7 @@ pub fn pane(
             if let Some(cancel) = running.borrow_mut().take() {
                 cancel.stop();
             }
-            totals.set_label("Reading…");
+            tell(&totals, "Reading…");
 
             let generation = Rc::clone(&generation);
             let running = Rc::clone(&running);
@@ -342,7 +343,7 @@ pub fn pane(
                                     }
                                     on_changed(false);
                                 }
-                                Ok(Err(err)) => totals.set_label(&err),
+                                Ok(Err(err)) => tell(&totals, &err),
                                 Err(_) => {}
                             }
                         });
@@ -426,13 +427,13 @@ pub fn pane(
                             row.set_activatable(false);
                             files.append(&row);
                         }
-                        totals.set_label(&summary(&detail));
+                        tell(&totals, &summary(&detail));
                     }
                     Err(err) => {
                         subject.set_label("Could not read this commit");
                         meta.set_label(&err);
                         body_scroller.set_visible(false);
-                        totals.set_label("");
+                        tell(&totals, "");
                     }
                 }
             });
@@ -553,7 +554,8 @@ fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> g
     toggle.set_tooltip_text(Some(if group.blocks_update() {
         "These changes stop the background refresh from updating this repository"
     } else {
-        "Untracked files never block an update — git refuses rather than overwriting one"
+        "Untracked files do not hold an update back. Where an incoming commit adds a file of \
+         the same name, git refuses rather than overwrite it, and the card says which"
     }));
     let shown = std::cell::Cell::new(open);
     toggle.connect_clicked(move |_| {
@@ -580,6 +582,17 @@ fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> g
         row.add_css_class("om-aside");
     }
     row
+}
+
+/// Put a message in the pane's one status line. The line holds a single
+/// ellipsized row, and some of what lands in it is longer than that: a refusal
+/// that explains itself, or several lines from a hook. The whole of it goes in
+/// the tooltip, so it can be read.
+fn tell(label: &gtk::Label, text: &str) {
+    let first = text.lines().next().unwrap_or_default();
+    label.set_label(first);
+    let more = text.lines().count() > 1 || first.chars().count() > 60;
+    label.set_tooltip_text(more.then_some(text));
 }
 
 fn describe(detail: &Detail) -> String {

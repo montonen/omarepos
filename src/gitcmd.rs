@@ -225,17 +225,30 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// Pick the line worth showing out of git's output.
+/// How much of a hook's output is kept when it is all there is to show.
+const SAID_LINES: usize = 40;
+
+/// Pick what is worth showing out of git's output.
 ///
 /// The first line is not it. A rejected push opens with `To <url>`, which says
 /// nothing; the reason is further down in `! [rejected]` or `error:`. Prefer a
-/// line that carries a complaint, and fall back to the first only when none
-/// does.
+/// line of git's own that carries a complaint.
+///
+/// When there is none, what is left is somebody else talking: a hook that
+/// refused, in its own words, which is the thing the caller most needs to
+/// see. All of it is returned, not its first line. A linter's first line is
+/// the name of the script it ran, and its findings come after.
 fn explain(stderr: &str, stdout: &str) -> String {
-    let lines: Vec<&str> = stderr
+    // A hook's standard output arrives on git's; put it ahead of what git
+    // adds on the way out.
+    let lines: Vec<&str> = stdout
         .lines()
-        .chain(stdout.lines())
+        .chain(stderr.lines())
         .filter(|line| !line.trim().is_empty())
+        // git's closing remark after a hook or the remote has already said
+        // why. On its own it sends the reader to look for a reason that was
+        // on the line above.
+        .filter(|line| !line.trim().to_lowercase().starts_with("error: failed to push some refs"))
         .collect();
 
     let complaint = lines.iter().position(|line| {
@@ -246,8 +259,12 @@ fn explain(stderr: &str, stdout: &str) -> String {
             || lower.contains("rejected")
     });
 
-    let Some(at) = complaint.or(if lines.is_empty() { None } else { Some(0) }) else {
-        return "git failed".to_string();
+    let Some(at) = complaint else {
+        if lines.is_empty() {
+            return "git failed".to_string();
+        }
+        let from = lines.len().saturating_sub(SAID_LINES);
+        return lines[from..].iter().map(|line| line.trim_end()).collect::<Vec<_>>().join("\n");
     };
     let mut said = lines[at].trim().trim_start_matches("! ").trim().to_string();
 
@@ -334,6 +351,7 @@ mod tests {
 
         let said = got.unwrap_err();
         assert!(said.starts_with("lint:"), "the hook's own words, not: {said}");
+        assert_eq!(said.lines().count(), SAID_LINES, "its last lines, and no more than fit");
         assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
         assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first");
     }
@@ -487,5 +505,30 @@ mod tests {
              .env, local/notes.md"
         );
         assert_eq!(explain("", ""), "git failed");
+    }
+
+    /// The README promises a hook's refusal "quoted back as git wrote it".
+    #[test]
+    fn a_hook_that_refuses_is_quoted_in_full_and_not_talked_over() {
+        let _guard = isolate();
+
+        // A linter: its first line is the script's name, the findings follow.
+        let dir = repo("gitcmd-hook-lint");
+        hook(
+            &dir,
+            "pre-commit",
+            "echo '> lint-staged'\necho 'src/app.ts'\necho '  12:3  error  no-unused-vars'\necho '1 problem'\nexit 1",
+        );
+        stage_something(&dir);
+        let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
+        assert_eq!(said, "> lint-staged\nsrc/app.ts\n  12:3  error  no-unused-vars\n1 problem");
+
+        // A pre-push hook: git follows it with "error: failed to push some
+        // refs", which used to be what was shown.
+        let f = fleet("gitcmd-hook-pre-push");
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+        hook(&f.work, "pre-push", "echo 'pre-push: 3 tests failing, fix them before pushing'\nexit 1");
+        let said = run(&f.work, &["push", "origin", "main"], PATIENT).unwrap_err();
+        assert_eq!(said, "pre-push: 3 tests failing, fix them before pushing");
     }
 }

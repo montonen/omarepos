@@ -7,7 +7,7 @@ pub mod shortcuts;
 pub mod stats;
 pub mod window;
 
-use gtk::prelude::*;
+use adw::prelude::*;
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -26,6 +26,54 @@ pub enum Action {
     OpenEditor,
     OpenFolder,
     CopyPath,
+}
+
+/// A toast that shows `text` as it is. A toast's title is Pango markup unless
+/// told otherwise, and most of what this application says in one came from
+/// somewhere else: git's complaint, a hook's output, a branch or directory
+/// name. An ampersand in any of those left the toast blank, which lost the one
+/// sentence explaining why a push was refused.
+pub fn toast(text: &str) -> adw::Toast {
+    adw::Toast::builder().title(text).use_markup(false).build()
+}
+
+/// Say what git said. One line goes in a toast. More than one, which is what a
+/// hook that refuses usually has to say, puts the first line in the toast with
+/// a button that shows the rest: a toast holds a single line, and the lines
+/// after the first are where a linter lists what it objected to.
+pub fn say(overlay: &adw::ToastOverlay, text: &str) {
+    let text = text.trim();
+    let first = text.lines().next().unwrap_or_default();
+    let toast = toast(first);
+    if text.lines().count() > 1 {
+        toast.set_button_label(Some("Show all"));
+        toast.set_timeout(0);
+        let overlay_for_dialog = overlay.clone();
+        let whole = text.to_string();
+        toast.connect_button_clicked(move |_| {
+            let dialog = adw::AlertDialog::new(Some("What git said"), None);
+            let body = gtk::Label::builder()
+                .label(&whole)
+                .selectable(true)
+                .wrap(true)
+                .xalign(0.0)
+                .build();
+            body.add_css_class("monospace");
+            let scroller = gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .max_content_height(360)
+                .min_content_width(520)
+                .child(&body)
+                .build();
+            dialog.set_extra_child(Some(&scroller));
+            dialog.add_response("close", "Close");
+            dialog.set_default_response(Some("close"));
+            dialog.set_close_response("close");
+            dialog.present(Some(&overlay_for_dialog));
+        });
+    }
+    overlay.add_toast(toast);
 }
 
 /// Human-friendly age of a unix timestamp, in the style git itself uses.

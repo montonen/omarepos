@@ -247,7 +247,11 @@ pub fn page(
                 *listed.borrow_mut() = visible;
 
                 if found == 0 {
-                    empty.set_description(Some(&format!("Nothing in {searched} repositories matches “{query}”.")));
+                    // A status page's description is markup, with no switch
+                    // to say otherwise, and this is what was typed.
+                    empty.set_description(Some(&glib::markup_escape_text(&format!(
+                        "Nothing in {searched} repositories matches “{query}”."
+                    ))));
                     stack.set_visible_child_name("empty");
                 } else {
                     stack.set_visible_child_name("results");
@@ -344,7 +348,7 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
         let toasts = toasts.clone();
         copy.connect_clicked(move |button| {
             button.clipboard().set_text(&id);
-            toasts.add_toast(adw::Toast::new(&format!("Copied {short}")));
+            toasts.add_toast(crate::ui::toast(&format!("Copied {short}")));
         });
     }
     line.append(&copy);

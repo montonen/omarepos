@@ -85,6 +85,7 @@ pub fn settings(
 
             if roots.is_empty() {
                 let row = adw::ActionRow::builder()
+                    .use_markup(false)
                     .title("No roots")
                     .subtitle("Nothing will be scanned until you add a folder.")
                     .build();
@@ -409,6 +410,12 @@ fn root_row(
     let path = resolved.path.clone();
 
     let row = adw::ExpanderRow::builder()
+
+        // A path is not markup, and one with an ampersand in it used to
+
+        // leave its row blank.
+
+        .use_markup(false)
         .title(spec.path_str())
         .subtitle(root_summary(&resolved))
         .build();
@@ -536,6 +543,7 @@ fn removable_row(
 ) -> adw::ActionRow {
     let expanded = crate::config::expand(entry);
     let row = adw::ActionRow::builder()
+        .use_markup(false)
         .title(entry)
         .subtitle(if expanded.exists() { "" } else { "missing" })
         .build();
@@ -575,7 +583,7 @@ fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
     let mut node = widget.as_ref().parent();
     while let Some(current) = node {
         if let Ok(overlay) = current.clone().downcast::<adw::ToastOverlay>() {
-            overlay.add_toast(adw::Toast::new(text));
+            overlay.add_toast(crate::ui::toast(text));
             return;
         }
         node = current.parent();

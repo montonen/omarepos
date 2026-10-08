@@ -41,6 +41,7 @@ pub fn page(
     on_terminal: Rc<dyn Fn()>,
     on_editor: Rc<dyn Fn()>,
     on_contributions: Rc<dyn Fn(PathBuf)>,
+    on_pulled: Rc<dyn Fn(&crate::refresh::Report)>,
 ) -> adw::NavigationPage {
     let title = adw::WindowTitle::new(name, &tildify(path));
     let header = adw::HeaderBar::new();
@@ -218,6 +219,7 @@ pub fn page(
         // page alive after it was closed.
         let toasts = toasts.downgrade();
         let reload = Rc::clone(&reload_page);
+        let on_pulled = Rc::clone(&on_pulled);
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, key, _, state| {
             if !crate::ui::unmodified(state) {
@@ -228,11 +230,11 @@ pub fn page(
             };
             match key {
                 gtk::gdk::Key::p => {
-                    pull(&repo, &toasts, Rc::clone(&reload), true);
+                    pull(&repo, &toasts, Rc::clone(&reload), Rc::clone(&on_pulled), true);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::f => {
-                    pull(&repo, &toasts, Rc::clone(&reload), false);
+                    pull(&repo, &toasts, Rc::clone(&reload), Rc::clone(&on_pulled), false);
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::question => {
@@ -425,7 +427,7 @@ pub fn page(
                     let Some(crate::commit::Target::Commit(id)) = target else { return };
                     row.clipboard().set_text(&id);
                     if let Some(toasts) = toasts_for_rows.upgrade() {
-                        toasts.add_toast(adw::Toast::new(&format!(
+                        toasts.add_toast(crate::ui::toast(&format!(
                             "Copied {}",
                             &id[..7.min(id.len())]
                         )));
@@ -458,7 +460,7 @@ pub fn page(
             }
             Err(err) => {
                 empty.set_title("Could not read this repository");
-                empty.set_description(Some(&err));
+                empty.set_description(Some(&glib::markup_escape_text(&err)));
                 stack.set_visible_child_name("empty");
                 status.set_label(&err);
             }
@@ -537,6 +539,7 @@ fn pull(
     repo: &Path,
     toasts: &adw::ToastOverlay,
     reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    on_pulled: Rc<dyn Fn(&crate::refresh::Report)>,
     fast_forward: bool,
 ) {
     let rx = crate::refresh::spawn(
@@ -556,6 +559,9 @@ fn pull(
         while let Ok(event) = rx.recv().await {
             match event {
                 crate::refresh::Event::Repo(report) => {
+                    // The grid behind this page keeps the record of what the
+                    // last fetch could and could not do.
+                    on_pulled(&report);
                     said = match &report.outcome {
                         crate::refresh::Outcome::FastForwarded(n) => {
                             moved = true;
@@ -577,7 +583,7 @@ fn pull(
                 crate::refresh::Event::Done => break,
             }
         }
-        toasts.add_toast(adw::Toast::new(&said));
+        crate::ui::say(&toasts, &said);
         if moved {
             if let Some(reload) = reload.borrow().clone() {
                 reload();
@@ -643,7 +649,7 @@ fn arm_push(
         glib::spawn_future_local(async move {
             match rx.recv().await {
                 Ok(Ok(line)) => {
-                    toasts.add_toast(adw::Toast::new(&line));
+                    toasts.add_toast(crate::ui::toast(&line));
                     if let Some(reload) = reload.borrow().clone() {
                         reload();
                     }
@@ -651,7 +657,7 @@ fn arm_push(
                 // The page was out of date. Say so, and read it again so the
                 // button shows what is true now.
                 Ok(Err(crate::commit::PushError::Stale(why))) => {
-                    toasts.add_toast(adw::Toast::new(&why));
+                    toasts.add_toast(crate::ui::toast(&why));
                     if let Some(reload) = reload.borrow().clone() {
                         reload();
                     }
@@ -659,7 +665,7 @@ fn arm_push(
                 // A pre-push hook's refusal is quoted, not paraphrased.
                 Ok(Err(crate::commit::PushError::Git(err))) => {
                     button.set_sensitive(true);
-                    toasts.add_toast(adw::Toast::new(&err));
+                    crate::ui::say(&toasts, &err);
                 }
                 Err(_) => button.set_sensitive(true),
             }
