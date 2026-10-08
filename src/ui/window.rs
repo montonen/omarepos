@@ -19,13 +19,15 @@ use crate::theme::Palette;
 use crate::ui::{self, Action, card};
 
 /// Below this width the header gives up its labels and a third of the filter
-/// box. With everything showing it needs 1010 px.
-const NARROW_BELOW: f64 = 1040.0;
+/// box. With everything showing it needs 1010 px, and 1095 with two tag chips
+/// in it, which is what one or two tags put there.
+const NARROW_BELOW: f64 = 1140.0;
 /// Below this one, its sort order and tag chips as well. Without its labels
-/// it needs 780 px, and without these, 584. All three were measured with the
-/// debug dump under the built-in theme at the default font size; a larger
-/// font needs more, which is what the margin on each is for.
-const CRAMPED_BELOW: f64 = 820.0;
+/// it needs 780 px, about 910 with chips, and without those and the sort
+/// order, 584. Measured with the debug dump under the built-in theme at the
+/// default font size; a larger font or longer tag names need more, which is
+/// what the margin on each is for.
+const CRAMPED_BELOW: f64 = 940.0;
 /// The least the window claims to be usable at. A window with breakpoints has
 /// no minimum of its own: libadwaita drops the one its content would give it
 /// and expects to be told.
@@ -812,7 +814,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     ));
     cramped.add_setter(&ui.search, "width-request", Some(&120.to_value()));
     cramped.add_setter(&ui.sort, "visible", Some(&false.to_value()));
-    cramped.add_setter(&ui.tag_quick, "visible", Some(&false.to_value()));
+    // Not the tag chips, though they go too. A breakpoint puts back what it
+    // found when it lets go, and what it found was the chips hidden, as they
+    // are before the first scan has said which tags there are: a window that
+    // was ever this narrow, at launch for an instant, had its chips hidden
+    // for good, and with one or two tags the chips are the only place the
+    // tags are. `sync_tag_controls` decides, and is told how wide things are.
     {
         let ui_for_apply = Rc::clone(&ui);
         cramped.connect_apply(move |_| {
@@ -2319,13 +2326,20 @@ impl Ui {
             let ui = Rc::clone(self);
             Rc::new(move || ui.apply_theme()) as Rc<dyn Fn()>
         };
+        // Both read before the call, each in a statement of its own. Written
+        // as arguments, the borrow of the settings lived until the call
+        // returned, and the dialog's first act is to write to them: opening
+        // Settings ended the program.
+        //
+        // A look at somewhere else has no business forgetting the fleet's
+        // tags, whatever is removed while it is open.
+        let one_off = self.cfg.borrow().one_off();
+        let reports = self.root_reports.borrow().clone();
         ui::dialogs::settings(
             &self.window,
             Rc::clone(&self.cfg),
-            // A look at somewhere else has no business forgetting the
-            // fleet's tags, whatever is removed while it is open.
-            (!self.cfg.borrow().one_off()).then(|| Rc::clone(&self.meta)),
-            self.root_reports.borrow().clone(),
+            (!one_off).then(|| Rc::clone(&self.meta)),
+            reports,
             rescan,
             reschedule,
             restyle,
