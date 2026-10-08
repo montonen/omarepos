@@ -1,6 +1,6 @@
 //! The commit detail pane: what the selected commit changed.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -205,6 +205,10 @@ pub fn pane(
     let rebuilding = Rc::new(Cell::new(false));
     // Which groups are folded, for as long as the same commit is on show.
     let folds: Rc<RefCell<HashMap<Group, bool>>> = Rc::new(RefCell::new(HashMap::new()));
+    // The adjustment the list scrolls to its focused row with, which GTK gives
+    // it from the viewport it is put in. Taken away for a moment each time
+    // the list is rebuilt in place, and remembered here to be given back.
+    let follows: Rc<OnceCell<Option<gtk::Adjustment>>> = Rc::new(OnceCell::new());
     let staged_count = Rc::new(Cell::new(0usize));
     // One write at a time. git reads the index again after a pre-commit hook
     // has run, so a file staged while "Committing…" was on screen went into a
@@ -360,6 +364,7 @@ pub fn pane(
             let who = who.clone();
             let viewer = Rc::clone(&viewer);
             let rebuilding = Rc::clone(&rebuilding);
+            let follows = Rc::clone(&follows);
             let folds = Rc::clone(&folds);
 
             glib::spawn_future_local(async move {
@@ -435,6 +440,9 @@ pub fn pane(
                     // What a write came to was said about the list this one
                     // replaces.
                     report(&outcome, "");
+                    // And another commit's files start at the top, wherever
+                    // the last one's were scrolled to.
+                    scroller.vadjustment().set_value(0.0);
                 }
                 // The message box goes when this is not the working tree, and
                 // after the commit that emptied the tree the keyboard is in it.
@@ -643,6 +651,20 @@ pub fn pane(
                     None if typing && !working => Some(chosen.clone()),
                     None => None,
                 };
+                // A row that has just been made has no place in the list
+                // yet, and until the list is laid out it measures as sitting
+                // at the very top. The list and the viewport around it both
+                // scroll to whatever takes the focus, so focusing such a row
+                // would send a list that had been scrolled down back to its
+                // top. Neither follows the focus until the rows have places.
+                let viewport = scroller.child().and_downcast::<gtk::Viewport>();
+                if same {
+                    let _ = follows.get_or_init(|| files.adjustment());
+                    files.set_adjustment(gtk::Adjustment::NONE);
+                    if let Some(viewport) = &viewport {
+                        viewport.set_scroll_to_focus(false);
+                    }
+                }
                 if let (Some(row), true) = (back_to, files.is_mapped()) {
                     match row.or_else(|| first_row(&files, is_shown)) {
                         Some(row) => row.grab_focus(),
@@ -650,19 +672,25 @@ pub fn pane(
                     };
                 }
 
-                // The list is where it was scrolled to, as far as its new
-                // length allows, and the row the keyboard is on is in view.
-                // Only once the rows have been given their places: before
-                // that there is nothing to measure.
+                // Once they have: the list goes back to following the focus,
+                // is put where it was scrolled to, as far as its new length
+                // allows, and the row the keyboard is on is brought into view
+                // if that left it out.
                 if same {
                     let generation = Rc::clone(&generation);
+                    let follows = Rc::clone(&follows);
                     glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                        files.set_adjustment(follows.get().and_then(Option::as_ref));
+                        if let Some(viewport) = &viewport {
+                            viewport.set_scroll_to_focus(true);
+                        }
+                        // A later read has its own idea of where the list is.
                         if *generation.borrow() != mine {
                             return;
                         }
                         scroller.vadjustment().set_value(offset);
-                        if let Some(row) = keyboard.flatten() {
-                            reveal(&scroller, &row);
+                        if let (Some(viewport), Some(row)) = (&viewport, keyboard.flatten()) {
+                            viewport.scroll_to(&row, None);
                         }
                     });
                 }
@@ -1081,18 +1109,6 @@ fn way_back(names: &[String], from: usize, there: impl Fn(&str) -> bool) -> Opti
         }
     }
     around().find(|name| there(name)).map(str::to_string)
-}
-
-/// Scroll the list just far enough for `row` to be in view, if it is not.
-fn reveal(scroller: &gtk::ScrolledWindow, row: &gtk::ListBoxRow) {
-    let Some(bounds) = row.compute_bounds(scroller) else { return };
-    let adjustment = scroller.vadjustment();
-    let (top, bottom) = (f64::from(bounds.y()), f64::from(bounds.y() + bounds.height()));
-    if top < 0.0 {
-        adjustment.set_value(adjustment.value() + top);
-    } else if bottom > adjustment.page_size() {
-        adjustment.set_value(adjustment.value() + bottom - adjustment.page_size());
-    }
 }
 
 /// The group travels on the row with the path, so that the diff asked for is
