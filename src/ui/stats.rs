@@ -18,7 +18,16 @@ const SPARK_W: f64 = 11.0;
 
 /// `scope` is shown as the page subtitle, e.g. "4 selected repos".
 pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
-    let title = adw::WindowTitle::new("Contributions", &scope);
+    // The subtitle also says which commits are counted. The totals mean one
+    // thing for the branch that is checked out and another for every branch
+    // there is, and the page gave no way to tell which it was showing.
+    let counted = if repos.len() == 1 { "checked-out branch" } else { "checked-out branches" };
+    let title = adw::WindowTitle::new("Contributions", &format!("{scope} · {counted}"));
+    title.set_tooltip_text(Some(
+        "Counts the branch each repository has checked out and the branch it tracks.\n\
+         Other branches are left out, so that work which was squashed, rebased or amended\n\
+         is not counted once for every copy of it.",
+    ));
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 

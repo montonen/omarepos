@@ -1,13 +1,21 @@
 //! Contribution aggregation: who committed what, over a rolling window.
 //!
+//! What is read is one line of history per repository: the commit HEAD is on,
+//! and the tip of the branch the checked-out one tracks, so that what has been
+//! fetched and not yet merged is there too. Not every branch. A change that was
+//! squashed, rebased or amended exists once per copy, under a new id each time,
+//! and the old copies stay reachable from the branch that was merged and from
+//! its remote-tracking ref long after the change has landed. Walking every ref
+//! counted each of them.
+//!
 //! Authors are keyed by e-mail, so the same person with two spellings of their
 //! name still lands in one row. Merge commits count as commits but are left out
 //! of the line totals — their diffs are their parents' work, counted already.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
-use git2::{Repository, Sort};
+use git2::{Oid, Repository, Sort};
 
 /// Day boundaries are computed on the main thread, where the local timezone is
 /// available, and handed to the worker as plain timestamps.
@@ -185,26 +193,22 @@ fn collect(
     acc: &mut HashMap<String, Author>,
     per_day_total: &mut [usize],
 ) -> Result<Found, String> {
-    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
-    let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
-    walk.set_sorting(Sort::TIME).map_err(|e| e.message().to_string())?;
+    let said = |e: git2::Error| e.message().to_string();
+    let repo = Repository::open(path).map_err(said)?;
+    let mut walk = repo.revwalk().map_err(said)?;
+    walk.set_sorting(Sort::TIME).map_err(said)?;
 
-    let mut pushed = 0usize;
-    if let Ok(refs) = repo.references() {
-        for reference in refs.flatten() {
-            let Ok(name) = reference.name().map(str::to_string) else { continue };
-            if !name.starts_with("refs/heads/") && !name.starts_with("refs/remotes/") {
-                continue;
-            }
-            if let Ok(commit) = reference.peel_to_commit() {
-                if walk.push(commit.id()).is_ok() {
-                    pushed += 1;
-                }
-            }
-        }
-    }
-    if pushed == 0 && walk.push_head().is_err() {
+    // HEAD and its upstream, and nothing else: see the top of the file. HEAD
+    // used to be walked only when no branch could be, so a commit made on a
+    // detached HEAD was counted nowhere.
+    let Some(head) = head_commit(&repo).map_err(said)? else {
         return Ok(Found { commits: 0, insertions: 0, deletions: 0 });
+    };
+    walk.push(head).map_err(said)?;
+    let mut rewritten = HashSet::new();
+    if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
+        walk.push(upstream).map_err(said)?;
+        rewritten = rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
     }
 
     let days = window.days();
@@ -213,6 +217,9 @@ fn collect(
 
     for oid in walk {
         let Ok(oid) = oid else { continue };
+        if rewritten.contains(&oid) {
+            continue;
+        }
         let Ok(commit) = repo.find_commit(oid) else { continue };
         let when = commit.time().seconds();
 
@@ -291,6 +298,87 @@ fn collect(
     Ok(found)
 }
 
+/// The commit HEAD is on, or nothing in a repository that has no commit yet.
+/// A HEAD that is there and cannot be read is an error: reported as "no
+/// commits", it made a damaged repository look like a quiet one.
+fn head_commit(repo: &Repository) -> Result<Option<Oid>, git2::Error> {
+    match repo.head() {
+        Ok(head) => Ok(Some(head.peel_to_commit()?.id())),
+        Err(err) if err.code() == git2::ErrorCode::UnbornBranch => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// The tip of the branch the checked-out one tracks, when it tracks one that
+/// is there. Nothing on a detached HEAD, and nothing for a branch that was
+/// never published or whose upstream is gone.
+fn upstream_tip(repo: &Repository) -> Result<Option<Oid>, git2::Error> {
+    let Ok(head) = repo.head() else { return Ok(None) };
+    let Ok(upstream) = git2::Branch::wrap(head).upstream() else { return Ok(None) };
+    Ok(Some(upstream.get().peel_to_commit()?.id()))
+}
+
+/// Who wrote a commit and the second they wrote it. A rebase, an amend and a
+/// cherry-pick all make a new commit and all carry these two over.
+type Stamp = (Vec<u8>, i64);
+
+/// The commits on the upstream's side of a divergence that the local branch
+/// holds a newer copy of.
+///
+/// HEAD and its upstream are both walked, and most of the time one contains the
+/// other. When neither does, there are two ways it came about. Somebody pushed
+/// while there was unpushed work here: two sets of commits, all to be counted.
+/// Or work was pushed and then amended or rebased here, and not yet pushed
+/// again: one set of commits, twice. The second is told from the first by a
+/// commit on each side with the same author and the same author date, and of
+/// such a pair the upstream's is the one about to be overwritten.
+fn rewritten_upstream(
+    repo: &Repository,
+    head: Oid,
+    upstream: Oid,
+    since: i64,
+) -> Result<HashSet<Oid>, git2::Error> {
+    let (ahead, behind) = repo.graph_ahead_behind(head, upstream)?;
+    if ahead == 0 || behind == 0 {
+        return Ok(HashSet::new());
+    }
+    let ours: HashSet<Stamp> = only_on(repo, head, upstream, since)?
+        .into_iter()
+        .map(|(_, stamp)| stamp)
+        .collect();
+    Ok(only_on(repo, upstream, head, since)?
+        .into_iter()
+        .filter(|(_, stamp)| ours.contains(stamp))
+        .map(|(oid, _)| oid)
+        .collect())
+}
+
+/// The commits reachable from `tip` and not from `other`, newest first, back to
+/// the start of the window. A copy is committed after what it copies, so
+/// nothing committed before the window can be a copy of anything inside it.
+fn only_on(
+    repo: &Repository,
+    tip: Oid,
+    other: Oid,
+    since: i64,
+) -> Result<Vec<(Oid, Stamp)>, git2::Error> {
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(Sort::TIME)?;
+    walk.push(tip)?;
+    walk.hide(other)?;
+    let mut side = Vec::new();
+    for oid in walk {
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+        if commit.time().seconds() < since {
+            break;
+        }
+        let author = commit.author();
+        side.push((oid, (author.email_bytes().to_vec(), author.when().seconds())));
+    }
+    Ok(side)
+}
+
 fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> (usize, usize, usize) {
     let Ok(tree) = commit.tree() else { return (0, 0, 0) };
     let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
@@ -300,5 +388,236 @@ fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> (usize, usize, us
     match diff.stats() {
         Ok(stats) => (stats.insertions(), stats.deletions(), stats.files_changed()),
         Err(_) => (0, 0, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+    use std::path::Path;
+
+    const DAY: i64 = 86_400;
+
+    const BOB: (&str, &str) = ("Bob Builder", "bob@example.invalid");
+
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap()
+    }
+
+    /// The last `days` days, cut at midnight UTC: the worker is handed plain
+    /// timestamps and never asks which timezone they came from.
+    fn window(days: usize) -> Window {
+        let today = now() - now().rem_euclid(DAY);
+        Window {
+            day_starts: (0..days as i64).rev().map(|back| today - back * DAY).collect(),
+            day_labels: vec![String::new(); days],
+            day_titles: vec![String::new(); days],
+        }
+    }
+
+    /// What the page would show for these repositories over the last week.
+    fn contributions(paths: &[&Path]) -> Contributions {
+        let rx = spawn(paths.iter().map(|p| p.to_path_buf()).collect(), window(7));
+        loop {
+            if let Event::Done(result) = rx.recv_blocking().expect("the worker reported") {
+                return *result;
+            }
+        }
+    }
+
+    /// (commits, insertions, deletions) across everything read.
+    fn totals(result: &Contributions) -> (usize, usize, usize) {
+        (result.total_commits, result.total_insertions, result.total_deletions)
+    }
+
+    /// E-mail -> commits, as the page has it.
+    fn by_author(result: &Contributions) -> BTreeMap<String, usize> {
+        result.authors.iter().map(|a| (a.email.clone(), a.commits)).collect()
+    }
+
+    fn lines(n: usize) -> String {
+        (0..n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    /// Commit whatever is staged as somebody other than the fixture's own
+    /// identity.
+    fn commit_staged_as(repo: &Path, who: (&str, &str), message: &str) {
+        let (name, email) = (format!("user.name={}", who.0), format!("user.email={}", who.1));
+        git(repo, &["-c", &name, "-c", &email, "commit", "-q", "-m", message]);
+    }
+
+    fn commit_as(repo: &Path, who: (&str, &str), file: &str, body: &str, message: &str) {
+        write(&repo.join(file), body);
+        git(repo, &["add", "--", file]);
+        commit_staged_as(repo, who, message);
+    }
+
+    /// E-mail -> commits, as `git shortlog -sne --since=<the window>` has it
+    /// for the same history.
+    fn shortlog(repo: &Path, revs: &[&str]) -> BTreeMap<String, usize> {
+        let since = format!("--since=@{} +0000", window(7).since());
+        let mut args = vec!["shortlog", "-sne", since.as_str()];
+        args.extend(revs);
+        let mut counts = BTreeMap::new();
+        for line in git(repo, &args).lines() {
+            let (count, who) = line.trim().split_once('\t').expect("a count and a name");
+            let email = who.rsplit_once('<').expect("an address").1.trim_end_matches('>');
+            *counts.entry(email.to_lowercase()).or_insert(0) += count.trim().parse::<usize>().unwrap();
+        }
+        counts
+    }
+
+    /// (commits, insertions, deletions) as `git log --shortstat` has them for
+    /// the same history: a merge is a commit and adds no lines.
+    fn git_totals(repo: &Path, revs: &[&str]) -> (usize, usize, usize) {
+        let since = format!("--since=@{} +0000", window(7).since());
+        let mut count = vec!["rev-list", "--count", since.as_str()];
+        count.extend(revs);
+        let commits = git(repo, &count).parse::<usize>().unwrap();
+
+        let mut stat = vec!["log", "--no-merges", "--shortstat", "--format=", since.as_str()];
+        stat.extend(revs);
+        let (mut insertions, mut deletions) = (0, 0);
+        for line in git(repo, &stat).lines() {
+            for part in line.split(',') {
+                let n = part.trim().split(' ').next().and_then(|n| n.parse::<usize>().ok());
+                if part.contains("insertion") {
+                    insertions += n.unwrap();
+                } else if part.contains("deletion") {
+                    deletions += n.unwrap();
+                }
+            }
+        }
+        (commits, insertions, deletions)
+    }
+
+    // ---- which commits are walked -------------------------------------------
+
+    /// The ordinary life of a pull request: pushed as a branch, fetched here
+    /// while it was open, landed on main as one new commit, deleted on the
+    /// forge. The fetch this application runs does not prune, so the branch's
+    /// remote-tracking ref stays behind with the three commits that were
+    /// squashed.
+    #[test]
+    fn a_squashed_branch_left_behind_is_not_counted_beside_what_landed() {
+        let _guard = isolate();
+        let f = fleet("stats-squash");
+        git(&f.seed, &["checkout", "-q", "-b", "feature"]);
+        for i in 0..3 {
+            commit_as(&f.seed, BOB, &format!("f{i}.txt"), &lines(10), &format!("feature {i}"));
+        }
+        git(&f.seed, &["push", "-q", "-u", "origin", "feature"]);
+        git(&f.work, &["fetch", "--quiet"]);
+
+        git(&f.seed, &["checkout", "-q", "main"]);
+        git(&f.seed, &["merge", "-q", "--squash", "feature"]);
+        commit_staged_as(&f.seed, BOB, "Add the feature (#12)");
+        git(&f.seed, &["push", "-q", "origin", "main", ":feature"]);
+        git(&f.work, &["fetch", "--quiet"]);
+        git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
+        assert!(
+            git(&f.work, &["for-each-ref", "refs/remotes/origin/feature"]).contains("feature"),
+            "the fetch left the deleted branch's ref behind, which is the point"
+        );
+
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), git_totals(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(by_author(&result).get(BOB.1), Some(&1), "one commit landed");
+        assert_eq!(totals(&result), (2, 31, 0), "the first commit and the squash");
+    }
+
+    /// The same, landed with "rebase and merge", and seen from the clone of
+    /// whoever wrote it: their own local branch is still there too.
+    #[test]
+    fn a_rebased_branch_left_behind_is_not_counted_beside_what_landed() {
+        let _guard = isolate();
+        let f = fleet("stats-rebase-merge");
+        git(&f.work, &["checkout", "-q", "-b", "feature"]);
+        for i in 0..3 {
+            commit_file(&f.work, &format!("f{i}.txt"), &lines(10), &format!("feature {i}"));
+        }
+        git(&f.work, &["push", "-q", "-u", "origin", "feature"]);
+        git(&f.work, &["checkout", "-q", "main"]);
+
+        // Main moves, so the rebase makes three new commits out of the three.
+        f.remote_moves(1);
+        git(&f.seed, &["fetch", "-q"]);
+        git(&f.seed, &["checkout", "-q", "feature"]);
+        git(&f.seed, &["rebase", "-q", "main"]);
+        git(&f.seed, &["checkout", "-q", "main"]);
+        git(&f.seed, &["merge", "-q", "--ff-only", "feature"]);
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["fetch", "--quiet"]);
+        git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
+
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), git_totals(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), (5, 32, 0), "first, upstream 0, and the three once");
+    }
+
+    /// A commit amended after it was pushed, and a branch rebased after it was
+    /// pushed, exist twice until the force-push: once on HEAD and once on the
+    /// upstream, which are the two tips walked.
+    #[test]
+    fn work_rewritten_after_it_was_pushed_is_counted_once() {
+        let _guard = isolate();
+        let f = fleet("stats-amend");
+        commit_file(&f.work, "feature.txt", &lines(20), "Add feature");
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        write(&f.work.join("feature.txt"), &lines(21));
+        git(&f.work, &["commit", "-q", "-a", "--amend", "-m", "Add the feature, tested"]);
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD"]));
+        assert_eq!(totals(&result), (2, 22, 0), "the amended commit, and not the one it replaced");
+
+        let f = fleet("stats-rebase-own");
+        git(&f.work, &["checkout", "-q", "-b", "topic"]);
+        commit_file(&f.work, "a.txt", &lines(5), "topic a");
+        commit_file(&f.work, "b.txt", &lines(5), "topic b");
+        git(&f.work, &["push", "-q", "-u", "origin", "topic"]);
+        f.remote_moves(1);
+        git(&f.work, &["fetch", "--quiet"]);
+        git(&f.work, &["rebase", "-q", "origin/main"]);
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD"]));
+        assert_eq!(totals(&result), (4, 12, 0), "first, upstream 0, and the two once");
+    }
+
+    /// The other way to have diverged: somebody pushed while there was work
+    /// here that had not been. Neither side is a copy of the other.
+    #[test]
+    fn work_on_both_sides_of_a_divergence_is_all_counted() {
+        let _guard = isolate();
+        let f = fleet("stats-diverged");
+        f.remote_commits("theirs", |seed| write(&seed.join("theirs.txt"), &lines(7)));
+        commit_as(&f.work, BOB, "mine.txt", &lines(3), "mine");
+        git(&f.work, &["fetch", "--quiet"]);
+
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), git_totals(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), (3, 11, 0));
+    }
+
+    /// The seed loop only fell back to HEAD when there was no branch at all, so
+    /// a commit made on a detached HEAD was on no walk.
+    #[test]
+    fn a_detached_head_is_walked_and_so_is_what_was_fetched_and_not_merged() {
+        let _guard = isolate();
+        let f = fleet("stats-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        commit_file(&f.work, "d.txt", &lines(4), "on no branch");
+        assert_eq!(totals(&contributions(&[&f.work])), (2, 5, 0));
+
+        let f = fleet("stats-behind");
+        f.remote_moves(2);
+        git(&f.work, &["fetch", "--quiet"]);
+        assert_eq!(totals(&contributions(&[&f.work])), (3, 3, 0), "main is two behind");
     }
 }
