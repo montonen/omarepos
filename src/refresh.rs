@@ -425,6 +425,15 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(Skip::Diverged));
     }
     if !options.fast_forward {
+        // Nothing is updated on this pass, but an update that stopped
+        // part-way on an earlier one is still lying here, and "fetched, 3
+        // behind" would clear the only record of it.
+        if is_dirty(&repo) {
+            let left = half_applied(&repo, &at);
+            if !left.is_empty() {
+                return report(Outcome::Refused(part_way(&left)));
+            }
+        }
         return report(Outcome::Behind(behind));
     }
 
@@ -438,7 +447,17 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     // do. Holding back here too left "behind, with an edit somewhere" with no
     // way forward but a commit, and that commit diverged the branch.
     if options.pass == Pass::Fleet && is_dirty(&repo) {
-        return report(Outcome::Skipped(Skip::Dirty));
+        // The changes may not be the user's. A fast-forward that stopped
+        // part-way leaves upstream's own files behind as "modified", and the
+        // pass after it used to report "uncommitted changes" about a
+        // repository nobody had touched, which also wiped the record of what
+        // had gone wrong.
+        let left = half_applied(&repo, &at);
+        return report(if left.is_empty() {
+            Outcome::Skipped(Skip::Dirty)
+        } else {
+            Outcome::Refused(part_way(&left))
+        });
     }
 
     // Called off while this repository was being fetched: it stays fetched,
@@ -458,7 +477,19 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
             Ok(()) => report(Outcome::FastForwarded(behind)),
             Err(why) => report(Outcome::Refused(why)),
         },
-        Err(err) => report(Outcome::Refused(err)),
+        // Usually git refused before touching anything. Not always: it can
+        // fail after writing some of the files, and then the tree has to be
+        // looked at, because git's message only names the one it tripped on.
+        Err(err) => {
+            let left = Repository::open(path)
+                .map(|repo| half_applied(&repo, &at))
+                .unwrap_or_default();
+            report(Outcome::Refused(if left.is_empty() {
+                err
+            } else {
+                format!("{err}\n{}", part_way(&left))
+            }))
+        }
     }
 }
 
@@ -570,6 +601,86 @@ fn is_dirty(repo: &Repository) -> bool {
         // Unreadable status is not a licence to proceed.
         Err(_) => true,
     }
+}
+
+/// The paths where the working tree already holds what the upstream commit
+/// has, while the branch is still on a commit that has something else.
+///
+/// git's checkout is not a transaction. When one incoming path cannot be
+/// written (a directory somebody else owns, a full disk, a filter that fails)
+/// it has already written others, and it exits without moving the branch. The
+/// repository is then dirty with upstream's own content: `git status` lists
+/// the files as modified, and one the update adds as untracked.
+///
+/// Told apart from an edit by content, not by remembering: a file counts only
+/// if it is byte for byte what the update brings. So this needs no record of
+/// the failure, finds the same thing after a restart, and can never claim a
+/// file the user has changed. A file filtered on the way in (git-lfs) does not
+/// compare equal and is left out, which is the safe side to be wrong on.
+fn half_applied(repo: &Repository, at: &Tracking) -> Vec<String> {
+    let tree = |commit| repo.find_commit(commit).and_then(|commit| commit.tree());
+    let (Ok(ours), Ok(theirs)) = (tree(at.local), tree(at.upstream)) else {
+        return Vec::new();
+    };
+    let Ok(incoming) = repo.diff_tree_to_tree(Some(&ours), Some(&theirs), None) else {
+        return Vec::new();
+    };
+    // A submodule's pointer is compared with a checkout, not with content.
+    let link = |file: &git2::DiffFile| file.mode() == git2::FileMode::Commit;
+    let changed: Vec<PathBuf> = incoming
+        .deltas()
+        .filter(|delta| !link(&delta.old_file()) && !link(&delta.new_file()))
+        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
+        .map(Path::to_path_buf)
+        .collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+
+    // Of the paths the update touches, the ones where the working tree is not
+    // yet what upstream has. Ignored and untracked files are asked for: a path
+    // the update deletes is "not yet" exactly when a file is still there.
+    let mut only = git2::DiffOptions::new();
+    only.disable_pathspec_match(true)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(true)
+        .recurse_ignored_dirs(true)
+        .ignore_submodules(true);
+    for path in &changed {
+        only.pathspec(path);
+    }
+    let Ok(pending) = repo.diff_tree_to_workdir(Some(&theirs), Some(&mut only)) else {
+        return Vec::new();
+    };
+    let pending: std::collections::HashSet<PathBuf> = pending
+        .deltas()
+        .flat_map(|delta| [delta.old_file().path(), delta.new_file().path()])
+        .flatten()
+        .map(Path::to_path_buf)
+        .collect();
+    changed
+        .iter()
+        .filter(|path| !pending.contains(*path))
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// What to say about a tree [`half_applied`] found something in. The same
+/// words for the same files, so that a pass repeating it is not new trouble.
+fn part_way(left: &[String]) -> String {
+    let mut named = left.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if left.len() > 3 {
+        named.push_str(&format!(" and {} more", left.len() - 3));
+    }
+    format!(
+        "Part of this update is already in the working tree: {named} {} the incoming version \
+         while the branch is still on the old commit. That is what an update leaves when \
+         something stops it part-way. git lists them as changes, but they are exactly what the \
+         update brings, so nothing is lost by putting them back (`git restore <file>`, or \
+         deleting one the update adds) and updating again.",
+        if left.len() == 1 { "holds" } else { "hold" }
+    )
 }
 
 /// Counts for the summary line after a pass.
@@ -1151,6 +1262,148 @@ mod tests {
 
         git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
         assert_eq!(landed(&f.work, upstream), Ok(()));
+    }
+
+    // ---- an update that stops part-way -----------------------------------
+
+    /// A directory nothing can be written into, the way a container running
+    /// as root or a code generator leaves one, for as long as this lives.
+    struct ReadOnly(PathBuf);
+
+    impl ReadOnly {
+        fn new(dir: PathBuf) -> Self {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            ReadOnly(dir)
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A clone whose next update changes a file in each of three directories
+    /// and adds a fourth file.
+    fn four_files_incoming(name: &str) -> Fleet {
+        let f = fleet(name);
+        f.remote_commits("lay the tree out", |seed| {
+            write(&seed.join("a/one.txt"), "one\n");
+            write(&seed.join("docs/guide.md"), "guide\n");
+            write(&seed.join("z/last.txt"), "last\n");
+        });
+        assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(1)));
+        f.remote_commits("change all three and add one", |seed| {
+            write(&seed.join("a/one.txt"), "one, upstream\n");
+            write(&seed.join("a/added.txt"), "added upstream\n");
+            write(&seed.join("docs/guide.md"), "guide, upstream\n");
+            write(&seed.join("z/last.txt"), "last, upstream\n");
+        });
+        f
+    }
+
+    fn names_what_was_left(why: &str) -> bool {
+        ["a/one.txt", "a/added.txt", "z/last.txt"].iter().all(|file| why.contains(file))
+    }
+
+    /// git's checkout is not a transaction. When one path cannot be written it
+    /// has already written others, and it exits without moving the branch.
+    #[test]
+    fn an_update_that_stops_part_way_says_what_it_left_behind() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let f = four_files_incoming(&format!("rf-part-way-{pass:?}"));
+            let before = f.head();
+            let locked = ReadOnly::new(f.work.join("docs"));
+
+            let got = refresh_one(&f.work, &options(true, pass)).outcome;
+
+            drop(locked);
+            assert_eq!(f.head(), before, "{pass:?}: {got:?}");
+            assert_eq!(read(&f.work.join("a/one.txt")), "one, upstream\n", "the fixture: {got:?}");
+            let Outcome::Refused(why) = &got else { panic!("{pass:?}: {got:?}") };
+            assert!(why.contains("docs/guide.md"), "{pass:?}: git's own reason: {why}");
+            assert!(names_what_was_left(why), "{pass:?}: and what it left: {why}");
+        }
+    }
+
+    /// The pass after that finds a dirty tree, and used to say so: "left
+    /// alone: uncommitted changes", about a repository nobody had edited. That
+    /// report also cleared the record of the one before it.
+    #[test]
+    fn what_an_update_left_behind_is_not_then_called_the_users_changes() {
+        let _guard = isolate();
+        let f = four_files_incoming("rf-part-way-after");
+        let before = f.head();
+        let locked = ReadOnly::new(f.work.join("docs"));
+        let first = fleet_pass(&f);
+        drop(locked);
+        assert!(matches!(first, Outcome::Refused(_)), "{first:?}");
+
+        // On the timer with updates on, on the timer with only fetching on,
+        // and when the user fetches it by hand.
+        let mut said = Vec::new();
+        for (fast_forward, pass) in [(true, Pass::Fleet), (false, Pass::Fleet), (false, Pass::One)] {
+            let got = refresh_one(&f.work, &options(fast_forward, pass)).outcome;
+            let Outcome::Refused(why) = got else { panic!("{fast_forward} {pass:?}: {got:?}") };
+            assert!(names_what_was_left(&why), "{fast_forward} {pass:?}: {why}");
+            said.push(why);
+        }
+        // The same words every time: only new trouble raises a toast.
+        assert!(said.iter().all(|why| *why == said[0]), "{said:?}");
+
+        // Asked to update it, git refuses for the files in the way, and the
+        // answer still says whose they are.
+        let got = asked_for(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("would be overwritten"), "{why}");
+        assert!(names_what_was_left(why), "{why}");
+        assert_eq!(f.head(), before);
+
+        // The way out the message gives is the one that works.
+        git(&f.work, &["restore", "a/one.txt", "z/last.txt"]);
+        std::fs::remove_file(f.work.join("a/added.txt")).unwrap();
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// Changes that are the user's own are still theirs, and still reported
+    /// as such, including beside something an update left.
+    #[test]
+    fn an_edit_of_the_users_own_is_never_mistaken_for_a_leftover() {
+        let _guard = isolate();
+        let f = four_files_incoming("rf-part-way-not");
+        write(&f.work.join("a/one.txt"), "one, mine\n");
+        write(&f.work.join("notes.txt"), "mine\n");
+
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+        let got = refresh_one(&f.work, &options(false, Pass::Fleet)).outcome;
+        assert!(matches!(got, Outcome::Behind(1)), "{got:?}");
+
+        let got = asked_for(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("a/one.txt"), "{why}");
+        assert!(!why.contains("incoming version"), "{why}");
+        assert_eq!(read(&f.work.join("a/one.txt")), "one, mine\n");
+
+        // An update that takes files away, one of them tracked although it is
+        // ignored: a file still there is not "already what upstream has".
+        let f = fleet("rf-part-way-not-deleted");
+        f.remote_commits("a log that got committed", |seed| {
+            write(&seed.join(".gitignore"), "*.log\n");
+            write(&seed.join("build.log"), "noise\n");
+            write(&seed.join("old.txt"), "old\n");
+        });
+        assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(1)));
+        f.remote_commits("take them out", |seed| {
+            std::fs::remove_file(seed.join("build.log")).unwrap();
+            std::fs::remove_file(seed.join("old.txt")).unwrap();
+        });
+        write(&f.work.join("README.md"), "my edit\n");
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
     }
 
     // ---- what a fetch leaves alone ----------------------------------------
