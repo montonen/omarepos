@@ -19,59 +19,20 @@ use gtk::gio;
 
 pub fn install(window: &adw::ApplicationWindow) {
     let Some(path) = std::env::var_os("OMAREPOS_DUMP") else { return };
-    let action = gio::SimpleAction::new("dump", None);
-    let window_weak = window.downgrade();
-    action.connect_activate(move |_, _| {
-        let Some(window) = window_weak.upgrade() else { return };
-        // A window nobody is looking at is sent no frames, and libadwaita
-        // finishes a change of breakpoint on the next frame, keeping the
-        // content off screen until then. Here that frame never comes.
-        if let Some(content) = window.content().filter(|content| !content.is_child_visible()) {
-            content.set_child_visible(true);
-        }
-        let mut out = String::new();
-        // Said outright as well, since the walk below only finds a focus that
-        // is on screen, and "the keyboard is nowhere" is worth knowing.
-        match gtk::prelude::GtkWindowExt::focus(&window) {
-            Some(focus) => {
-                out.push_str(&format!(
-                    "keyboard: {} {:?} mapped={}\n",
-                    focus.type_().name(),
-                    focus.widget_name().as_str(),
-                    focus.is_mapped()
-                ));
-                // Why not, when it is not: the first thing up the tree that
-                // is hidden.
-                let mut up = Some(focus);
-                while let Some(widget) = up {
-                    if !widget.is_visible() || !widget.is_child_visible() {
-                        out.push_str(&format!(
-                            "  hidden at: {} {:?} visible={} child_visible={}\n",
-                            widget.type_().name(),
-                            widget.widget_name().as_str(),
-                            widget.get_visible(),
-                            widget.is_child_visible()
-                        ));
-                        break;
-                    }
-                    up = widget.parent();
-                }
+    // `dump` writes what is on screen; `dump-all` everything there is, with
+    // what is not on screen included, which is the only way to read a dialog
+    // in a window that gets no frames.
+    for (name, everything) in [("dump", false), ("dump-all", true)] {
+        let action = gio::SimpleAction::new(name, None);
+        let window_weak = window.downgrade();
+        let path = path.clone();
+        action.connect_activate(move |_, _| {
+            if let Some(window) = window_weak.upgrade() {
+                write_dump(&window, &path, everything);
             }
-            None => out.push_str("keyboard: nowhere\n"),
-        }
-        out.push_str(&format!("dialog: {}\n", window.visible_dialog().is_some()));
-        // How narrow the window can be made before something is cut off,
-        // beside how wide it is.
-        if let Some(content) = window.content() {
-            let (least, _, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
-            out.push_str(&format!("width: {} (needs {least})\n", window.width()));
-        }
-        walk(window.upcast_ref(), 0, &mut out);
-        if let Err(err) = std::fs::write(&path, out) {
-            eprintln!("omarepos: could not write the dump: {err}");
-        }
-    });
-    window.add_action(&action);
+        });
+        window.add_action(&action);
+    }
 
     // And a hand for the script: `press` with a string clicks the first
     // button on screen whose label or tooltip contains it.
@@ -80,7 +41,13 @@ pub fn install(window: &adw::ApplicationWindow) {
     press.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
         let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
-        match find_button(window.upcast_ref(), wanted) {
+        // A dialog in a window that is sent no frames is never laid out,
+        // and so never on screen. "!" in front reaches into it anyway.
+        let (wanted, unseen) = match wanted.strip_prefix('!') {
+            Some(rest) => (rest, true),
+            None => (wanted, false),
+        };
+        match find_button(window.upcast_ref(), wanted, unseen) {
             Some(button) if button.is_sensitive() => button.emit_clicked(),
             Some(_) => eprintln!("omarepos: {wanted:?} is not sensitive"),
             None => eprintln!("omarepos: no button says {wanted:?}"),
@@ -157,6 +124,103 @@ pub fn install(window: &adw::ApplicationWindow) {
     });
     window.add_action(&key);
 
+    // A settings row, by its title: `row` with "Title=value". A switch takes
+    // on, off or toggle; a spin row a number; an entry row its text, applied.
+    // Rows are looked for whether or not they are on screen.
+    let row = gio::SimpleAction::new("row", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    row.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some((title, value)) = wanted.and_then(|w| w.str()).and_then(|w| w.split_once('=')) else {
+            return;
+        };
+        match find_row(window.upcast_ref(), title) {
+            Some(found) => set_row(&found, value),
+            None => eprintln!("omarepos: no row is titled {title:?}"),
+        }
+    });
+    window.add_action(&row);
+
+    // An answer to the dialog that is up: `respond` with the response's id
+    // ("save", "remove", "cancel"), for the dialogs that ask a question.
+    let respond = gio::SimpleAction::new("respond", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    respond.connect_activate(move |_, id| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(id) = id.and_then(|id| id.str()) else { return };
+        match find_alert(window.upcast_ref()) {
+            Some(alert) => {
+                alert.emit_by_name::<()>("response", &[&id]);
+                alert.close();
+            }
+            None => eprintln!("omarepos: no dialog is asking anything"),
+        }
+    });
+    window.add_action(&respond);
+
+    // A choice in a drop-down: `choose` with "n", for the first drop-down on
+    // screen (the sort order on the grid, the window on Contributions).
+    let choose = gio::SimpleAction::new("choose", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    choose.connect_activate(move |_, n| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(n) = n.and_then(|n| n.str()).and_then(|n| n.parse::<u32>().ok()) else { return };
+        match find_dropdown(window.upcast_ref()) {
+            Some(dropdown) => dropdown.set_selected(n),
+            None => eprintln!("omarepos: no drop-down is on screen"),
+        }
+    });
+    window.add_action(&choose);
+
+    // A row of a list: `pick` with "list:row", both counted from nought among
+    // the lists on screen, selects that row and puts the keyboard on it, as
+    // the arrow keys would (those are GTK's own, and `key` does not reach
+    // them). "list:row!" activates it as well, as Enter would.
+    let pick = gio::SimpleAction::new("pick", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    pick.connect_activate(move |_, which| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(which) = which.and_then(|which| which.str()) else { return };
+        let (which, activate) = match which.strip_suffix('!') {
+            Some(rest) => (rest, true),
+            None => (which, false),
+        };
+        let Some((list, row)) = which.split_once(':') else { return };
+        let (Ok(list), Ok(row)) = (list.parse::<usize>(), row.parse::<i32>()) else { return };
+        let mut lists = Vec::new();
+        find_lists(window.upcast_ref(), &mut lists);
+        match lists.get(list).and_then(|list| list.row_at_index(row).map(|row| (list.clone(), row))) {
+            Some((list, row)) => {
+                if row.is_selectable() {
+                    list.select_row(Some(&row));
+                }
+                row.grab_focus();
+                if activate {
+                    row.activate();
+                }
+            }
+            None => eprintln!("omarepos: no row {row} in list {list} ({} lists on screen)", lists.len()),
+        }
+    });
+    window.add_action(&pick);
+
+    // Draw, into nothing. A window that is sent no frames never runs a draw
+    // function, and the lanes, the bars and the dots are drawn by code that
+    // can fail like any other. `paint` gives every drawing area on screen the
+    // size it asks for and takes a snapshot of it, which runs its draw
+    // function.
+    let paint = gio::SimpleAction::new("paint", None);
+    let window_weak = window.downgrade();
+    paint.connect_activate(move |_, _| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let snapshot = gtk::Snapshot::new();
+        let mut areas = 0;
+        paint_areas(window.upcast_ref(), &snapshot, &mut areas);
+        let drawn = snapshot.to_node().is_some();
+        eprintln!("omarepos: painted {areas} drawing areas: {}", if drawn { "ok" } else { "nothing came of it" });
+    });
+    window.add_action(&paint);
+
     // Text, into the field the keyboard is in.
     let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
@@ -180,6 +244,160 @@ pub fn install(window: &adw::ApplicationWindow) {
     window.add_action(&type_);
 }
 
+fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everything: bool) {
+    // A window nobody is looking at is sent no frames, and libadwaita
+    // finishes a change of breakpoint on the next frame, keeping the
+    // content off screen until then. Here that frame never comes.
+    if let Some(content) = window.content().filter(|content| !content.is_child_visible()) {
+        content.set_child_visible(true);
+    }
+    let mut out = String::new();
+    // Said outright as well, since the walk below only finds a focus that
+    // is on screen, and "the keyboard is nowhere" is worth knowing.
+    match gtk::prelude::GtkWindowExt::focus(window) {
+        Some(focus) => {
+            out.push_str(&format!(
+                "keyboard: {} {:?} mapped={}\n",
+                focus.type_().name(),
+                focus.widget_name().as_str(),
+                focus.is_mapped()
+            ));
+            // Why not, when it is not: the first thing up the tree that
+            // is hidden.
+            let mut up = Some(focus);
+            while let Some(widget) = up {
+                if !widget.is_visible() || !widget.is_child_visible() {
+                    out.push_str(&format!(
+                        "  hidden at: {} {:?} visible={} child_visible={}\n",
+                        widget.type_().name(),
+                        widget.widget_name().as_str(),
+                        widget.get_visible(),
+                        widget.is_child_visible()
+                    ));
+                    break;
+                }
+                up = widget.parent();
+            }
+        }
+        None => out.push_str("keyboard: nowhere\n"),
+    }
+    out.push_str(&format!("dialog: {}\n", window.visible_dialog().is_some()));
+    // How narrow the window can be made before something is cut off,
+    // beside how wide it is.
+    if let Some(content) = window.content() {
+        let (least, _, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
+        out.push_str(&format!("width: {} (needs {least})\n", window.width()));
+    }
+    walk(window.upcast_ref(), 0, everything, &mut out);
+    if let Err(err) = std::fs::write(&path, out) {
+        eprintln!("omarepos: could not write the dump: {err}");
+    }
+}
+
+fn find_row(widget: &gtk::Widget, title: &str) -> Option<adw::PreferencesRow> {
+    if let Some(row) = widget.downcast_ref::<adw::PreferencesRow>() {
+        if row.title().contains(title) {
+            return Some(row.clone());
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_row(&current, title) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
+fn set_row(row: &adw::PreferencesRow, value: &str) {
+    if let Some(switch) = row.downcast_ref::<adw::SwitchRow>() {
+        switch.set_active(match value {
+            "on" => true,
+            "off" => false,
+            _ => !switch.is_active(),
+        });
+    } else if let Some(spin) = row.downcast_ref::<adw::SpinRow>() {
+        match value.parse::<f64>() {
+            Ok(number) => spin.set_value(number),
+            Err(_) => eprintln!("omarepos: {value:?} is not a number"),
+        }
+    } else if let Some(entry) = row.downcast_ref::<adw::EntryRow>() {
+        entry.set_text(value);
+        entry.emit_by_name::<()>("apply", &[]);
+    } else if let Some(expander) = row.downcast_ref::<adw::ExpanderRow>() {
+        expander.set_expanded(value != "off");
+    } else {
+        eprintln!("omarepos: do not know how to set a {}", row.type_().name());
+    }
+}
+
+fn paint_areas(widget: &gtk::Widget, snapshot: &gtk::Snapshot, areas: &mut usize) {
+    if !widget.is_mapped() {
+        return;
+    }
+    if let (Some(area), Some(parent)) = (widget.downcast_ref::<gtk::DrawingArea>(), widget.parent()) {
+        let width = area.content_width().max(area.width()).max(24);
+        let height = area.content_height().max(area.height()).max(24);
+        area.allocate(width, height, -1, None);
+        parent.snapshot_child(area, snapshot);
+        *areas += 1;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        paint_areas(&current, snapshot, areas);
+        child = current.next_sibling();
+    }
+}
+
+fn find_lists(widget: &gtk::Widget, lists: &mut Vec<gtk::ListBox>) {
+    if !widget.is_mapped() {
+        return;
+    }
+    if let Some(list) = widget.downcast_ref::<gtk::ListBox>() {
+        lists.push(list.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        find_lists(&current, lists);
+        child = current.next_sibling();
+    }
+}
+
+fn find_alert(widget: &gtk::Widget) -> Option<adw::AlertDialog> {
+    if let Some(alert) = widget.downcast_ref::<adw::AlertDialog>() {
+        return Some(alert.clone());
+    }
+    let mut child = widget.first_child();
+    let mut last = None;
+    while let Some(current) = child {
+        // The last one found: a question asked from inside another dialog
+        // comes after it.
+        if let Some(found) = find_alert(&current) {
+            last = Some(found);
+        }
+        child = current.next_sibling();
+    }
+    last
+}
+
+fn find_dropdown(widget: &gtk::Widget) -> Option<gtk::DropDown> {
+    if !widget.is_mapped() {
+        return None;
+    }
+    if let Some(dropdown) = widget.downcast_ref::<gtk::DropDown>() {
+        return Some(dropdown.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_dropdown(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
 fn first_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
     if !widget.is_mapped() {
         return None;
@@ -197,8 +415,8 @@ fn first_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
     None
 }
 
-fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {
-    if !widget.is_mapped() {
+fn find_button(widget: &gtk::Widget, wanted: &str, unseen: bool) -> Option<gtk::Button> {
+    if !unseen && !widget.is_mapped() {
         return None;
     }
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
@@ -207,7 +425,7 @@ fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {
         // A button with a child of its own (an icon and a label) says what
         // the labels inside it say.
         let mut inner = String::new();
-        walk(widget, 0, &mut inner);
+        walk(widget, 0, unseen, &mut inner);
         words.push_str(&inner);
         if words.contains(wanted) {
             return Some(button.clone());
@@ -215,7 +433,7 @@ fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {
     }
     let mut child = widget.first_child();
     while let Some(current) = child {
-        if let Some(found) = find_button(&current, wanted) {
+        if let Some(found) = find_button(&current, wanted, unseen) {
             return Some(found);
         }
         child = current.next_sibling();
@@ -223,10 +441,10 @@ fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {
     None
 }
 
-fn walk(widget: &gtk::Widget, depth: usize, out: &mut String) {
+fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
     // What is not mapped is not on screen: a page under another, a folded
-    // group, the pane when it is closed.
-    if !widget.is_mapped() {
+    // group, the pane when it is closed. Left out unless asked for.
+    if !unseen && !widget.is_mapped() {
         return;
     }
     let said = say(widget);
@@ -280,7 +498,7 @@ fn walk(widget: &gtk::Widget, depth: usize, out: &mut String) {
     }
     let mut child = widget.first_child();
     while let Some(current) = child {
-        walk(&current, depth + 1, out);
+        walk(&current, depth + 1, unseen, out);
         child = current.next_sibling();
     }
 }
@@ -320,6 +538,28 @@ fn say(widget: &gtk::Widget) -> Option<String> {
             page.title(),
             page.description().unwrap_or_default()
         ));
+    }
+    if let Some(switch) = widget.downcast_ref::<adw::SwitchRow>() {
+        return Some(format!(
+            "{} = {}{}",
+            switch.title(),
+            if switch.is_active() { "on" } else { "off" },
+            if switch.is_sensitive() { "" } else { " (greyed)" }
+        ));
+    }
+    if let Some(spin) = widget.downcast_ref::<adw::SpinRow>() {
+        return Some(format!("{} = {}", spin.title(), spin.value()));
+    }
+    if let Some(entry) = widget.downcast_ref::<adw::EntryRow>() {
+        return Some(format!("{} = {:?}", entry.title(), entry.text().as_str()));
+    }
+    if let Some(row) = widget.downcast_ref::<adw::PreferencesRow>() {
+        let subtitle = widget
+            .downcast_ref::<adw::ActionRow>()
+            .and_then(|row| row.subtitle())
+            .or_else(|| widget.downcast_ref::<adw::ExpanderRow>().map(|row| row.subtitle()))
+            .unwrap_or_default();
+        return Some(format!("{} | {}", row.title(), subtitle));
     }
     if let Some(banner) = widget.downcast_ref::<adw::Banner>() {
         // Mapped whether or not it is showing; say only what can be read.
