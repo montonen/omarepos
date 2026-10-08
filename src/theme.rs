@@ -375,8 +375,17 @@ window.omarepos headerbar button:hover {{
   letter-spacing: 1px;
 }}
 
+/* Text is sized in rem, which is the desktop's interface font: 0.75rem is
+   11px at the stock 11pt, 0.68 is 10px, 0.82 is 12px, 1.02 is 15px and 1.5 is
+   22px. Every size here used to be one of those pixel counts, and a length
+   in px is used as written. A larger font or a text-scaling factor, which
+   someone sets because they need it, made the buttons and dialogs grow and
+   left the names, paths, pills and diff, most of what the window shows, at
+   10 to 15px. Not em or a percentage, which compound from a widget to the
+   one inside it, and not pt, which follows the scaling factor and ignores
+   the font. */
 .om-subtitle {{
-  font-size: 11px;
+  font-size: 0.75rem;
   color: @om_dim;
 }}
 
@@ -448,7 +457,7 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 }}
 
 .om-tag {{
-  font-size: 11px;
+  font-size: 0.75rem;
   font-weight: 600;
   padding: 1px 8px 1px 6px;
   border-radius: 999px;
@@ -459,7 +468,7 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 .om-quick-tag {{
   border-radius: 999px;
   padding: 2px 12px;
-  font-size: 12px;
+  font-size: 0.82rem;
   font-weight: 600;
   background-color: alpha(@om_fg, 0.08);
   color: @om_fg;
@@ -478,7 +487,7 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 }}
 
 .om-tag-chip {{
-  font-size: 11px;
+  font-size: 0.75rem;
   border-radius: 999px;
   min-height: 24px;
   padding: 0 10px;
@@ -496,27 +505,27 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 
 .om-name {{
   font-weight: 700;
-  font-size: 15px;
+  font-size: 1.02rem;
   color: @om_fg;
 }}
 
 .om-path {{
-  font-size: 11px;
+  font-size: 0.75rem;
   color: @om_dim;
 }}
 
 .om-meta {{
-  font-size: 11px;
+  font-size: 0.75rem;
   color: @om_dim;
 }}
 
 .om-summary {{
-  font-size: 12px;
+  font-size: 0.82rem;
   color: @om_fg;
 }}
 
 .om-pill {{
-  font-size: 11px;
+  font-size: 0.75rem;
   font-weight: 700;
   padding: 1px 8px;
   border-radius: 999px;
@@ -593,7 +602,7 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
 }}
 
 .om-statusbar {{
-  font-size: 11px;
+  font-size: 0.75rem;
   color: @om_dim;
   border-top: 1px solid @om_border;
   background-color: @om_sunken;
@@ -628,7 +637,7 @@ textview.om-diff,
 textview.om-diff text {{
   background-color: @om_bg;
   color: @om_fg;
-  font-size: 12px;
+  font-size: 0.82rem;
 }}
 
 /* A group whose changes do not block an update steps back from the ones that
@@ -648,7 +657,7 @@ list.om-results > row.om-aside {{
 
 .om-status {{
   font-family: monospace;
-  font-size: 11px;
+  font-size: 0.75rem;
   font-weight: 700;
   min-width: 14px;
   color: @om_dim;
@@ -703,12 +712,12 @@ list.om-results > row:selected .om-row:hover {{
 
 .om-sha {{
   font-family: monospace;
-  font-size: 11px;
+  font-size: 0.75rem;
   color: @om_dim;
 }}
 
 .om-ref {{
-  font-size: 10px;
+  font-size: 0.68rem;
   font-weight: 700;
   padding: 0 6px;
   border-radius: 4px;
@@ -719,7 +728,7 @@ list.om-results > row:selected .om-row:hover {{
 {refs}
 
 .om-big {{
-  font-size: 22px;
+  font-size: 1.5rem;
   font-weight: 700;
   color: @om_fg;
 }}
@@ -1699,5 +1708,23 @@ brown = "#743d1e"
         let (a, b) = (Palette::rgb("#e97b3c"), Palette::rgb("#0a2540"));
         assert_eq!(contrast(a, b), contrast(b, a));
         assert_eq!(contrast(a, b), ratio(a, b));
+    }
+
+    /// All fifteen sizes were in px, which GTK uses as written whatever the
+    /// desktop's font size and text-scaling factor are. rem is the unit that
+    /// follows both.
+    #[test]
+    fn text_sizes_follow_the_desktops_font() {
+        let sheet = Sheet::of(&Palette::fallback());
+        let sizes: Vec<_> =
+            sheet.rules.iter().filter(|(_, property, _)| property == "font-size").collect();
+        assert!(!sizes.is_empty());
+        for (selector, _, size) in sizes {
+            let rems = size.strip_suffix("rem").and_then(|number| number.parse::<f64>().ok());
+            assert!(
+                rems.is_some_and(|rems| (0.6..=1.6).contains(&rems)),
+                "`{selector}` has a font-size of {size}"
+            );
+        }
     }
 }
