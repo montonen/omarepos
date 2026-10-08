@@ -446,7 +446,7 @@ pub fn pane(
                 }
                 // The message box goes when this is not the working tree, and
                 // after the commit that emptied the tree the keyboard is in it.
-                let typing = commit_box.focus_child().is_some();
+                let typing = focus_inside(&commit_box).is_some();
 
                 *viewer.listed.borrow_mut() = Some(Listed {
                     repo: repo.clone(),
@@ -620,13 +620,12 @@ pub fn pane(
                 };
                 match &chosen {
                     Some(row) => files.select_row(Some(row)),
-                    // Whichever row the list took for itself while it was
-                    // being filled.
-                    None => {
-                        if let Some(stray) = files.selected_row() {
-                            files.unselect_row(&stray);
-                        }
-                    }
+                    // Nor whichever row the list may have taken for itself
+                    // while it was being filled. Selecting no row, and not
+                    // unselecting the one: that is only done "if the
+                    // selection mode allows it", and this is the call that
+                    // does not ask.
+                    None => files.select_row(gtk::ListBoxRow::NONE),
                 }
                 rebuilding.set(false);
                 viewer.show(chosen.as_ref());
@@ -690,7 +689,12 @@ pub fn pane(
                         }
                         scroller.vadjustment().set_value(offset);
                         if let (Some(viewport), Some(row)) = (&viewport, keyboard.flatten()) {
-                            viewport.scroll_to(&row, None);
+                            // Up or down only: a long path makes a row wider
+                            // than the pane, and that is not a reason to move
+                            // the list sideways.
+                            let how = gtk::ScrollInfo::new();
+                            how.set_enable_horizontal(false);
+                            viewport.scroll_to(&row, Some(how));
                         }
                     });
                 }
@@ -867,7 +871,7 @@ fn group_heading(
             // the file the diff is of, and the one Tab comes back to.
             if !now && member.is_selected() {
                 if let Some(list) = member.parent().and_downcast::<gtk::ListBox>() {
-                    list.unselect_row(member);
+                    list.select_row(gtk::ListBoxRow::NONE);
                 }
             }
             member.set_visible(now);
@@ -1009,18 +1013,14 @@ struct Place {
 impl Place {
     fn of(files: &gtk::ListBox) -> Self {
         let selected = files.selected_row();
-        let focused = files
-            .root()
-            .and_then(|root| root.focus())
-            .filter(|widget| widget.is_ancestor(files))
-            .and_then(|widget| {
-                // The row itself, or the stage button inside it.
-                widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
-                    widget
-                        .ancestor(gtk::ListBoxRow::static_type())
-                        .and_downcast::<gtk::ListBoxRow>()
-                })
-            });
+        let focused = focus_inside(files).and_then(|widget| {
+            // The row itself, or the stage button inside it.
+            widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
+                widget
+                    .ancestor(gtk::ListBoxRow::static_type())
+                    .and_downcast::<gtk::ListBoxRow>()
+            })
+        });
         let mut place = Place { names: Vec::new(), selected: None, focused: None };
         for (name, row) in named_rows(files) {
             if selected.as_ref() == Some(&row) {
@@ -1057,6 +1057,12 @@ fn is_shown(row: &gtk::ListBoxRow) -> bool {
 /// A file's row, not folded away: one that can be the selection.
 fn is_shown_file(row: &gtk::ListBoxRow) -> bool {
     row.is_selectable() && row.get_visible()
+}
+
+/// The widget that has the keyboard, when it is somewhere inside `within`.
+/// Asked of the window, which is the one that knows.
+fn focus_inside(within: &impl IsA<gtk::Widget>) -> Option<gtk::Widget> {
+    within.root()?.focus().filter(|widget| widget.is_ancestor(within))
 }
 
 /// The rows of the list that carry a name of their own, in order.

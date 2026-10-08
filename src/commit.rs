@@ -227,7 +227,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     let committer = commit.committer();
     let committer_name = committer.name().unwrap_or("").to_string();
 
-    let tree = commit.tree().map_err(|e| unreadable(&repo, &e))?;
+    let tree = commit.tree().map_err(|e| read_error(&repo, &e))?;
     // A merge is diffed against its first parent: that shows what the merge
     // brought in, which is what someone looking at one means.
     let parent_tree = parent_tree(&repo, &commit)?;
@@ -243,7 +243,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     opts.include_typechange(true).context_lines(0);
     let mut diff: Diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
-        .map_err(|e| unreadable(&repo, &e))?;
+        .map_err(|e| read_error(&repo, &e))?;
 
     // Without this a rename reads as a delete plus an add, which is three
     // wrong facts where there was one right one.
@@ -347,7 +347,7 @@ fn parent_tree<'repo>(
         .parent(0)
         .and_then(|parent| parent.tree())
         .map(Some)
-        .map_err(|err| unreadable(repo, &err))
+        .map_err(|err| read_error(repo, &err))
 }
 
 /// The tree HEAD stands for, or nothing when nothing has been committed yet:
@@ -355,7 +355,7 @@ fn parent_tree<'repo>(
 /// and not a reason to list the whole index as added.
 fn head_tree(repo: &Repository) -> Result<Option<git2::Tree<'_>>, String> {
     match repo.head() {
-        Ok(head) => head.peel_to_tree().map(Some).map_err(|err| unreadable(repo, &err)),
+        Ok(head) => head.peel_to_tree().map(Some).map_err(|err| read_error(repo, &err)),
         Err(err) if matches!(err.code(), git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound) => {
             Ok(None)
         }
@@ -367,7 +367,7 @@ fn head_tree(repo: &Repository) -> Result<Option<git2::Tree<'_>>, String> {
 /// front where the reason is known. A partial clone is the ordinary one: git
 /// fetches a missing object when it is asked for it, libgit2 does not, and
 /// "object not found" is all it has to say about that.
-fn unreadable(repo: &Repository, err: &git2::Error) -> String {
+fn read_error(repo: &Repository, err: &git2::Error) -> String {
     if err.code() == git2::ErrorCode::NotFound && is_partial(repo) {
         format!(
             "This is a partial clone, and this content has not been downloaded. git fetches \
@@ -486,7 +486,7 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
     staged_opts.include_typechange(true).context_lines(0);
     let diff = repo
         .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
-        .map_err(|e| unreadable(&repo, &e))?;
+        .map_err(|e| read_error(&repo, &e))?;
     collect(&diff, Group::Staged, cancel, &mut files, &mut insertions, &mut deletions);
 
     let mut work_opts = DiffOptions::new();
@@ -507,7 +507,7 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         .context_lines(0);
     let diff = repo
         .diff_index_to_workdir(Some(&index), Some(&mut work_opts))
-        .map_err(|e| unreadable(&repo, &e))?;
+        .map_err(|e| read_error(&repo, &e))?;
     collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
 
     let total_files = files.len();
@@ -738,7 +738,7 @@ fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<Fi
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
     let oid = Oid::from_str(id).map_err(|e| e.message().to_string())?;
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
-    let tree = commit.tree().map_err(|e| unreadable(&repo, &e))?;
+    let tree = commit.tree().map_err(|e| read_error(&repo, &e))?;
     let parent_tree = parent_tree(&repo, &commit)?;
 
     // Narrowed to the one file, and with real context this time — the commit
@@ -755,7 +755,7 @@ fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<Fi
     }
     let mut diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
-        .map_err(|e| unreadable(&repo, &e))?;
+        .map_err(|e| read_error(&repo, &e))?;
     if from.is_some() {
         // The same detection the list ran, so the two cannot disagree.
         let mut finds = DiffFindOptions::new();
@@ -805,13 +805,13 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
     if staged {
         let diff = repo
             .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
-            .map_err(|e| unreadable(&repo, &e))?;
+            .map_err(|e| read_error(&repo, &e))?;
         append_patch(&repo, &diff, None, &mut out)?;
     }
     if unstaged {
         let diff = repo
             .diff_index_to_workdir(Some(&index), Some(&mut opts))
-            .map_err(|e| unreadable(&repo, &e))?;
+            .map_err(|e| read_error(&repo, &e))?;
         append_patch(&repo, &diff, None, &mut out)?;
     }
     Ok(out)
@@ -847,7 +847,7 @@ fn append_patch(
             );
             continue;
         }
-        let patch = Patch::from_diff(diff, index).map_err(|err| unreadable(repo, &err))?;
+        let patch = Patch::from_diff(diff, index).map_err(|err| read_error(repo, &err))?;
         let binary =
             delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary();
         let Some(patch) = patch else {
