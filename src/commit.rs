@@ -136,6 +136,36 @@ pub struct Detail {
     pub total_files: usize,
     pub insertions: usize,
     pub deletions: usize,
+    /// For the working tree: how many entries each kind has, counted before
+    /// the cap. What the pane says about the tree, and what Commit will take,
+    /// are read from here and not from the list, which may have been cut.
+    pub counts: Counts,
+}
+
+/// Entries per kind in a working tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub staged: usize,
+    pub unstaged: usize,
+    pub conflicted: usize,
+    pub untracked: usize,
+}
+
+impl Counts {
+    pub fn of(self, group: Group) -> usize {
+        match group {
+            Group::Staged => self.staged,
+            Group::Unstaged => self.unstaged,
+            Group::Conflicted => self.conflicted,
+            Group::Untracked => self.untracked,
+            Group::Committed => 0,
+        }
+    }
+
+    /// Whether anything here holds the background refresh back.
+    pub fn blocks_update(self) -> bool {
+        self.staged + self.unstaged + self.conflicted > 0
+    }
 }
 
 /// A flag the caller can set to abandon a load it no longer wants.
@@ -280,6 +310,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         total_files,
         insertions,
         deletions,
+        counts: Counts::default(),
     })
 }
 
@@ -329,6 +360,7 @@ pub fn spawn_patch(
     repo: PathBuf,
     target: Target,
     file: String,
+    side: Option<Group>,
 ) -> (async_channel::Receiver<Result<Box<FileDiff>, String>>, Cancel) {
     let (tx, rx) = async_channel::bounded(1);
     let cancel = Cancel::default();
@@ -337,7 +369,7 @@ pub fn spawn_patch(
         std::thread::spawn(move || {
             let result = match &target {
                 Target::Commit(id) => patch_for(&repo, id, &file),
-                Target::Working => patch_working(&repo, &file),
+                Target::Working => patch_working(&repo, &file, side),
             };
             if !cancel.stopped() {
                 let _ = tx.send_blocking(result.map(Box::new));
@@ -375,12 +407,31 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         // exists to say which.
         .recurse_untracked_dirs(true)
         .include_ignored(false)
+        // The same rule as the card, the row count and the refresher: a
+        // submodule's checkout being at another commit is not a change of
+        // this repository's to stage. Listed, it had a stage button, and
+        // staging it rewound the pointer to wherever the checkout happened
+        // to be.
+        .ignore_submodules(true)
         .context_lines(0);
     if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut work_opts)) {
         collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
     }
 
     let total_files = files.len();
+    let count = |group: Group| files.iter().filter(|f| f.group == group).count();
+    let counts = Counts {
+        staged: count(Group::Staged),
+        unstaged: count(Group::Unstaged),
+        conflicted: count(Group::Conflicted),
+        untracked: count(Group::Untracked),
+    };
+    // The cap falls on what matters least. Untracked files are the bulk (one
+    // unignored build directory is thousands) and the one kind that holds
+    // nothing back; cut from the joined list as it came, they pushed the
+    // single modified file off the end and the pane said nothing was in the
+    // way. Stable, so the order within each kind is kept.
+    files.sort_by_key(|f| !f.group.blocks_update());
     files.truncate(MAX_FILES);
 
     Ok(Detail {
@@ -398,6 +449,7 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         total_files,
         insertions,
         deletions,
+        counts,
     })
 }
 
@@ -471,7 +523,7 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
     // Narrowed to the one file, and with real context this time — the commit
     // summary asks for counts, this asks to be read.
     let mut opts = DiffOptions::new();
-    opts.context_lines(3).include_typechange(true).pathspec(file);
+    opts.context_lines(3).include_typechange(true).pathspec(file).disable_pathspec_match(true);
     let diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
@@ -508,7 +560,12 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
 
 /// The uncommitted diff of one file, including an untracked one — which has no
 /// blob to compare against, so git is asked to show its content as added.
-fn patch_working(path: &Path, file: &str) -> Result<FileDiff, String> {
+/// One file's uncommitted diff. `side` is the row that asked: a file that has
+/// been staged and then edited again has two rows, and each shows its own
+/// half. The Staged row is what Commit will take, and it used to be shown
+/// with the later edits appended, so what was reviewed was not what went in.
+/// With no side given, or for a conflict, both halves are shown.
+fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDiff, String> {
     let repo = crate::git::open_here(path)?;
     let index = repo.index().map_err(|e| e.message().to_string())?;
 
@@ -519,18 +576,33 @@ fn patch_working(path: &Path, file: &str) -> Result<FileDiff, String> {
         .include_untracked(true)
         .recurse_untracked_dirs(true)
         .show_untracked_content(true)
-        .pathspec(file);
+        .ignore_submodules(true)
+        .pathspec(file)
+        // The name is a name. Taken as a pattern, `app/[id]/page.tsx` also
+        // matched `app/i/page.tsx`, and the diff shown was of another file.
+        .disable_pathspec_match(true);
 
-    // Staged first, so a file that is both staged and modified still shows
-    // something rather than nothing.
+    let staged = !matches!(side, Some(Group::Unstaged) | Some(Group::Untracked));
+    let unstaged = !matches!(side, Some(Group::Staged));
+
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let mut staged_opts = DiffOptions::new();
-    staged_opts.context_lines(3).include_typechange(true).pathspec(file);
-    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts)) {
-        append_patch(&diff, &mut out);
+    staged_opts
+        .context_lines(3)
+        .include_typechange(true)
+        .pathspec(file)
+        .disable_pathspec_match(true);
+    if staged {
+        if let Ok(diff) =
+            repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
+        {
+            append_patch(&diff, &mut out);
+        }
     }
-    if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
-        append_patch(&diff, &mut out);
+    if unstaged {
+        if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
+            append_patch(&diff, &mut out);
+        }
     }
     Ok(out)
 }
@@ -910,6 +982,27 @@ fn conflicted_among(repo: &Path, files: &[String]) -> Option<String> {
         .cloned()
 }
 
+/// Who a commit made here would be recorded as. Asked of the git that will
+/// make it, because it is the only one that knows: libgit2 evaluates some
+/// conditional includes and not others, and reads neither `author.*` nor the
+/// environment git honours.
+pub fn identity(repo: &Path) -> Result<String, String> {
+    let said = crate::gitcmd::run(repo, &["var", "GIT_AUTHOR_IDENT"], std::time::Duration::from_secs(5))?;
+    // "Name <email> 1791399981 +0200": the date is not part of who.
+    match said.trim().rsplit_once('>') {
+        Some((who, _)) => Ok(format!("{who}>")),
+        None => Err("git gave no identity".to_string()),
+    }
+}
+
+pub fn spawn_identity(repo: PathBuf) -> async_channel::Receiver<Result<String, String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(identity(&repo));
+    });
+    rx
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Write {
     Stage,
@@ -940,11 +1033,29 @@ pub fn spawn_write(
             )));
             return;
         }
+        // An untracked directory that libgit2 will not look inside is another
+        // repository. `git add` on it records a gitlink: a submodule with no
+        // `.gitmodules`, which nobody asked for.
+        if what == Write::Stage {
+            if let Some(nested) = files.iter().find(|file| file.ends_with('/')) {
+                let _ = tx.send_blocking(Err(format!(
+                    "{nested} is another git repository. Add it as a submodule, or ignore it, \
+                     from a terminal."
+                )));
+                return;
+            }
+        }
+        // `--` stops git reading a name as an option; it does not stop git
+        // reading it as a pattern. Staging `app/[id]/page.tsx` also staged
+        // `app/i/page.tsx` and `app/d/page.tsx`, and a file called `*` staged
+        // everything. Only for these two commands, and not through the
+        // environment: a hook inherits that, and its own patterns stop
+        // matching.
         let mut args: Vec<&str> = match what {
-            Write::Stage => vec!["add", "--"],
+            Write::Stage => vec!["--literal-pathspecs", "add", "--"],
             // `restore --staged` leaves the working tree alone; `reset` would
             // be the older spelling of the same thing.
-            Write::Unstage => vec!["restore", "--staged", "--"],
+            Write::Unstage => vec!["--literal-pathspecs", "restore", "--staged", "--"],
         };
         args.extend(files.iter().map(String::as_str));
         let _ = tx.send_blocking(crate::gitcmd::run(&repo, &args, WRITE_TIMEOUT).map(|_| ()));
@@ -983,6 +1094,128 @@ mod tests {
         push_plan(&Repository::open(&f.work).unwrap())
     }
 
+    // ---- staging takes the file that was pointed at, and only that ----------
+
+    fn staged(dir: &Path) -> String {
+        git(dir, &["diff", "--cached", "--name-only"])
+    }
+
+    /// Route folders in Next.js, SvelteKit and Remix are named like patterns.
+    #[test]
+    fn a_file_name_is_a_name_and_not_a_pattern() {
+        let _guard = isolate();
+        let dir = scratch("stage-literal");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "README.md", "one\n", "first");
+        for name in ["app/[id]/page.tsx", "app/i/page.tsx", "app/d/page.tsx", "*", "notes.txt"] {
+            write(&dir.join(name), "x\n");
+        }
+
+        recv(spawn_write(dir.clone(), Write::Stage, vec!["app/[id]/page.tsx".to_string()])).unwrap();
+        assert_eq!(staged(&dir), "app/[id]/page.tsx");
+
+        recv(spawn_write(dir.clone(), Write::Stage, vec!["*".to_string()])).unwrap();
+        assert_eq!(staged(&dir), "*\napp/[id]/page.tsx", "a file called * staged everything");
+
+        recv(spawn_write(dir.clone(), Write::Unstage, vec!["*".to_string()])).unwrap();
+        assert_eq!(staged(&dir), "app/[id]/page.tsx");
+
+        // And the diff shown for it is its own.
+        let diff = patch_working(&dir, "app/[id]/page.tsx", Some(Group::Staged)).unwrap();
+        assert_eq!(diff.lines.iter().filter(|line| line.origin == '+').count(), 1);
+    }
+
+    #[test]
+    fn a_repository_inside_the_repository_is_not_staged_as_a_gitlink() {
+        let _guard = isolate();
+        let dir = scratch("stage-nested");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "README.md", "one\n", "first");
+        let inner = dir.join("vendor/thing");
+        std::fs::create_dir_all(&inner).unwrap();
+        git(&inner, &["init", "-q", "-b", "main"]);
+        commit_file(&inner, "a.txt", "a\n", "inner");
+
+        let listed = load_working(&dir, &Cancel::default()).unwrap();
+        let nested = listed.files.iter().find(|f| f.path.ends_with('/')).expect("listed as a directory");
+        let said = recv(spawn_write(dir.clone(), Write::Stage, vec![nested.path.clone()]));
+        assert!(said.unwrap_err().contains("another git repository"));
+        assert_eq!(staged(&dir), "");
+    }
+
+    /// Stage a file, go on editing it: two rows, and each shows its own half.
+    #[test]
+    fn the_staged_row_shows_what_commit_will_take_and_nothing_else() {
+        let _guard = isolate();
+        let dir = scratch("stage-two-halves");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", "one\n", "first");
+        write(&dir.join("a.txt"), "one\nstaged\n");
+        git(&dir, &["add", "a.txt"]);
+        write(&dir.join("a.txt"), "one\nstaged\nlater\n");
+
+        let added = |side| -> Vec<String> {
+            patch_working(&dir, "a.txt", side)
+                .unwrap()
+                .lines
+                .into_iter()
+                .filter(|line| line.origin == '+')
+                .map(|line| line.text)
+                .collect()
+        };
+        assert_eq!(added(Some(Group::Staged)), ["staged"]);
+        assert_eq!(added(Some(Group::Unstaged)), ["later"]);
+        assert_eq!(added(None), ["staged", "later"]);
+    }
+
+    /// One unignored build directory, and the one file that matters.
+    #[test]
+    fn the_cap_falls_on_untracked_files_and_the_counts_are_taken_first() {
+        let _guard = isolate();
+        let dir = scratch("working-cap");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "zz-last.txt", "one\n", "first");
+        write(&dir.join("zz-last.txt"), "edited\n");
+        for i in 0..(MAX_FILES + 50) {
+            write(&dir.join(format!("build/out-{i:04}.o")), "x\n");
+        }
+
+        let listed = load_working(&dir, &Cancel::default()).unwrap();
+
+        assert_eq!(listed.counts.unstaged, 1);
+        assert_eq!(listed.counts.untracked, MAX_FILES + 50);
+        assert!(listed.counts.blocks_update());
+        assert_eq!(listed.files.len(), MAX_FILES);
+        assert!(
+            listed.files.iter().any(|f| f.path == "zz-last.txt"),
+            "the modified file was cut off the end of the list"
+        );
+    }
+
+    #[test]
+    fn a_submodule_left_at_another_commit_is_not_offered_for_staging() {
+        let _guard = isolate();
+        let f = fleet("working-submodule");
+        let lib = fleet("working-submodule-lib");
+        git(&f.work, &["submodule", "add", "-q", lib.remote.to_str().unwrap(), "lib"]);
+        git(&f.work, &["commit", "-q", "-m", "add lib"]);
+        commit_file(&f.work.join("lib"), "more.txt", "x\n", "lib moves on");
+        assert!(git(&f.work, &["status", "--porcelain"]).contains("lib"), "git does see it");
+
+        let listed = load_working(&f.work, &Cancel::default()).unwrap();
+        let rows: Vec<&str> = listed.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn the_identity_is_the_one_git_will_record() {
+        let _guard = isolate();
+        let f = fleet("commit-identity");
+        assert_eq!(identity(&f.work), Ok("Fixture <fixture@example.invalid>".to_string()));
+        git(&f.work, &["config", "author.name", "Somebody Else"]);
+        assert_eq!(identity(&f.work), Ok("Somebody Else <fixture@example.invalid>".to_string()));
+    }
+
     // ---- nothing reaches through a redirected work tree --------------------
 
     #[test]
@@ -994,7 +1227,7 @@ mod tests {
         git(&f.work, &["config", "core.worktree", elsewhere.to_str().unwrap()]);
 
         assert!(load_working(&f.work, &Cancel::default()).is_err());
-        assert!(patch_working(&f.work, "id_ed25519").is_err());
+        assert!(patch_working(&f.work, "id_ed25519", None).is_err());
         let staged = recv(spawn_write(f.work.clone(), Write::Stage, vec!["id_ed25519".to_string()]));
         assert!(staged.is_err());
         assert!(why_not_commit(&f.work, 1, "exfiltrate").is_some());
@@ -1028,7 +1261,7 @@ mod tests {
 
         // The same file before it is committed takes the other path.
         write(&dir.join("other.min.js"), &format!("var b={};\n", "y+".repeat(300_000)));
-        let untracked = patch_working(&dir, "other.min.js").unwrap();
+        let untracked = patch_working(&dir, "other.min.js", None).unwrap();
         let longest = untracked.lines.iter().map(|line| line.text.len()).max().unwrap();
         assert!(longest < MAX_LINE_BYTES + 100, "{longest}");
     }

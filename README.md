@@ -440,7 +440,11 @@ Each group folds. Untracked starts folded past ten files, where it stops being
 information and starts being noise.
 
 The `+` beside a file stages it, `−` unstages it, and the box below commits what
-is staged. Whole files only — staging a hunk is the heart of a committing tool
+is staged. A file that is staged and then edited again has two rows, and each
+shows its own half: the Staged row is exactly what the commit will take. The
+name beside the Commit button is who git will record it as. A submodule whose
+checkout has moved is not listed, and neither it nor a repository nested inside
+this one can be staged from here. Whole files only — staging a hunk is the heart of a committing tool
 and omarepos is not one; `Open in terminal` starts lazygit for that. The commit
 is refused, with the reason, when nothing is staged, the message is empty, the
 repository is mid-merge or mid-rebase, there are unresolved conflicts, HEAD is

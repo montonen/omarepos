@@ -154,9 +154,18 @@ pub fn pane(
     message.add_css_class("om-search");
     let commit_button = gtk::Button::with_label("Commit");
     commit_button.add_css_class("suggested-action");
+    // Who the commit will be recorded as, before it is made. With an identity
+    // per client directory, the wrong one is otherwise found out afterwards,
+    // on the remote.
+    let who = gtk::Label::builder()
+        .ellipsize(pango::EllipsizeMode::Middle)
+        .max_width_chars(30)
+        .build();
+    who.add_css_class("om-meta");
     let commit_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     commit_box.add_css_class("om-commit");
     commit_box.append(&message);
+    commit_box.append(&who);
     commit_box.append(&commit_button);
     commit_box.set_visible(false);
 
@@ -179,6 +188,10 @@ pub fn pane(
     let patching: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     let patch_generation = Rc::new(RefCell::new(0u64));
     let staged_count = Rc::new(std::cell::Cell::new(0usize));
+    // One write at a time. git reads the index again after a pre-commit hook
+    // has run, so a file staged while "Committing…" was on screen went into a
+    // commit whose message had been written without it.
+    let busy = Rc::new(std::cell::Cell::new(false));
 
     // Reloading after a write: the same path the pane already uses, so there is
     // one way for its contents to arrive.
@@ -191,6 +204,8 @@ pub fn pane(
         let message = message.clone();
         let totals = totals.clone();
         let on_changed = Rc::clone(&on_changed);
+        let busy = Rc::clone(&busy);
+        let files_for_commit = files.clone();
         commit_button.connect_clicked(move |button| {
             let Some((repo, Target::Working)) = showing.borrow().clone() else { return };
             let text = message.text().to_string();
@@ -198,11 +213,18 @@ pub fn pane(
                 tell(&totals, &reason);
                 return;
             }
+            if busy.replace(true) {
+                tell(&totals, "Still staging. Try again in a moment.");
+                return;
+            }
             button.set_sensitive(false);
+            files_for_commit.set_sensitive(false);
             tell(&totals, "Committing…");
 
             let rx = commit::spawn_commit(repo, text);
             let button = button.clone();
+            let busy = Rc::clone(&busy);
+            let files_for_commit = files_for_commit.clone();
             let message = message.clone();
             let totals = totals.clone();
             let reload = Rc::clone(&reload);
@@ -210,6 +232,8 @@ pub fn pane(
             glib::spawn_future_local(async move {
                 let result = rx.recv().await;
                 button.set_sensitive(true);
+                files_for_commit.set_sensitive(true);
+                busy.set(false);
                 match result {
                     Ok(Ok(sha)) => {
                         message.set_text("");
@@ -235,9 +259,7 @@ pub fn pane(
         let buffer = buffer.clone();
         files.connect_row_selected(move |_, row| {
             let Some(row) = row else { return };
-            let Some(path) = row.widget_name().strip_prefix("file:").map(str::to_string) else {
-                return;
-            };
+            let Some((side, path)) = row_file(row) else { return };
             let path_for_render = path.clone();
             let Some((repo, target)) = showing.borrow().clone() else { return };
 
@@ -256,7 +278,7 @@ pub fn pane(
             let buffer = buffer.clone();
             glib::spawn_future_local(async move {
                 let path = path_for_render;
-                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone());
+                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone(), side);
                 *patching.borrow_mut() = Some(cancel);
                 let Ok(result) = rx.recv().await else { return };
                 if *patch_generation.borrow() != mine {
@@ -302,6 +324,8 @@ pub fn pane(
             let staged_count = Rc::clone(&staged_count);
             let reload = Rc::clone(&reload);
             let on_changed = Rc::clone(&on_changed);
+            let busy = Rc::clone(&busy);
+            let who = who.clone();
 
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
@@ -322,6 +346,26 @@ pub fn pane(
 
                 let working = matches!(*showing.borrow(), Some((_, Target::Working)));
                 commit_box.set_visible(working);
+                if working {
+                    if let Some((repo, _)) = showing.borrow().clone() {
+                        let who = who.clone();
+                        glib::spawn_future_local(async move {
+                            match commit::spawn_identity(repo).recv().await {
+                                Ok(Ok(identity)) => {
+                                    who.set_label(&format!("as {identity}"));
+                                    who.set_tooltip_text(Some(&format!(
+                                        "A commit made here is recorded as {identity}"
+                                    )));
+                                }
+                                Ok(Err(why)) => {
+                                    who.set_label("no identity");
+                                    who.set_tooltip_text(Some(&why));
+                                }
+                                Err(_) => {}
+                            }
+                        });
+                    }
+                }
                 // Staging only exists for the working tree; a commit's files
                 // are already committed.
                 let writer: Option<Rc<dyn Fn(Write, String)>> = working.then(|| {
@@ -329,14 +373,21 @@ pub fn pane(
                     let reload = Rc::clone(&reload);
                     let on_changed = Rc::clone(&on_changed);
                     let totals = totals.clone();
+                    let busy = Rc::clone(&busy);
                     Rc::new(move |what: Write, file: String| {
                         let Some((repo, _)) = showing.borrow().clone() else { return };
+                        if busy.replace(true) {
+                            return;
+                        }
+                        let busy = Rc::clone(&busy);
                         let rx = commit::spawn_write(repo, what, vec![file]);
                         let reload = Rc::clone(&reload);
                         let on_changed = Rc::clone(&on_changed);
                         let totals = totals.clone();
                         glib::spawn_future_local(async move {
-                            match rx.recv().await {
+                            let result = rx.recv().await;
+                            busy.set(false);
+                            match result {
                                 Ok(Ok(())) => {
                                     if let Some(reload) = reload.borrow().clone() {
                                         reload();
@@ -352,8 +403,9 @@ pub fn pane(
 
                 match result {
                     Ok(detail) => {
-                        staged_count
-                            .set(detail.files.iter().filter(|f| f.group == Group::Staged).count());
+                        // From the counts taken before the list was capped:
+                        // Commit takes everything staged, listed or not.
+                        staged_count.set(detail.counts.staged);
                         subject.set_label(&detail.summary);
                         subject.set_tooltip_text(Some(&format!(
                             "{}\n{} <{}>\n{}",
@@ -378,7 +430,14 @@ pub fn pane(
                                 .filter(|f| f.group == group)
                                 .cloned()
                                 .collect();
-                            if in_group.is_empty() {
+                            // How many there are, as against how many are
+                            // listed: the list is capped, the count is not.
+                            let total = if group == Group::Committed {
+                                in_group.len()
+                            } else {
+                                detail.counts.of(group)
+                            };
+                            if in_group.is_empty() && total == 0 {
                                 continue;
                             }
                             let mut members = Vec::new();
@@ -395,7 +454,7 @@ pub fn pane(
                             if group != Group::Committed {
                                 // Inserted above its rows once they exist, so
                                 // the heading has something to hide.
-                                let heading = group_heading(group, in_group.len(), members);
+                                let heading = group_heading(group, in_group.len(), total, members);
                                 files.insert(&heading, position);
                                 added += 1;
                             }
@@ -519,7 +578,12 @@ pub fn pane(
 /// past a handful the group starts folded.
 const FOLD_UNTRACKED_PAST: usize = 10;
 
-fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> gtk::ListBoxRow {
+fn group_heading(
+    group: Group,
+    count: usize,
+    total: usize,
+    members: Vec<gtk::ListBoxRow>,
+) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
     let open = group.blocks_update() || count <= FOLD_UNTRACKED_PAST;
@@ -531,7 +595,11 @@ fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> g
     line.append(&chevron);
 
     let title = gtk::Label::builder()
-        .label(format!("{}  ({count})", group.heading()))
+        .label(if total > count {
+            format!("{}  ({count} of {total} shown)", group.heading())
+        } else {
+            format!("{}  ({count})", group.heading())
+        })
         .xalign(0.0)
         .hexpand(true)
         .build();
@@ -584,6 +652,33 @@ fn group_heading(group: Group, count: usize, members: Vec<gtk::ListBoxRow>) -> g
     row
 }
 
+/// The group travels on the row with the path, so that the diff asked for is
+/// the half the row stands for. One letter, then a colon: a path may have
+/// colons of its own, and is everything after the first.
+fn side_token(group: Group) -> char {
+    match group {
+        Group::Staged => 's',
+        Group::Unstaged => 'u',
+        Group::Untracked => 'n',
+        Group::Conflicted => 'c',
+        Group::Committed => '-',
+    }
+}
+
+/// The file a row stands for, and which half of its changes.
+fn row_file(row: &gtk::ListBoxRow) -> Option<(Option<Group>, String)> {
+    let name = row.widget_name();
+    let (token, path) = name.strip_prefix("file:")?.split_once(':')?;
+    let side = match token {
+        "s" => Some(Group::Staged),
+        "u" => Some(Group::Unstaged),
+        "n" => Some(Group::Untracked),
+        "c" => Some(Group::Conflicted),
+        _ => None,
+    };
+    Some((side, path.to_string()))
+}
+
 /// Put a message in the pane's one status line. The line holds a single
 /// ellipsized row, and some of what lands in it is longer than that: a refusal
 /// that explains itself, or several lines from a hook. The whole of it goes in
@@ -597,7 +692,7 @@ fn tell(label: &gtk::Label, text: &str) {
 
 fn describe(detail: &Detail) -> String {
     if detail.author.is_empty() {
-        let blocking = if detail.files.iter().any(|f| f.group.blocks_update()) {
+        let blocking = if detail.counts.blocks_update() {
             // Not "until these are committed": on a branch that is behind, the
             // commit is what makes the update impossible.
             "the background refresh leaves this repository alone while these are here"
@@ -962,7 +1057,7 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
             let row = gtk::ListBoxRow::builder().child(&line).build();
             // The full path travels on the row, since the label only carries
             // the part worth showing.
-            row.set_widget_name(&format!("file:{}", file.path));
+            row.set_widget_name(&format!("file:{}:{}", side_token(file.group), file.path));
             row
         }
     }
