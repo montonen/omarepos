@@ -1196,9 +1196,10 @@ pub fn spawn_write(
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         // `git add` is how git is told a conflict has been resolved, and
-        // `restore --staged` after it throws the three-way record away. Either
-        // would settle a merge by accident: the first commits the conflict
-        // markers, the second silently keeps this side and drops the other.
+        // unstaging the path, before or after, throws the three-way record
+        // away. Either would settle a merge by accident: the first commits the
+        // conflict markers, the second silently keeps this side and drops the
+        // other.
         if let Err(why) = crate::git::open_here(&repo) {
             let _ = tx.send_blocking(Err(why));
             return;
@@ -1230,9 +1231,16 @@ pub fn spawn_write(
         // matching.
         let mut args: Vec<&str> = match what {
             Write::Stage => vec!["--literal-pathspecs", "add", "--"],
-            // `restore --staged` leaves the working tree alone; `reset` would
-            // be the older spelling of the same thing.
-            Write::Unstage => vec!["--literal-pathspecs", "restore", "--staged", "--"],
+            // `reset` with paths, and not `restore --staged`, which this used
+            // to be on the grounds that the two are the same thing. They are,
+            // once there is a commit. `restore --staged` restores from HEAD,
+            // and before the first commit, or on an orphan branch, there is
+            // no HEAD: it fails with "could not resolve 'HEAD'" and a file
+            // staged there could not be unstaged at all. `reset` takes the
+            // paths out of the index in that case. Either way the working
+            // tree is not touched. (`rm --cached` would be the other way to
+            // say it, and refuses a file that was edited after it was staged.)
+            Write::Unstage => vec!["--literal-pathspecs", "reset", "-q", "--"],
         };
         args.extend(files.iter().map(String::as_str));
         let _ = tx.send_blocking(crate::gitcmd::run(&repo, &args, WRITE_TIMEOUT).map(|_| ()));
@@ -1300,6 +1308,63 @@ mod tests {
         // And the diff shown for it is its own.
         let diff = patch_working(&dir, "app/[id]/page.tsx", Some(Group::Staged)).unwrap();
         assert_eq!(diff.lines.iter().filter(|line| line.origin == '+').count(), 1);
+    }
+
+    /// `git init`, add the files, think again about one: the first commit of a
+    /// project. `git restore --staged` needs a HEAD to restore from, and
+    /// before the first commit there is none.
+    #[test]
+    fn a_file_staged_before_the_first_commit_can_be_unstaged() {
+        let _guard = isolate();
+        let dir = scratch("cm-unstage-unborn");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        write(&dir.join("README.md"), "one\n");
+        write(&dir.join("notes.txt"), "staged\n");
+        git(&dir, &["add", "README.md", "notes.txt"]);
+        write(&dir.join("notes.txt"), "staged\nand edited since\n");
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "A  README.md\nAM notes.txt");
+
+        recv(spawn_write(dir.clone(), Write::Unstage, vec!["README.md".to_string()])).unwrap();
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "AM notes.txt\n?? README.md");
+
+        // Staged and then edited: `git rm --cached` refuses this one. The
+        // later edit is the user's, and stays where it is.
+        recv(spawn_write(dir.clone(), Write::Unstage, vec!["notes.txt".to_string()])).unwrap();
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "?? README.md\n?? notes.txt");
+        assert_eq!(read(&dir.join("notes.txt")), "staged\nand edited since\n");
+
+        // An orphan branch has history behind it and still no HEAD to name.
+        git(&dir, &["add", "README.md"]);
+        git(&dir, &["commit", "-q", "-m", "first"]);
+        git(&dir, &["checkout", "-q", "--orphan", "fresh"]);
+        assert_eq!(staged(&dir), "README.md");
+        recv(spawn_write(dir.clone(), Write::Unstage, vec!["README.md".to_string()])).unwrap();
+        assert_eq!(staged(&dir), "");
+        assert_eq!(read(&dir.join("README.md")), "one\n");
+    }
+
+    /// With a HEAD, unstaging does what it always did, for each kind of
+    /// staged change.
+    #[test]
+    fn unstaging_puts_the_index_back_and_leaves_the_files_alone() {
+        let _guard = isolate();
+        let dir = scratch("cm-unstage-born");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "edited.txt", "one\n", "first");
+        commit_file(&dir, "gone.txt", "one\n", "second");
+        write(&dir.join("edited.txt"), "one\ntwo\n");
+        write(&dir.join("new.txt"), "new\n");
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        git(&dir, &["add", "-A"]);
+        write(&dir.join("edited.txt"), "one\ntwo\nthree\n");
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "MM edited.txt\nD  gone.txt\nA  new.txt");
+
+        let all = ["edited.txt", "gone.txt", "new.txt"].map(str::to_string).to_vec();
+        recv(spawn_write(dir.clone(), Write::Unstage, all)).unwrap();
+
+        assert_eq!(git(&dir, &["status", "--porcelain"]), "M edited.txt\n D gone.txt\n?? new.txt");
+        assert_eq!(read(&dir.join("edited.txt")), "one\ntwo\nthree\n");
+        assert!(!dir.join("gone.txt").exists(), "the deletion is the user's too");
     }
 
     #[test]
