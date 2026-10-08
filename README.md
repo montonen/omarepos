@@ -37,14 +37,25 @@ switch themes.
 cargo run --release
 ```
 
-Runtime dependencies: GTK 4.12+, libadwaita 1.4+. Build dependencies: a C
-toolchain and `pkg-config` (libgit2 is vendored by `git2`).
+Runtime dependencies: GTK 4.12+, libadwaita 1.5+, and `git` itself, which
+makes every write. Build dependencies: a C toolchain and `pkg-config`. libgit2
+is linked from the system when it is installed, and built from the copy `git2`
+carries when it is not.
 
 On Arch / Omarchy:
 
 ```bash
-sudo pacman -S --needed gtk4 libadwaita rust base-devel
+sudo pacman -S --needed gtk4 libadwaita libgit2 git rust base-devel
 ```
+
+`cargo test` builds its own repositories under `target/test-fixtures`, each
+with a bare remote beside it and a home directory of its own, and touches
+nothing else on the machine.
+
+A debug build started with `OMAREPOS_DUMP=<file>` gains two window actions for
+checking a page from a script: `dump` writes what is on screen to that file as
+text, with where the keyboard is, and `press` clicks a button by what it says.
+`src/ui/debug.rs` has the details. A release build has neither.
 
 ## Install
 
@@ -87,14 +98,15 @@ omarepos [options]
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+R` / `F5` | Rescan (local only) |
-| `Ctrl+Shift+R` | Fetch now |
+| `Ctrl+R` / `F5` | Rescan (local only). In a commit graph: read that repository again |
+| `Ctrl+Shift+R` | Run the refresh now: fetch, and fast-forward if that is switched on |
 | `Ctrl+L` | Jump to the grid |
 | `Ctrl+F`, or `/` with the keyboard on a card | Focus the filter box |
 | `Ctrl+Shift+F` | Search commits across these repos |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Ctrl+A` | Select every repo shown; again to deselect |
-| `Esc` | Back out: what you are typing, then the page, then the selection, then the filter |
+| `Esc` | Back out: a dialog or menu, the filter you are typing in, then the page, then the selection, then the filter |
+| `Esc` in the commit message | Step out of the field. The message stays |
 | `Ctrl+G` | Contributions for the selected repos, or all of them |
 | `Ctrl+Shift+A` | Clear the selection |
 | `lang:rust` in the filter | Narrow by language |
@@ -103,16 +115,19 @@ omarepos [options]
 | `Ctrl+Q` | Quit |
 | Click a card, or `Enter` on a focused one | Open its commit graph |
 | `Enter` on a search result | Open that repository's graph |
-| `Enter` on a commit-graph row | Copy its sha |
+| `Enter` on a commit-graph row, or a double click | Copy its sha |
 | `Down` from the commit-search box | Move into the results |
 | `Space` on a focused card | Tick it for the contributions scope |
-| `F1` or `?` | The whole keyboard, written down |
+| `F1`, or `?` on the grid and in a graph | The whole keyboard, written down |
 | `l` on a focused card, or in a graph | Open a terminal there — lazygit |
 | `e` | Open it in your editor |
 | `p` | Fetch and fast-forward that repo |
 | `f` | Fetch only, leaving your files alone |
 | `Space` in the changed files | Stage or unstage that file |
 | `c` in the changed files | Write a commit message |
+
+`l`, `e`, `p` and `f` act once for each press. A key held down, or one that
+sticks, does not open a terminal per repeat or start a second fetch.
 
 The filter matches repo name, path, branch, remote and language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
@@ -378,7 +393,10 @@ they actually did.
 - Filled dot: ordinary commit. Ring: merge commit. Outer ring: something points
   at it.
 - Pills are refs — the current branch, other local branches, tags, remote branches.
-- Activating a row — `Enter` or a click — copies its full sha.
+- A click selects a row, which is what fills the pane below. `Enter`, or a
+  double click, copies its full sha.
+- A row shows at most three ref pills, each shortened to fit; the rest fold
+  into `+N`, and the tooltips have the names in full.
 - The pane below shows what the selected commit changed, and follows the cursor
   as you walk the history. `Ctrl+D` or the header button hides it, and that
   choice is remembered.
@@ -474,8 +492,19 @@ An untracked file has nothing to diff against, so its contents are shown as
 added, the way `git diff --no-index` would.
 
 The working tree changes outside the app, so it is re-read whenever the window
-regains focus — edit in your editor, come back, and the list is current. A
-commit cannot change under you, so nothing else reloads.
+regains focus — edit in your editor, come back, and the list is current. HEAD
+is looked at in the same glance: when the branch or its tip has moved, because
+of a commit made in the terminal `l` opened or a checkout, the whole page is
+read again. When the tree went clean while "Local changes" was the row
+selected, the selection steps to the newest commit.
+
+The grid is kept honest the same way. A stage, a commit or a push made on a
+page marks that repository's card to be read again when the grid is next in
+front, and so is every repository handed to a terminal or an editor, each time
+the window is returned to. One card is re-read, not the fleet. And a graph page
+that is open while the window's own refresh fetches or fast-forwards its
+repository reads itself again, so its labels and its push button are not left
+describing the state before the pass.
 
 ### What a commit changed
 
@@ -596,6 +625,8 @@ counts.
 | `src/config.rs` | `config.toml`, path expansion, terminal/editor resolution |
 | `src/theme.rs` | Reads Omarchy's `colors.toml`, compiles the GTK stylesheet |
 | `src/git.rs` | Repository discovery and inspection |
+| `src/gitcmd.rs` | The one way a git command is run: time limit, process group, what git said |
+| `src/commit.rs` | Reading a commit or the working tree, and the stage, commit and push writes |
 | `src/graph.rs` | Revwalk → lane assignment for the commit graph |
 | `src/meta.rs` | Tag store (`repos.toml`) |
 | `src/stats.rs` | Contribution aggregation over a day window |
@@ -603,15 +634,21 @@ counts.
 | `src/scan.rs` | Worker threads streaming results to the main loop |
 | `src/refresh.rs` | Background fetch and fast-forward, with the safety rules |
 | `src/lang.rs` | Extension → language + colour table |
+| `src/testkit.rs` | Test fixtures: scratch repositories with a bare remote, an isolated home |
 | `src/ui/window.rs` | Header, filter, sort, grid, selection, status bar, theme watcher |
 | `src/ui/card.rs` | One repository card |
 | `src/ui/graph.rs` | Commit graph page and its cairo row renderer |
+| `src/ui/commit.rs` | The pane under the graph: changed files, diff, stage and commit |
+| `src/ui/shortcuts.rs` | The keyboard, written down |
+| `src/ui/debug.rs` | Debug builds only: dump the window as text, press a button by name |
 | `src/ui/stats.rs` | Contributions page |
 | `src/ui/search.rs` | Commit search page |
 | `src/ui/dialogs.rs` | Settings dialog and the tag editor |
 
 ## Status
 
-Early, but the three views are complete and usable. Known rough edges: ahead/behind
-and the graph both reflect the last fetch, nothing refreshes itself while the window
-is open except on `Ctrl+R`, and the graph has no diff view yet.
+Early, and in daily use by one person. The grid, the commit graph with its
+diff pane, contributions, commit search, the background refresh and the
+stage-commit-push path are all there. Ahead and behind are as fresh as the last
+fetch: with the refresh off, that is the last time you pressed `f`, `p` or
+`Ctrl+Shift+R`.

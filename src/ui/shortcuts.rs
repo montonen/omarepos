@@ -12,7 +12,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
     (
         "Anywhere",
         &[
-            ("F1", "This list"),
+            ("F1  or  ?", "This list (? on the grid and in a commit graph)"),
             ("Ctrl+,", "Settings"),
             ("Ctrl+Q", "Quit"),
             ("Esc", "Back out: the text, then the page, then the selection, then the filter"),
@@ -45,9 +45,10 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "The commit graph",
         &[
             ("↑ ↓", "Move; the pane below follows"),
-            ("Enter", "Copy the sha"),
+            ("Enter", "Copy the sha (so does a double click)"),
             ("Tab", "Into the changed files"),
             ("Ctrl+D", "Show or hide the pane"),
+            ("Ctrl+R  or  F5", "Read this repository again"),
         ],
     ),
     (
@@ -64,7 +65,10 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+G", "Contributions"),
             ("Ctrl+Shift+F", "Search commits"),
             ("Ctrl+R  or  F5", "Rescan what is on disk"),
-            ("Ctrl+Shift+R", "Fetch everything now"),
+            (
+                "Ctrl+Shift+R",
+                "Run the refresh now: fetch, and fast-forward if that is switched on",
+            ),
         ],
     ),
 ];

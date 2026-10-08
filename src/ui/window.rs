@@ -52,6 +52,8 @@ struct Ui {
     meta: Rc<RefCell<Meta>>,
     window: adw::ApplicationWindow,
     nav: adw::NavigationView,
+    /// The page the grid is on, at the bottom of the stack.
+    grid_page: adw::NavigationPage,
     provider: gtk::CssProvider,
     subtitle: gtk::Label,
     search: gtk::SearchEntry,
@@ -95,6 +97,21 @@ struct Ui {
     selected: RefCell<HashSet<PathBuf>>,
     contrib_content: adw::ButtonContent,
     generation: Cell<u64>,
+    /// True from the start of a scan to its end. Asked of the spinner before,
+    /// which answers "no" until the window is on screen, and which a fetch
+    /// turns as well.
+    scanning: Cell<bool>,
+    /// Repositories whose cards no longer say what is true, because the app
+    /// wrote to them from another page. Read again when the grid is next in
+    /// front.
+    stale: RefCell<BTreeSet<PathBuf>>,
+    /// The repository whose page was opened last, which is the card the
+    /// keyboard goes back to when that page is left.
+    opened: RefCell<Option<PathBuf>>,
+    /// Repositories handed to a terminal or an editor in this run. Whatever is
+    /// done to them there is done behind the app's back, so they are read
+    /// again each time the window is returned to.
+    handed: RefCell<BTreeSet<PathBuf>>,
     expected: Cell<usize>,
     /// How many repositories the scan in progress has read so far. Not
     /// `repos.len()`: a rescan leaves the grid as it is until it has the whole
@@ -150,7 +167,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     let refresh = gtk::Button::builder()
         .icon_name("view-refresh-symbolic")
-        .tooltip_text("Rescan (Ctrl+R)  ·  fetch now (Ctrl+Shift+R)")
+        .tooltip_text("Rescan (Ctrl+R)  ·  run the refresh now (Ctrl+Shift+R)")
         .has_frame(false)
         .build();
     header.pack_start(&refresh);
@@ -271,27 +288,29 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     body.append(&stack);
     body.append(&status);
 
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&body));
-
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
-    view.set_content(Some(&toasts));
+    view.set_content(Some(&body));
 
+    let grid_page = adw::NavigationPage::builder()
+        .title("omarepos")
+        .child(&view)
+        .build();
     let nav = adw::NavigationView::new();
-    nav.add(
-        &adw::NavigationPage::builder()
-            .title("omarepos")
-            .child(&view)
-            .build(),
-    );
-    window.set_content(Some(&nav));
+    nav.add(&grid_page);
+    // One overlay, around every page. It used to sit inside the grid's page,
+    // so whatever the window had to say (what a refresh came to, "already
+    // busy", why nothing was fetched) was said behind the page in front.
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&nav));
+    window.set_content(Some(&toasts));
 
     let ui = Rc::new(Ui {
         cfg,
         meta: Rc::new(RefCell::new(Meta::load())),
         window: window.clone(),
         nav: nav.clone(),
+        grid_page: grid_page.clone(),
         provider,
         subtitle,
         search: search.clone(),
@@ -318,6 +337,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         selected: RefCell::new(HashSet::new()),
         contrib_content,
         generation: Cell::new(0),
+        scanning: Cell::new(false),
+        stale: RefCell::new(BTreeSet::new()),
+        opened: RefCell::new(None),
+        handed: RefCell::new(BTreeSet::new()),
         expected: Cell::new(0),
         scanned: Cell::new(0),
         refresh_source: RefCell::new(None),
@@ -369,6 +392,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // without reaching for the mouse.
         let keys = gtk::EventControllerKey::new();
         let nav = Rc::clone(&ui);
+        // The four letters below each start something outside the window, and
+        // a held key arrives as a run of presses.
+        let presses = ui::OncePerPress::default();
         keys.connect_key_pressed(move |controller, key, _, state| {
             nav.enter_keyboard_nav();
 
@@ -376,8 +402,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             // is on the grid rather than the window, so a bare letter cannot
             // fire while the filter box has the focus.
             if key == gdk::Key::l && ui::unmodified(state) {
-                if let Some(path) = nav.focused_repo() {
-                    ui::open_terminal(&nav.cfg.borrow(), &path);
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.terminal_opener(&path)();
                 }
                 return glib::Propagation::Stop;
             }
@@ -385,23 +411,23 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             // `p` as lazygit means it. Fetch and fast-forward, with every
             // refusal the background pass already knows how to make.
             if key == gdk::Key::p && ui::unmodified(state) {
-                if let Some(path) = nav.focused_repo() {
-                    nav.pull_one(path, true);
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.pull_one(path, true, None);
                 }
                 return glib::Propagation::Stop;
             }
 
             // `f` fetches without touching the working tree.
             if key == gdk::Key::f && ui::unmodified(state) {
-                if let Some(path) = nav.focused_repo() {
-                    nav.pull_one(path, false);
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.pull_one(path, false, None);
                 }
                 return glib::Propagation::Stop;
             }
 
             if key == gdk::Key::e && ui::unmodified(state) {
-                if let Some(path) = nav.focused_repo() {
-                    ui::open_editor(&nav.cfg.borrow(), &path);
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.editor_opener(&path)();
                 }
                 return glib::Propagation::Stop;
             }
@@ -502,7 +528,17 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     let act_refresh = gio::SimpleAction::new("refresh", None);
     {
         let ui = Rc::clone(&ui);
-        act_refresh.connect_activate(move |_, _| ui.start_scan());
+        act_refresh.connect_activate(move |_, _| {
+            // The key means "read again what I am looking at". With a graph
+            // in front that is the graph: it used to rescan the grid behind
+            // it and leave the page, which had no reload of its own, as it
+            // was. A page with nothing to read again leaves the key alone.
+            if ui.on_grid() {
+                ui.start_scan();
+            } else if let Some(page) = ui.nav.visible_page() {
+                let _ = page.activate_action("page.reload", None);
+            }
+        });
     }
     window.add_action(&act_refresh);
 
@@ -517,6 +553,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     {
         let ui = Rc::clone(&ui);
         act_contrib.connect_activate(move |_, _| {
+            // From the grid only, like the button it stands for: pressed on a
+            // page, it stacked another page on top built from a grid the user
+            // could not see.
+            if !ui.on_grid() {
+                return;
+            }
             let (repos, scope) = ui.contribution_scope();
             ui.open_contributions(repos, scope);
         });
@@ -533,7 +575,11 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     let act_search_commits = gio::SimpleAction::new("search-commits", None);
     {
         let ui = Rc::clone(&ui);
-        act_search_commits.connect_activate(move |_, _| ui.open_commit_search());
+        act_search_commits.connect_activate(move |_, _| {
+            if ui.on_grid() {
+                ui.open_commit_search();
+            }
+        });
     }
     window.add_action(&act_search_commits);
 
@@ -569,6 +615,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     {
         let ui = Rc::clone(&ui);
         act_clear.connect_activate(move |_, _| {
+            if !ui.on_grid() {
+                return;
+            }
             ui.selected.borrow_mut().clear();
             ui.rebuild();
         });
@@ -589,13 +638,79 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             // The filter belongs to the grid. With another page in front it is
             // out of sight, and focusing it would send the keyboard somewhere
             // the user cannot see what they are typing.
-            if ui.nav.navigation_stack().n_items() > 1 {
+            if !ui.on_grid() {
                 return;
             }
             ui.search.grab_focus();
         });
     }
     window.add_action(&act_search);
+
+    {
+        // The grid's own actions are switched off while another page is in
+        // front, and every action but Escape while a dialog is up. Their
+        // handlers check as well, but a switched-off action does not take its
+        // key, and that is what gives Ctrl+A back to the diff and to a field
+        // in Settings: an accelerator runs ahead of the focused widget, so
+        // select-all in a diff ticked the whole fleet behind the page and
+        // selected nothing.
+        let grid_only = [
+            act_search.clone(),
+            act_select_all.clone(),
+            act_clear.clone(),
+            act_focus_grid.clone(),
+            act_contrib.clone(),
+            act_search_commits.clone(),
+        ];
+        let anywhere = [
+            act_refresh.clone(),
+            act_fetch.clone(),
+            act_settings.clone(),
+            act_keys.clone(),
+        ];
+        let sync: Rc<dyn Fn()> = {
+            let ui = Rc::clone(&ui);
+            Rc::new(move || {
+                let dialog = ui.window.visible_dialog().is_some();
+                let on_grid = ui.on_grid();
+                for action in &grid_only {
+                    action.set_enabled(on_grid && !dialog);
+                }
+                for action in &anywhere {
+                    action.set_enabled(!dialog);
+                }
+            })
+        };
+        {
+            let sync = Rc::clone(&sync);
+            window.connect_visible_dialog_notify(move |_| sync());
+        }
+        let ui = Rc::clone(&ui);
+        nav.connect_visible_page_notify(move |_| {
+            sync();
+            let on_grid = ui.on_grid();
+            if on_grid {
+                ui.read_again(true);
+                // After the view has put the focus back where it remembers it.
+                // That is the card the page was opened from, unless the grid
+                // was built again while it was out of sight: the card it
+                // remembers is then gone, and the keyboard came back on the
+                // first button of the header.
+                let ui = Rc::clone(&ui);
+                glib::idle_add_local_once(move || ui.back_on_the_grid());
+            }
+        });
+    }
+    {
+        // Coming back to the window: whatever was handed to a terminal has
+        // had its chance to change.
+        let ui = Rc::clone(&ui);
+        window.connect_is_active_notify(move |window| {
+            if window.is_active() {
+                ui.read_again(true);
+            }
+        });
+    }
 
     app.set_accels_for_action("win.refresh", &["<Ctrl>r", "F5"]);
     // Not a bare `slash` as well. An accelerator runs ahead of whatever has
@@ -641,6 +756,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         ));
         trouble.set_revealed(true);
     }
+
+    #[cfg(debug_assertions)]
+    ui::debug::install(&window);
 
     ui.apply_theme();
     ui.watch_theme();
@@ -688,10 +806,9 @@ impl Ui {
     fn start_scan(self: &Rc<Self>) {
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
+        self.scanning.set(true);
         self.expected.set(0);
         self.scanned.set(0);
-        // Up before anything can rebuild: `rebuild` tells an empty grid that
-        // is still filling from "No repositories found" by this spinner.
         self.spinner.set_visible(true);
         self.spinner.start();
         self.status.set_label("Scanning…");
@@ -767,9 +884,11 @@ impl Ui {
                                 eprintln!("omarepos: could not write the tag file: {err}");
                             }
                         }
+                        ui.scanning.set(false);
                         ui.spinner.stop();
                         ui.spinner.set_visible(false);
                         ui.rebuild();
+                        ui.read_again(false);
                         // Arrow keys should work the moment the grid has
                         // something in it, without hunting for it with Tab.
                         // On a short scan this runs before the window is
@@ -935,8 +1054,7 @@ impl Ui {
         self.update_selection_label();
         self.sync_tag_controls();
 
-        let scanning = self.spinner.is_visible();
-        let page = if repos.is_empty() && !scanning { "empty" } else { "grid" };
+        let page = if repos.is_empty() && !self.scanning.get() { "empty" } else { "grid" };
         self.stack.set_visible_child_name(page);
         self.update_status();
 
@@ -975,7 +1093,7 @@ impl Ui {
         if self.refreshing.get() {
             let (done, of) = self.refresh_progress.get();
             parts = vec![format!("fetching {done}/{of}")];
-        } else if self.spinner.is_visible() {
+        } else if self.scanning.get() {
             let expected = self.expected.get();
             if expected > 0 {
                 parts = vec![format!("scanning {}/{expected}", self.scanned.get())];
@@ -1215,7 +1333,7 @@ impl Ui {
     }
 
     fn run_refresh(self: &Rc<Self>, manual: bool) {
-        if self.refreshing.get() || self.spinner.is_visible() {
+        if self.refreshing.get() || self.scanning.get() {
             if manual {
                 self.toasts
                     .add_toast(ui::toast("Already busy — try again in a moment"));
@@ -1245,6 +1363,14 @@ impl Ui {
         }
 
         let total = repos.len();
+        // The spinner and the count are on the grid's page. Asked for from
+        // any other, the pass would start without a sign of having started.
+        if manual && !self.on_grid() {
+            self.toasts.add_toast(ui::toast(&format!(
+                "Fetching {total} {}…",
+                noun(total, "repository", "repositories")
+            )));
+        }
         self.refreshing.set(true);
         self.refresh_progress.set((0, total));
         self.spinner.set_visible(true);
@@ -1284,6 +1410,13 @@ impl Ui {
                         summary.add(&report.outcome);
                         if ui.note_outcome(&report) {
                             new_trouble += 1;
+                        }
+                        // A graph page open on this repository draws what the
+                        // pass has just moved: the remote's branches, how far
+                        // behind HEAD is, what the push button would send.
+                        if report.fetched && !matches!(report.outcome, refresh::Outcome::UpToDate)
+                        {
+                            ui.reload_graph_pages(&report.path);
                         }
                         match &report.outcome {
                             refresh::Outcome::Failed(err) => eprintln!(
@@ -1579,23 +1712,51 @@ impl Ui {
         self.flow.remove_css_class("om-keyboard");
     }
 
-    /// Escape backs out of whatever is in the way, nearest first: the text you
-    /// are typing, then the page you are on, then the selection, then a filter
-    /// left in the box.
+    /// Escape backs out of whatever is in the way, nearest first: a dialog or
+    /// a menu, the filter you are typing in (or the commit message, which it steps out of and
+    /// leaves alone), then the page you are on, then the selection, then a
+    /// filter left in the box.
     ///
     /// Binding Escape on the window shadows the navigation view's own, so
     /// going back has to be handled here or it stops working at all.
     fn on_escape(self: &Rc<Self>) {
+        // A dialog first, and a popover. Escape is bound on the window, which
+        // gets it before they do: with the keyboard list or Settings up, it
+        // left the page behind the dialog, or cleared the selection, and the
+        // dialog stayed where it was.
+        if let Some(dialog) = self.window.visible_dialog() {
+            dialog.close();
+            return;
+        }
         if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
+            if let Some(popover) = focused
+                .ancestor(gtk::Popover::static_type())
+                .and_downcast::<gtk::Popover>()
+            {
+                popover.popdown();
+                return;
+            }
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
                 if !editable.text().is_empty() {
-                    editable.set_text("");
+                    // A filter is cleared. A commit message is not a filter:
+                    // it is a sentence someone has just written, and the hand
+                    // that learnt Escape in vim presses it on finishing one.
+                    // That erased the message, and the next press left the
+                    // page. Where the page can take the keyboard out of the
+                    // field instead, it does, and the text stays.
+                    let stepped_out = self
+                        .nav
+                        .visible_page()
+                        .is_some_and(|page| page.activate_action("page.leave-field", None).is_ok());
+                    if !stepped_out {
+                        editable.set_text("");
+                    }
                     return;
                 }
             }
         }
 
-        if self.nav.navigation_stack().n_items() > 1 {
+        if !self.on_grid() {
             self.nav.pop();
             return;
         }
@@ -1643,13 +1804,38 @@ impl Ui {
         None
     }
 
+    /// Back from a page: the keyboard belongs on the card that was opened,
+    /// if it is not on a card already.
+    fn back_on_the_grid(&self) {
+        if !self.on_grid() {
+            return;
+        }
+        let focus = gtk::prelude::GtkWindowExt::focus(&self.window);
+        let in_grid = focus.as_ref().is_some_and(|focus| focus.is_ancestor(&self.flow));
+        let typing = focus.is_some_and(|focus| focus.is::<gtk::Editable>());
+        if in_grid || typing {
+            return;
+        }
+        let index = self.opened.borrow().as_ref().and_then(|opened| {
+            self.shown.borrow().iter().position(|repo| &repo.path == opened)
+        });
+        match index.and_then(|index| self.flow.child_at_index(index as i32)) {
+            // Through the box, as in `rebuild`, so its cursor comes too.
+            Some(child) => {
+                gtk::prelude::GtkWindowExt::set_focus(&self.window, gtk::Widget::NONE);
+                child.child_focus(gtk::DirectionType::Down);
+            }
+            None => self.focus_grid(true),
+        }
+    }
+
     /// Put the keyboard in the grid. `force` takes focus even from a text
     /// field, which is what Ctrl+L is for; without it the grid is only claimed
     /// when nothing else holds the focus, so a scan finishing mid-sentence
     /// does not swallow what is being typed.
     fn focus_grid(&self, force: bool) {
         let current = gtk::prelude::GtkWindowExt::focus(&self.window);
-        if self.nav.navigation_stack().n_items() > 1 {
+        if !self.on_grid() {
             return;
         }
         if !force && current.is_some() {
@@ -1670,6 +1856,9 @@ impl Ui {
                 editable.select_region(0, -1);
                 return;
             }
+        }
+        if !self.on_grid() {
+            return;
         }
 
         let shown: Vec<PathBuf> = self
@@ -1797,25 +1986,12 @@ impl Ui {
             return;
         }
         self.accept(&info.path);
-        let nav = self.nav.clone();
-        let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.display().to_string());
-            nav.push(&ui::stats::page(vec![path], name));
-        });
-        let (open, remember) = self.detail_prefs();
+        *self.opened.borrow_mut() = Some(info.path.clone());
         self.nav.push(&ui::graph::page(
             &info.path,
             &info.name,
             None,
-            open,
-            remember,
-            self.terminal_opener(&info.path),
-            self.editor_opener(&info.path),
-            on_contributions,
-            self.pull_recorder(),
+            self.graph_host(&info.path),
         ));
     }
 
@@ -1827,44 +2003,76 @@ impl Ui {
                 .add_toast(ui::toast("No repositories to search"));
             return;
         }
-        let nav = self.nav.clone();
-        let (open, remember) = self.detail_prefs();
-        let ui_for_terminal = Rc::clone(self);
+        let ui = Rc::clone(self);
         let on_open: Rc<dyn Fn(PathBuf, String, Option<String>)> =
             Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
-                ui_for_terminal.accept(&path);
-                let open_terminal_there = ui_for_terminal.terminal_opener(&path);
-                let open_editor_there = ui_for_terminal.editor_opener(&path);
-            let nav_inner = nav.clone();
-            let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                nav_inner.push(&ui::stats::page(vec![path], name));
-            });
-                nav.push(&ui::graph::page(
-                    &path,
-                    &name,
-                    commit,
-                    open,
-                    Rc::clone(&remember),
-                    Rc::clone(&open_terminal_there),
-                    Rc::clone(&open_editor_there),
-                    on_contributions,
-                    ui_for_terminal.pull_recorder(),
-                ));
+                ui.accept(&path);
+                ui.nav
+                    .push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
             });
         self.nav.push(&ui::search::page(repos, scope, on_open));
     }
 
-    /// Fetch and fast-forward one repository, reporting what happened — the
-    /// same pass the timer runs, narrowed to the repository in hand, so a
-    /// dirty tree or a diverged branch is refused for the same reasons and
-    /// says so.
-    fn pull_one(self: &Rc<Self>, path: PathBuf, fast_forward: bool) {
-        if self.refreshing.get() || self.spinner.is_visible() {
-            self.toasts.add_toast(ui::toast("Already busy"));
+    /// What a graph page of the repository at `path` reaches the window with.
+    fn graph_host(self: &Rc<Self>, path: &Path) -> ui::graph::Host {
+        let (detail_open, on_detail_toggled) = self.detail_prefs();
+        let nav = self.nav.clone();
+        let on_contributions: Rc<dyn Fn(PathBuf)> = Rc::new(move |path: PathBuf| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            nav.push(&ui::stats::page(vec![path], name));
+        });
+        let on_pull: Rc<dyn Fn(bool, Rc<dyn Fn(bool)>)> = {
+            let ui = Rc::clone(self);
+            let path = path.to_path_buf();
+            Rc::new(move |fast_forward, done| ui.pull_one(path.clone(), fast_forward, Some(done)))
+        };
+        let on_written: Rc<dyn Fn()> = {
+            let ui = Rc::clone(self);
+            let path = path.to_path_buf();
+            Rc::new(move || {
+                ui.stale.borrow_mut().insert(path.clone());
+            })
+        };
+        let on_pushed: Rc<dyn Fn()> = {
+            let ui = Rc::clone(self);
+            let path = path.to_path_buf();
+            Rc::new(move || {
+                ui.stale.borrow_mut().insert(path.clone());
+                ui.reload_graph_pages(&path);
+            })
+        };
+        ui::graph::Host {
+            detail_open,
+            on_detail_toggled,
+            on_terminal: self.terminal_opener(path),
+            on_editor: self.editor_opener(path),
+            on_contributions,
+            on_pull,
+            on_written,
+            on_pushed,
+            toasts: self.toasts.clone(),
+        }
+    }
+
+    /// Fetch one repository, and fast-forward it too when asked, saying what
+    /// happened: the pass the timer runs, narrowed to the repository in hand.
+    /// The card's `p` and `f` come here, and so do a graph page's, which hands
+    /// in `done` to hear whether the remote was reached.
+    fn pull_one(
+        self: &Rc<Self>,
+        path: PathBuf,
+        fast_forward: bool,
+        done: Option<Rc<dyn Fn(bool)>>,
+    ) {
+        if self.refreshing.get() || self.scanning.get() {
+            self.toasts
+                .add_toast(ui::toast("Already busy: a scan or a fetch is under way"));
+            if let Some(done) = done {
+                done(false);
+            }
             return;
         }
         // Asking for a repository by name is looking at it.
@@ -1882,7 +2090,7 @@ impl Ui {
         self.update_status();
 
         let rx = refresh::spawn(
-            vec![path],
+            vec![path.clone()],
             refresh::Options {
                 fast_forward,
                 max_parallel: 1,
@@ -1894,26 +2102,13 @@ impl Ui {
         let ui = Rc::clone(self);
         glib::spawn_future_local(async move {
             let mut said = format!("{name}: nothing to do");
+            let mut reached = false;
             while let Ok(event) = rx.recv().await {
                 match event {
                     refresh::Event::Repo(report) => {
                         ui.note_outcome(&report);
-                        said = match &report.outcome {
-                            refresh::Outcome::FastForwarded(n) => {
-                                format!("{name}: {n} commits pulled")
-                            }
-                            refresh::Outcome::UpToDate => format!("{name} is up to date"),
-                            refresh::Outcome::Behind(n) => {
-                                format!("{name}: fetched, {n} behind")
-                            }
-                            refresh::Outcome::Skipped(skip) => {
-                                format!("{name} left alone: {}", skip.reason())
-                            }
-                            refresh::Outcome::Refused(why) => {
-                                format!("{name}: fetched, not updated. {why}")
-                            }
-                            refresh::Outcome::Failed(err) => format!("{name}: {err}"),
-                        };
+                        reached |= report.fetched;
+                        said = format!("{name}: {}", ui::outcome_text(&report.outcome));
                     }
                     refresh::Event::Done => break,
                 }
@@ -1923,31 +2118,130 @@ impl Ui {
             ui.spinner.set_visible(false);
             crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
             ui::say(&ui.toasts, &said);
-            ui.start_scan();
+            // This one card, drawn again whatever was read: a fetch that
+            // failed changes what the card says without changing the
+            // repository. The whole fleet used to be scanned to learn it.
+            ui.reread(vec![path], true);
+            if let Some(done) = done {
+                done(reached);
+            }
         });
     }
 
-    /// What a graph page calls when a fetch or pull it started has finished.
-    fn pull_recorder(self: &Rc<Self>) -> Rc<dyn Fn(&refresh::Report)> {
+    /// Read these repositories again and put what was read on their cards.
+    /// The grid is only built again when a card would say something else,
+    /// unless `redraw` asks for it regardless.
+    fn reread(self: &Rc<Self>, paths: Vec<PathBuf>, redraw: bool) {
+        if paths.is_empty() {
+            return;
+        }
+        // A scan under way read these before whatever has just happened to
+        // them, and will put that on the grid when it ends. They are read
+        // again after it.
+        if self.scanning.get() {
+            self.stale.borrow_mut().extend(paths);
+            return;
+        }
+        let generation = self.generation.get();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let read: Vec<RepoInfo> = paths.iter().map(|path| crate::git::inspect(path)).collect();
+            let _ = tx.send_blocking(read);
+        });
         let ui = Rc::clone(self);
-        Rc::new(move |report| {
-            ui.note_outcome(report);
-            crate::config::save_fetch_errors(&ui.fetch_errors.borrow());
-        })
+        glib::spawn_future_local(async move {
+            let Ok(read) = rx.recv().await else { return };
+            // A scan started in the meantime has the newer answer, or will.
+            if ui.generation.get() != generation {
+                return;
+            }
+            let mut changed = redraw;
+            {
+                let mut repos = ui.repos.borrow_mut();
+                for info in read {
+                    // Only what is on the grid: a repository that has left it
+                    // is not brought back by having been looked at.
+                    let Some(slot) = repos.iter_mut().find(|repo| repo.path == info.path) else {
+                        continue;
+                    };
+                    // As text, which is everything a card is drawn from.
+                    if format!("{slot:?}") != format!("{info:?}") {
+                        *slot = info;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                ui.rebuild();
+            }
+        });
+    }
+
+    /// Catch the grid up with what has happened to repositories behind its
+    /// back: those the app wrote to from another page, and those handed to a
+    /// terminal or an editor. Nothing did this before. Commit and push in the
+    /// app, press Escape, and the card still said dirty and "2 ahead" until
+    /// the next rescan; with the timer off, which is how it comes, that was
+    /// until Ctrl+R.
+    ///
+    /// `handed_too` is for a return to the window or to the grid, when the
+    /// terminals have had their chance. The end of a scan only owes the
+    /// repositories that were written to while it ran.
+    fn read_again(self: &Rc<Self>, handed_too: bool) {
+        // Only with the grid in front. A page shows its own repository and
+        // reads it again itself, and the cards keep until they are looked at.
+        if !self.on_grid() {
+            return;
+        }
+        let mut paths = std::mem::take(&mut *self.stale.borrow_mut());
+        if handed_too {
+            paths.extend(self.handed.borrow().iter().cloned());
+        }
+        self.reread(paths.into_iter().collect(), false);
+    }
+
+    /// Whether the grid is the page in front. Asked of the page, not of the
+    /// depth of the stack: on the way back from a page the view names the
+    /// grid as visible before it has finished letting go of the other.
+    fn on_grid(&self) -> bool {
+        self.nav.visible_page().as_ref() == Some(&self.grid_page)
+    }
+
+    /// Have every open graph page of this repository read it again. Only a
+    /// graph page has the action, and each checks the path for itself.
+    fn reload_graph_pages(&self, path: &Path) {
+        let which = path.display().to_string().to_variant();
+        let stack = self.nav.navigation_stack();
+        for index in 0..stack.n_items() {
+            if let Some(page) = stack.item(index).and_downcast::<adw::NavigationPage>() {
+                let _ = page.activate_action("page.reload-for", Some(&which));
+            }
+        }
     }
 
     /// Opening a terminal needs the configured terminal and runner, which the
     /// graph page has no business knowing about.
+    ///
+    /// Every way a repository is handed to a terminal or an editor comes
+    /// through these two, which is what lets the grid know to look at it again
+    /// afterwards: `l` opens lazygit, and a commit made there left the card
+    /// saying what it said before.
     fn terminal_opener(self: &Rc<Self>, path: &Path) -> Rc<dyn Fn()> {
         let ui = Rc::clone(self);
         let path = path.to_path_buf();
-        Rc::new(move || ui::open_terminal(&ui.cfg.borrow(), &path))
+        Rc::new(move || {
+            ui.handed.borrow_mut().insert(path.clone());
+            ui::open_terminal(&ui.cfg.borrow(), &path)
+        })
     }
 
     fn editor_opener(self: &Rc<Self>, path: &Path) -> Rc<dyn Fn()> {
         let ui = Rc::clone(self);
         let path = path.to_path_buf();
-        Rc::new(move || ui::open_editor(&ui.cfg.borrow(), &path))
+        Rc::new(move || {
+            ui.handed.borrow_mut().insert(path.clone());
+            ui::open_editor(&ui.cfg.borrow(), &path)
+        })
     }
 
     fn open_contributions(&self, repos: Vec<PathBuf>, scope: String) {
@@ -1966,8 +2260,8 @@ impl Ui {
                 self.open_contributions(vec![info.path.clone()], info.name.clone())
             }
             Action::EditTags => self.edit_tags(vec![info.path.clone()]),
-            Action::OpenTerminal => ui::open_terminal(&self.cfg.borrow(), &info.path),
-            Action::OpenEditor => ui::open_editor(&self.cfg.borrow(), &info.path),
+            Action::OpenTerminal => self.terminal_opener(&info.path)(),
+            Action::OpenEditor => self.editor_opener(&info.path)(),
             Action::OpenFolder => ui::open_folder(&info.path),
             Action::CopyPath => {
                 let path = info.path.display().to_string();

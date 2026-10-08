@@ -1,6 +1,7 @@
 //! The per-repository commit graph page.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -8,8 +9,9 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
+use crate::commit::Target;
 use crate::config::tildify;
-use crate::graph::{self, Graph, RefKind, Row};
+use crate::graph::{self, Glance, Graph, RefKind, Row};
 use crate::ui::{absolute_time, lane_color, relative_time};
 
 /// Rows are a fixed height so the graph cell can draw a row at a time without
@@ -24,25 +26,81 @@ const COMMIT_LIMIT: usize = 500;
 const WINDOW_BEFORE: usize = 120;
 /// Rows kept below it.
 const WINDOW_AFTER: usize = 180;
+/// Ref labels drawn on a row before the rest are folded into one "+N".
+const MAX_PILLS: usize = 3;
+/// The longest a ref label is drawn. The whole name is in its tooltip.
+const PILL_CHARS: i32 = 24;
 
 fn lane_x(lane: usize) -> f64 {
     LANE_W * lane as f64 + LANE_W / 2.0 + 3.0
 }
 
-/// Build the page and start loading. `on_contributions` opens the stats page
-/// scoped to this repository. `target` is a commit to open on — it is sought
-/// out however far back it is, highlighted, and scrolled to.
-pub fn page(
-    path: &Path,
-    name: &str,
-    target: Option<String>,
-    detail_open: bool,
-    on_detail_toggled: Rc<dyn Fn(bool)>,
-    on_terminal: Rc<dyn Fn()>,
-    on_editor: Rc<dyn Fn()>,
-    on_contributions: Rc<dyn Fn(PathBuf)>,
-    on_pulled: Rc<dyn Fn(&crate::refresh::Report)>,
-) -> adw::NavigationPage {
+/// What a graph page asks of the window it is shown in. The page knows one
+/// repository. What concerns the fleet, the settings or the window itself is
+/// the window's, and reaches the page through here.
+pub struct Host {
+    /// Whether the detail pane starts open, and where a change is remembered.
+    pub detail_open: bool,
+    pub on_detail_toggled: Rc<dyn Fn(bool)>,
+    pub on_terminal: Rc<dyn Fn()>,
+    pub on_editor: Rc<dyn Fn()>,
+    /// Opens the contributions page scoped to this repository.
+    pub on_contributions: Rc<dyn Fn(PathBuf)>,
+    /// Fetch this repository, and fast-forward it too when the flag is set.
+    /// The window runs it and says what happened: it has the settings, knows
+    /// whether something else is already running, and keeps the record of
+    /// what a fetch could not do. The page had a copy of its own, with its own
+    /// timeout, no guard against a second one, and no word to the card. It
+    /// calls back with whether the remote was reached.
+    pub on_pull: Rc<dyn Fn(bool, Rc<dyn Fn(bool)>)>,
+    /// The page staged or committed: the card behind it is out of date.
+    pub on_written: Rc<dyn Fn()>,
+    /// A push from here finished, one way or the other.
+    pub on_pushed: Rc<dyn Fn()>,
+    /// The window's toasts. They are over every page, so what a push came to
+    /// is still on screen when this page has been left.
+    pub toasts: adw::ToastOverlay,
+}
+
+thread_local! {
+    /// Repositories with a push from this window under way. Kept apart from
+    /// any one page's widgets: a page closed and opened again during a push
+    /// must not offer the same push a second time.
+    static PUSHING: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+}
+
+fn pushing(repo: &Path) -> bool {
+    PUSHING.with(|set| set.borrow().contains(repo))
+}
+
+/// Whether the keyboard is on `widget` or on something inside it.
+fn holds_focus(widget: &gtk::Widget) -> bool {
+    widget
+        .root()
+        .and_then(|root| root.focus())
+        .is_some_and(|focus| &focus == widget || focus.is_ancestor(widget))
+}
+
+/// The window's handler that looks at the repository again on focus, and the
+/// window it is connected to. One slot, so a reload replaces the handler
+/// rather than stacking another on the window.
+type Watcher = Rc<RefCell<Option<(glib::WeakRef<gtk::Window>, glib::SignalHandlerId)>>>;
+
+/// Build the page and start loading. `target` is a commit to open on — it is
+/// sought out however far back it is, highlighted, and scrolled to.
+pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw::NavigationPage {
+    let Host {
+        detail_open,
+        on_detail_toggled,
+        on_terminal,
+        on_editor,
+        on_contributions,
+        on_pull,
+        on_written,
+        on_pushed,
+        toasts,
+    } = host;
+
     let title = adw::WindowTitle::new(name, &tildify(path));
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
@@ -89,11 +147,16 @@ pub fn page(
     loading_label.add_css_class("om-meta");
     loading.append(&loading_label);
 
-    // A list box so rows take focus, arrow keys walk them, and Enter means
-    // the same thing a click does. Browse selection makes the selection follow
-    // the cursor, which is what drives the detail pane below.
+    // A list box so rows take focus and arrow keys walk them. Browse selection
+    // makes the selection follow the cursor, which is what drives the detail
+    // pane below.
     let rows_box = gtk::ListBox::new();
     rows_box.set_selection_mode(gtk::SelectionMode::Browse);
+    // A click selects, and selecting is what fills the pane. Left at the
+    // default a click activated the row as well, so reading history with the
+    // mouse put a sha on the clipboard and a toast on screen for every commit
+    // looked at. Enter copies, and so does a double click.
+    rows_box.set_activate_on_single_click(false);
     rows_box.add_css_class("om-results");
     rows_box.set_margin_top(8);
     rows_box.set_margin_bottom(12);
@@ -113,23 +176,38 @@ pub fn page(
         .description("This repository has no history yet.")
         .build();
 
-    // The detail goes *below* the graph rather than beside it: the window is
-    // often half a tiled screen, where a vertical split leaves neither half
-    // usable, and height is the one thing such a window has to spare.
+    let status = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    status.add_css_class("om-statusbar");
+
     // A write in the pane can change the history this page is drawing, so the
     // page reloads rather than quietly going stale under the user.
     let reload_page: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    // The commit a search result opened the page on. A commit made here spends
+    // it: what a commit changes is at the tip, and a page still windowed
+    // around the old hit cut the new commit out of its own list. A push or a
+    // fetch keeps it, so the reader is not thrown off the commit they came for.
+    let wanted: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(target));
     let on_changed: Rc<dyn Fn(bool)> = {
         let reload_page = Rc::clone(&reload_page);
+        let wanted = Rc::clone(&wanted);
         Rc::new(move |committed: bool| {
+            // Staging changes what the card counts, too.
+            on_written();
             if !committed {
                 return;
             }
+            wanted.borrow_mut().take();
             if let Some(reload) = reload_page.borrow().clone() {
                 reload();
             }
         })
     };
+    // The detail goes *below* the graph rather than beside it: the window is
+    // often half a tiled screen, where a vertical split leaves neither half
+    // usable, and height is the one thing such a window has to spare.
     let (detail, load_detail, focus_files) = crate::ui::commit::pane(on_changed);
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -147,7 +225,7 @@ pub fn page(
         // time there is a height to take a share of, then leave it to the user.
         // Rc, not a bare Cell: cloning a Cell copies the value, so the flag
         // would never actually stick and a later map would undo the user's drag.
-        let placed = Rc::new(std::cell::Cell::new(false));
+        let placed = Rc::new(Cell::new(false));
         split.connect_map(move |split| {
             if placed.get() {
                 return;
@@ -165,28 +243,85 @@ pub fn page(
     }
 
     {
-        // Without this, Tab steps through the commits one row at a time and the
-        // pane below can never be reached from the keyboard at all.
         let focus_files = Rc::clone(&focus_files);
+        let detail = detail.clone();
+        let status = status.clone();
+        let reload = Rc::clone(&reload_page);
+        let toasts = toasts.clone();
+        let presses = crate::ui::OncePerPress::default();
         let keys = gtk::EventControllerKey::new();
-        let on_terminal = Rc::clone(&on_terminal);
-        let on_editor = Rc::clone(&on_editor);
         keys.connect_key_pressed(move |_, key, _, state| {
-            // Same letter as the grid: you are inside a repository here, so it
-            // means the same thing.
-            if key == gtk::gdk::Key::l && crate::ui::unmodified(state) {
-                on_terminal();
+            // Ahead of the modifier test. A question mark is a shifted key on
+            // every common layout, and behind that test it was never reached.
+            if key == gtk::gdk::Key::question {
+                if let Some(window) = toasts.root().and_downcast::<gtk::Window>() {
+                    crate::ui::shortcuts::dialog().present(Some(&window));
+                }
                 return glib::Propagation::Stop;
             }
-            if key == gtk::gdk::Key::e && crate::ui::unmodified(state) {
-                on_editor();
+            if key == gtk::gdk::Key::Tab && !state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                // Without this, Tab steps through the commits one row at a
+                // time and the pane below can never be reached from the
+                // keyboard at all. Only when the pane is there to be reached,
+                // though: sent into a hidden one, the keyboard went to a row
+                // nobody could see, and Tab could not leave the list either.
+                if !detail.is_mapped() {
+                    return glib::Propagation::Proceed;
+                }
+                focus_files();
                 return glib::Propagation::Stop;
             }
-            if key != gtk::gdk::Key::Tab || state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+            if !crate::ui::unmodified(state) {
                 return glib::Propagation::Proceed;
             }
-            focus_files();
-            glib::Propagation::Stop
+            match key {
+                // The same letters as the grid: you are inside a repository
+                // here, so they mean the same thing.
+                gtk::gdk::Key::l => {
+                    if presses.first(key) {
+                        on_terminal();
+                    }
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::e => {
+                    if presses.first(key) {
+                        on_editor();
+                    }
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::p | gtk::gdk::Key::f => {
+                    if presses.first(key) {
+                        let fast_forward = key == gtk::gdk::Key::p;
+                        // The spinner that shows a fetch is on the grid's
+                        // header, which this page is in front of.
+                        let before = status.label();
+                        status.set_label(if fast_forward {
+                            "Fetching, then updating…"
+                        } else {
+                            "Fetching…"
+                        });
+                        let status = status.clone();
+                        let reload = Rc::clone(&reload);
+                        on_pull(
+                            fast_forward,
+                            Rc::new(move |reached| {
+                                // A fetch moves the remote's branches even when
+                                // it leaves HEAD alone, and the labels, the
+                                // ahead and behind figures and the push button
+                                // are all read from those. Only a fast-forward
+                                // used to redraw, so "fetched, 3 behind"
+                                // appeared over a graph that showed none of it.
+                                match reload.borrow().clone() {
+                                    Some(reload) if reached => reload(),
+                                    _ => status.set_label(&before),
+                                }
+                            }),
+                        );
+                    }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
         });
         rows_box.add_controller(keys);
     }
@@ -197,61 +332,13 @@ pub fn page(
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    status.add_css_class("om-statusbar");
-
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     body.append(&stack);
     body.append(&status);
 
-    let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&body));
-
-    {
-        // Separate controller only because the toast overlay does not exist
-        // yet where the other one is attached.
-        let repo = path.to_path_buf();
-        // Weakly: the list this controller is on sits inside the overlay, and
-        // a closure on the list that owned the overlay would keep the whole
-        // page alive after it was closed.
-        let toasts = toasts.downgrade();
-        let reload = Rc::clone(&reload_page);
-        let on_pulled = Rc::clone(&on_pulled);
-        let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed(move |_, key, _, state| {
-            if !crate::ui::unmodified(state) {
-                return glib::Propagation::Proceed;
-            }
-            let Some(toasts) = toasts.upgrade() else {
-                return glib::Propagation::Proceed;
-            };
-            match key {
-                gtk::gdk::Key::p => {
-                    pull(&repo, &toasts, Rc::clone(&reload), Rc::clone(&on_pulled), true);
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::f => {
-                    pull(&repo, &toasts, Rc::clone(&reload), Rc::clone(&on_pulled), false);
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::question => {
-                    if let Some(window) = toasts.root().and_downcast::<gtk::Window>() {
-                        crate::ui::shortcuts::dialog().present(Some(&window));
-                    }
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
-            }
-        });
-        rows_box.add_controller(keys);
-    }
-
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
-    view.set_content(Some(&toasts));
+    view.set_content(Some(&body));
 
     let page = adw::NavigationPage::builder()
         .title(name)
@@ -260,9 +347,21 @@ pub fn page(
 
     {
         let detail = detail.clone();
+        let rows_box = rows_box.clone();
         detail_toggle.connect_toggled(move |button| {
-            detail.set_visible(button.is_active());
-            on_detail_toggled(button.is_active());
+            let open = button.is_active();
+            // Out of the pane before it goes. Hidden with the keyboard still
+            // inside it, GTK gave the focus to the nearest thing left on
+            // screen, the handle of the split: the arrow keys then moved a
+            // divider nobody could see instead of walking the commits.
+            if !open && holds_focus(&detail) {
+                match rows_box.selected_row() {
+                    Some(row) => row.grab_focus(),
+                    None => rows_box.grab_focus(),
+                };
+            }
+            detail.set_visible(open);
+            on_detail_toggled(open);
         });
     }
     {
@@ -280,17 +379,58 @@ pub fn page(
         page.add_controller(keys);
     }
 
-    // Loading happens off the main thread; a big repo takes a moment.
     let load_path = path.to_path_buf();
-    let load_path_for_detail = path.to_path_buf();
-    let page_for_focus = page.clone();
-    let wanted = target.clone();
-    // One handler slot for the focus watcher: reloading must replace it rather
-    // than stack another one on the window.
-    let focus_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
-    // Likewise for the push button: populate runs again after every push, and a
-    // second handler would send the same commits twice on the next click.
+
+    // Which commit each row stands for. Made once, and the two handlers that
+    // read it connected once, here. Every populate used to connect its own
+    // pair with its own list, and a list box keeps its handlers when its rows
+    // are taken out: after a commit or a push, Enter copied the sha the row
+    // used to hold and then the one it holds now, and each move of the cursor
+    // loaded two commits into the pane.
+    let ids: Rc<RefCell<Vec<Target>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let ids = Rc::clone(&ids);
+        let repo = load_path.clone();
+        let load_detail = Rc::clone(&load_detail);
+        rows_box.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            let target = ids.borrow().get(index as usize).cloned();
+            if let Some(target) = target {
+                load_detail(repo.clone(), target);
+            }
+        });
+    }
+    {
+        let ids = Rc::clone(&ids);
+        let toasts = toasts.clone();
+        rows_box.connect_row_activated(move |_, row| {
+            let index = row.index();
+            if index < 0 {
+                return;
+            }
+            let target = ids.borrow().get(index as usize).cloned();
+            // The working-tree row has no sha to copy.
+            let Some(Target::Commit(id)) = target else { return };
+            row.clipboard().set_text(&id);
+            toasts.add_toast(crate::ui::toast(&format!(
+                "Copied {}",
+                &id[..7.min(id.len())]
+            )));
+        });
+    }
+
+    // One slot for the focus watcher, and one for the push button's handler:
+    // populate runs again after every write, and a second handler on the
+    // button would send the same commits twice on the next click.
+    let watcher: Watcher = Rc::new(RefCell::new(None));
     let push_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
+    // Whether the page has been filled before. Arriving puts the keyboard on
+    // the list; a reload under a reader must leave it where they have it.
+    let arrived = Rc::new(Cell::new(false));
 
     // Populating is separate from loading, so a commit can ask for it again.
     let populate: Rc<dyn Fn(Result<Graph, String>)> = {
@@ -299,183 +439,254 @@ pub fn page(
         let status = status.clone();
         let push = push.clone();
         let push_content = push_content.clone();
-        let toasts_for_push = toasts.clone();
-        let reload_for_push = Rc::clone(&reload_page);
+        let toasts = toasts.clone();
+        let reload = Rc::clone(&reload_page);
         let push_handler = Rc::clone(&push_handler);
         let empty = empty.clone();
-        let toasts_for_rows = toasts.clone();
         let load_detail = Rc::clone(&load_detail);
-        let page_for_focus = page_for_focus.clone();
-        let detail_for_focus = detail.clone();
-        let load_path_for_detail = load_path_for_detail.clone();
-        let focus_handler = Rc::clone(&focus_handler);
+        let detail = detail.clone();
+        let load_path = load_path.clone();
+        let watcher = Rc::clone(&watcher);
+        let ids = Rc::clone(&ids);
+        let arrived = Rc::clone(&arrived);
+        let on_pushed = Rc::clone(&on_pushed);
         Rc::new(move |result: Result<Graph, String>| {
+            // Where the selection and the keyboard were, before the rows go.
+            let kept = rows_box.selected_row().and_then(|row| {
+                usize::try_from(row.index()).ok().and_then(|index| ids.borrow().get(index).cloned())
+            });
+            let in_pane = holds_focus(&detail);
+            let arriving = !arrived.replace(true);
+            // Emptied first: taking the rows out unselects one, and nothing
+            // should be loaded on the way down.
+            ids.borrow_mut().clear();
             rows_box.remove_all();
-            match result {
-            Ok(graph) if graph.rows.is_empty() => {
+
+            let graph = match result {
+                Ok(graph) => graph,
+                Err(err) => {
+                    stop_watching(&watcher);
+                    push.set_sensitive(false);
+                    empty.set_title("Could not read this repository");
+                    empty.set_description(Some(&glib::markup_escape_text(&err)));
+                    stack.set_visible_child_name("empty");
+                    status.set_label(&err);
+                    return;
+                }
+            };
+
+            // Empty in both senses: no history, and nothing waiting to become
+            // any. A repository with files and no commits yet is not that. It
+            // used to get this page too, which hid the one row its first
+            // commit is made from.
+            if graph.rows.is_empty() && graph.working_changes == 0 {
+                push.set_sensitive(false);
+                empty.set_title("No commits");
+                empty.set_description(Some("This repository has no history yet."));
                 stack.set_visible_child_name("empty");
                 status.set_label("no commits");
+                // Still watched, so the first file to appear brings the page
+                // to life without it having to be closed and opened.
+                let reload = Rc::clone(&reload);
+                watch(
+                    &stack,
+                    &load_path,
+                    &watcher,
+                    Rc::new(move |glance: Glance| {
+                        if glance.changes > 0 || glance.tip.is_some() {
+                            if let Some(reload) = reload.borrow().clone() {
+                                reload();
+                            }
+                        }
+                    }),
+                );
+                return;
             }
-            Ok(graph) => {
-                let width = lanes_width(graph.lanes);
-                // With a commit to open on, the walk may have gone thousands of
-                // rows deep. Render a window around it rather than all of it —
-                // the lane state of every row is self-contained, so a slice
-                // draws correctly on its own.
-                let (from, to) = match graph.target {
-                    Some(index) => (
-                        index.saturating_sub(WINDOW_BEFORE),
-                        (index + WINDOW_AFTER).min(graph.rows.len()),
-                    ),
-                    None => (0, graph.rows.len().min(COMMIT_LIMIT)),
-                };
-                let slice = &graph.rows[from..to];
 
-                // A row for everything uncommitted, above the history, when
-                // there is anything to show. Offering a permanently empty one
-                // on a clean repository would be noise in the place the eye
-                // lands first.
-                let has_working = graph.working_changes > 0;
+            let width = lanes_width(graph.lanes);
+            // With a commit to open on, the walk may have gone thousands of
+            // rows deep. Render a window around it rather than all of it —
+            // the lane state of every row is self-contained, so a slice
+            // draws correctly on its own.
+            let (from, to) = match graph.target {
+                Some(index) => (
+                    index.saturating_sub(WINDOW_BEFORE),
+                    (index + WINDOW_AFTER).min(graph.rows.len()),
+                ),
+                None => (0, graph.rows.len().min(COMMIT_LIMIT)),
+            };
+            let slice = &graph.rows[from..to];
 
-                // Wired before the rows go in, and before anything is
-                // selected. A list box in Browse mode selects the first row as
-                // it is appended, and selecting the row we came for is a no-op
-                // when that is already the first row — connecting afterwards
-                // meant the pane stayed empty until the cursor moved.
-                let ids: Rc<RefCell<Vec<crate::commit::Target>>> =
-                    Rc::new(RefCell::new(Vec::new()));
-                {
-                    let ids = Rc::clone(&ids);
-                    let repo = load_path_for_detail.clone();
-                    let load_detail = Rc::clone(&load_detail);
-                    rows_box.connect_row_selected(move |_, row| {
-                        let Some(row) = row else { return };
-                        let index = row.index();
-                        if index < 0 {
-                            return;
-                        }
-                        let target = ids.borrow().get(index as usize).cloned();
-                        if let Some(target) = target {
-                            load_detail(repo.clone(), target);
-                        }
-                    });
-                }
-                {
-                    let mut targets = ids.borrow_mut();
-                    // Always index zero, shown or not: hiding a row keeps its
-                    // place in the list, so the map from row to commit stays
-                    // put as the working tree comes and goes.
-                    targets.push(crate::commit::Target::Working);
-                    targets.extend(
-                        slice
-                            .iter()
-                            .map(|row| crate::commit::Target::Commit(row.id.to_string())),
+            // A row for everything uncommitted, above the history, when
+            // there is anything to show. Offering a permanently empty one
+            // on a clean repository would be noise in the place the eye
+            // lands first.
+            let has_working = graph.working_changes > 0;
+
+            // Filled before the rows go in: selecting a row is what loads the
+            // pane, and the handler reads this to know which commit it is.
+            {
+                let mut targets = ids.borrow_mut();
+                // Always index zero, shown or not: hiding a row keeps its
+                // place in the list, so the map from row to commit stays
+                // put as the working tree comes and goes.
+                targets.push(Target::Working);
+                targets.extend(slice.iter().map(|row| Target::Commit(row.id.to_string())));
+            }
+
+            // The dashed tail says "this is where the next commit goes", which
+            // is only true when the row beneath is the commit HEAD is at. The
+            // first row is the newest commit of any branch, the remote's
+            // included: in a repository that is behind, the tail hung the
+            // uncommitted work on a commit it is not based on.
+            let tail = slice
+                .first()
+                .filter(|row| row.refs.iter().any(|label| label.current))
+                .map(|row| row.lane);
+            let (working, working_count) = working_row(graph.working_changes, width, tail);
+            working.set_visible(has_working);
+            rows_box.append(&working);
+            for row in slice {
+                rows_box.append(&row_widget(row, width));
+            }
+
+            let offset = 1;
+            let asked_for = graph.target.map(|index| index - from + offset);
+            // Arriving: on the commit asked for, or on the working tree when
+            // there is one, or on the newest commit. After a reload: where the
+            // selection was, when that commit is still in the list. A push or
+            // a fetch should not throw the reader back to the top.
+            let stayed = match (&kept, arriving) {
+                (Some(Target::Commit(id)), false) => slice
+                    .iter()
+                    .position(|row| row.id.to_string() == *id)
+                    .map(|index| index + offset),
+                (Some(Target::Working), false) if has_working => Some(0),
+                _ => None,
+            };
+            let select_at = stayed.unwrap_or(match (asked_for, has_working) {
+                (Some(index), _) => index,
+                (None, true) => 0,
+                (None, false) => offset,
+            });
+            if let Some(row) = asked_for.and_then(|index| rows_box.row_at_index(index as i32)) {
+                row.add_css_class("om-target");
+            }
+            let landing = rows_box.row_at_index(select_at as i32);
+            if let Some(row) = &landing {
+                rows_box.select_row(Some(row));
+            }
+            // The keyboard goes where the selection is. Every key this
+            // page answers to is bound on the list, and a page pushed
+            // while it was still loading had nothing to focus but the
+            // header bar: the top row looked chosen, and `l`, `p` and Tab
+            // did nothing until Down had been pressed once. Not when the
+            // keyboard is at work in the pane below, though. A reload
+            // after a commit must not pull it out of the message box.
+            if !in_pane {
+                if let Some(row) = landing {
+                    // Once the list has been laid out, focusing the row
+                    // brings it into view; doing it immediately would
+                    // scroll against a height the list does not have yet.
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(50),
+                        move || {
+                            // Not into a page that another one is covering:
+                            // the window's refresh reloads those too.
+                            if row.is_mapped() {
+                                row.grab_focus();
+                            }
+                        },
                     );
                 }
-
-                let (working, working_count) = working_row(graph.working_changes, width);
-                working.set_visible(has_working);
-                rows_box.append(&working);
-                for row in slice {
-                    rows_box.append(&row_widget(row, width));
-                }
-
-                let offset = 1;
-                // Land on the commit asked for, or on the working tree when
-                // there is one, or on the newest commit.
-                let select_at = match (graph.target, has_working) {
-                    (Some(index), _) => index - from + offset,
-                    (None, true) => 0,
-                    (None, false) => offset,
-                };
-                let landing = rows_box.row_at_index(select_at as i32);
-                if let Some(row) = &landing {
-                    rows_box.select_row(Some(row));
-                    if graph.target.is_some() {
-                        row.add_css_class("om-target");
-                    }
-                }
-                // The keyboard goes where the selection is. Every key this
-                // page answers to is bound on the list, and a page pushed
-                // while it was still loading had nothing to focus but the
-                // header bar: the top row looked chosen, and `l`, `p` and Tab
-                // did nothing until Down had been pressed once. Not when the
-                // keyboard is at work in the pane below, though. A reload
-                // after a commit must not pull it out of the message box.
-                if detail_for_focus.focus_child().is_none() {
-                    if let Some(row) = landing {
-                        // Once the list has been laid out, focusing the row
-                        // brings it into view; doing it immediately would
-                        // scroll against a height the list does not have yet.
-                        glib::timeout_add_local_once(
-                            std::time::Duration::from_millis(50),
-                            move || {
-                                row.grab_focus();
-                            },
-                        );
-                    }
-                }
-                // Weakly, as with the key controller above.
-                let toasts_for_rows = toasts_for_rows.downgrade();
-                rows_box.connect_row_activated(move |_, row| {
-                    let index = row.index();
-                    if index < 0 {
-                        return;
-                    }
-                    let target = ids.borrow().get(index as usize).cloned();
-                    // The working-tree row has no sha to copy.
-                    let Some(crate::commit::Target::Commit(id)) = target else { return };
-                    row.clipboard().set_text(&id);
-                    if let Some(toasts) = toasts_for_rows.upgrade() {
-                        toasts.add_toast(crate::ui::toast(&format!(
-                            "Copied {}",
-                            &id[..7.min(id.len())]
-                        )));
-                    }
-                });
-                watch_working_tree(
-                    &page_for_focus,
-                    &load_path_for_detail,
-                    &rows_box,
-                    &working,
-                    &working_count,
-                    Rc::clone(&load_detail),
-                    Rc::clone(&focus_handler),
-                    (graph.head.clone(), graph.tip.clone()),
-                    Rc::clone(&reload_for_push),
-                );
-
-                arm_push(
-                    &push,
-                    &push_content,
-                    &graph,
-                    &load_path_for_detail,
-                    &toasts_for_push,
-                    Rc::clone(&reload_for_push),
-                    Rc::clone(&push_handler),
-                );
-
-                stack.set_visible_child_name("graph");
-                status.set_label(&summary(&graph, from, to));
             }
-            Err(err) => {
-                empty.set_title("Could not read this repository");
-                empty.set_description(Some(&glib::markup_escape_text(&err)));
-                stack.set_visible_child_name("empty");
-                status.set_label(&err);
+
+            {
+                // `shown` is where HEAD was when the page was read: its name
+                // and its commit. When either has changed (a branch switched,
+                // a commit made, in the terminal this page offers on `l`) the
+                // whole page is read again, not just the count. The history,
+                // the ahead and behind figures and the push button all hang
+                // off HEAD, and would otherwise go on describing where it
+                // used to be.
+                let shown = (graph.head.clone(), graph.tip.clone());
+                let reload = Rc::clone(&reload);
+                let rows = rows_box.clone();
+                let repo = load_path.clone();
+                let load_detail = Rc::clone(&load_detail);
+                watch(
+                    &stack,
+                    &load_path,
+                    &watcher,
+                    Rc::new(move |glance: Glance| {
+                        if (&glance.head, &glance.tip) != (&shown.0, &shown.1) {
+                            if let Some(reload) = reload.borrow().clone() {
+                                reload();
+                            }
+                            return;
+                        }
+                        let changes = glance.changes;
+                        working.set_visible(changes > 0);
+                        working_count.set_label(&entries(changes));
+                        let on_working = rows
+                            .selected_row()
+                            .map(|row| row.index() == 0)
+                            .unwrap_or(false);
+                        if !on_working {
+                            // A commit cannot have changed under us.
+                            return;
+                        }
+                        if changes > 0 {
+                            load_detail(repo.clone(), Target::Working);
+                            return;
+                        }
+                        // The tree went clean somewhere else while its row was
+                        // the one selected. Hiding the row does not move the
+                        // selection off it, and the pane went on offering the
+                        // old files, their stage buttons and a commit box.
+                        // Step to the newest commit, which loads it.
+                        match rows.row_at_index(1) {
+                            Some(first) => {
+                                let had_focus = holds_focus(rows.upcast_ref());
+                                rows.select_row(Some(&first));
+                                if had_focus {
+                                    first.grab_focus();
+                                }
+                            }
+                            // No commits either, any more: start over.
+                            None => {
+                                if let Some(reload) = reload.borrow().clone() {
+                                    reload();
+                                }
+                            }
+                        }
+                    }),
+                );
             }
-        }
+
+            arm_push(
+                &push,
+                &push_content,
+                &graph,
+                &load_path,
+                &toasts,
+                Rc::clone(&push_handler),
+                Rc::clone(&on_pushed),
+            );
+
+            stack.set_visible_child_name("graph");
+            status.set_label(&summary(&graph, from, to));
         })
     };
 
     let start_load: Rc<dyn Fn()> = {
         let populate = Rc::clone(&populate);
         let load_path = load_path.clone();
-        let wanted = wanted.clone();
+        let wanted = Rc::clone(&wanted);
         Rc::new(move || {
             let (tx, rx) = async_channel::bounded(1);
             let path = load_path.clone();
-            let target = wanted.clone();
+            let target = wanted.borrow().clone();
             std::thread::spawn(move || {
                 let _ = tx.send_blocking(graph::build(&path, COMMIT_LIMIT, target.as_deref()));
             });
@@ -490,16 +701,60 @@ pub fn page(
     *reload_page.borrow_mut() = Some(Rc::clone(&start_load));
     start_load();
 
+    {
+        // How the window reaches this page: `page.reload` for the refresh key
+        // while the page is in front, and `page.reload-for` with a path, which
+        // the window sends to every open page when its own refresh has moved a
+        // repository. Both go through the slot, so neither keeps the page.
+        let group = gtk::gio::SimpleActionGroup::new();
+        let reload = gtk::gio::SimpleAction::new("reload", None);
+        {
+            let slot = Rc::clone(&reload_page);
+            reload.connect_activate(move |_, _| {
+                if let Some(reload) = slot.borrow().clone() {
+                    reload();
+                }
+            });
+        }
+        group.add_action(&reload);
+        let reload_for =
+            gtk::gio::SimpleAction::new("reload-for", Some(glib::VariantTy::STRING));
+        {
+            let slot = Rc::clone(&reload_page);
+            let mine = load_path.display().to_string();
+            reload_for.connect_activate(move |_, which| {
+                if which.and_then(|which| which.str()) != Some(mine.as_str()) {
+                    return;
+                }
+                if let Some(reload) = slot.borrow().clone() {
+                    reload();
+                }
+            });
+        }
+        group.add_action(&reload_for);
+        // Escape in the commit message: out of the field, with the message
+        // left as it is. The window owns Escape and asks for this.
+        let leave_field = gtk::gio::SimpleAction::new("leave-field", None);
+        {
+            let focus_files = Rc::clone(&focus_files);
+            leave_field.connect_activate(move |_, _| focus_files());
+        }
+        group.add_action(&leave_field);
+        page.insert_action_group("page", Some(&group));
+    }
+
     // The slot holds the loader, the loader holds everything it fills in, and
     // several of those hold the slot: a ring that kept every page ever opened
     // in memory, five hundred rows and a diff buffer apiece. Emptying the slot
-    // when the page is taken down lets go of all of it. `unrealize` is the
-    // signal for that: unlike `hidden`, it does not fire when the page is
-    // merely covered by another one.
+    // when the page is taken down lets go of all of it, and the window's
+    // handler goes with it. `unrealize` is the signal for that: unlike
+    // `hidden`, it does not fire when the page is merely covered by another.
     {
         let slot = Rc::clone(&reload_page);
+        let watcher = Rc::clone(&watcher);
         page.connect_unrealize(move |_| {
             slot.borrow_mut().take();
+            stop_watching(&watcher);
         });
     }
 
@@ -511,16 +766,27 @@ fn lanes_width(lanes: usize) -> i32 {
 }
 
 fn summary(graph: &Graph, from: usize, to: usize) -> String {
+    if graph.rows.is_empty() {
+        return match &graph.head {
+            Some(head) => format!("no commits yet  ·  HEAD {head}"),
+            None => "no commits yet".to_string(),
+        };
+    }
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut parts = Vec::new();
-    parts.push(format!("{} commits", to - from));
+    parts.push(count(to - from, "commit", "commits"));
     if let Some(index) = graph.target {
         parts.push(format!("around {} (#{})", graph.rows[index].short_id, index + 1));
+        // A window has edges, and "270 commits" alone read as the whole of it.
+        if from > 0 || graph.truncated {
+            parts.push("a window: the history goes on beyond it".to_string());
+        }
     } else if graph.target_missed {
         parts.push("that commit is further back than the walk reached".to_string());
     } else if graph.truncated {
         parts.push(format!("newest {COMMIT_LIMIT} shown"));
     }
-    parts.push(format!("{} lanes", graph.lanes));
+    parts.push(count(graph.lanes, "lane", "lanes"));
     if graph.lanes > MAX_LANES {
         parts.push(format!("lanes past {MAX_LANES} are clipped"));
     }
@@ -528,68 +794,6 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
         parts.push(format!("HEAD {head}"));
     }
     parts.join("  ·  ")
-}
-
-/// The row that stands for everything uncommitted, drawn where the next commit
-/// would go so the graph reads as continuing into the working tree.
-/// Fetch and fast-forward this repository, saying what happened. The same pass
-/// the timer runs, so a dirty tree or a diverged branch is refused for the same
-/// reasons rather than a second set.
-fn pull(
-    repo: &Path,
-    toasts: &adw::ToastOverlay,
-    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-    on_pulled: Rc<dyn Fn(&crate::refresh::Report)>,
-    fast_forward: bool,
-) {
-    let rx = crate::refresh::spawn(
-        vec![repo.to_path_buf()],
-        crate::refresh::Options {
-            fast_forward,
-            max_parallel: 1,
-            timeout: std::time::Duration::from_secs(120),
-            pass: crate::refresh::Pass::One,
-            cancel: crate::refresh::Cancel::default(),
-        },
-    );
-    let toasts = toasts.clone();
-    glib::spawn_future_local(async move {
-        let mut said = "Nothing to do".to_string();
-        let mut moved = false;
-        while let Ok(event) = rx.recv().await {
-            match event {
-                crate::refresh::Event::Repo(report) => {
-                    // The grid behind this page keeps the record of what the
-                    // last fetch could and could not do.
-                    on_pulled(&report);
-                    said = match &report.outcome {
-                        crate::refresh::Outcome::FastForwarded(n) => {
-                            moved = true;
-                            format!("{n} commits pulled")
-                        }
-                        crate::refresh::Outcome::UpToDate => "Up to date".into(),
-                        crate::refresh::Outcome::Behind(n) => {
-                            format!("Fetched — {n} behind")
-                        }
-                        crate::refresh::Outcome::Skipped(skip) => {
-                            format!("Left alone: {}", skip.reason())
-                        }
-                        crate::refresh::Outcome::Refused(why) => {
-                            format!("Fetched, not updated. {why}")
-                        }
-                        crate::refresh::Outcome::Failed(err) => err.clone(),
-                    };
-                }
-                crate::refresh::Event::Done => break,
-            }
-        }
-        crate::ui::say(&toasts, &said);
-        if moved {
-            if let Some(reload) = reload.borrow().clone() {
-                reload();
-            }
-        }
-    });
 }
 
 /// Set the push button up for what this repository can actually do, and say in
@@ -600,11 +804,20 @@ fn arm_push(
     graph: &Graph,
     repo: &Path,
     toasts: &adw::ToastOverlay,
-    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
+    on_pushed: Rc<dyn Fn()>,
 ) {
     if let Some(previous) = handler.borrow_mut().take() {
         push.disconnect(previous);
+    }
+    // A push that is still running. This runs on every reload, and a commit
+    // made in the pane reloads the page: the button came back armed with a
+    // push under way, and nothing stood between it and a second one.
+    if pushing(repo) {
+        content.set_label("Pushing…");
+        push.set_sensitive(false);
+        push.set_tooltip_text(Some("A push is under way"));
+        return;
     }
     let plan = graph.push.as_ref().ok();
     let refusal = match &graph.push {
@@ -627,8 +840,9 @@ fn arm_push(
             format!("Publish {} to {}", plan.branch, plan.remote)
         }
         (None, Some(plan)) => format!(
-            "Send {} commits on {} to {}",
+            "Send {} {} on {} to {}",
             graph.ahead,
+            if graph.ahead == 1 { "commit" } else { "commits" },
             plan.branch,
             graph.upstream.as_deref().unwrap_or(&plan.remote)
         ),
@@ -638,125 +852,100 @@ fn arm_push(
     let Some(armed) = plan.cloned() else { return };
     let repo = repo.to_path_buf();
     let toasts = toasts.clone();
+    let content = content.clone();
     let id = push.connect_clicked(move |button| {
+        if !PUSHING.with(|set| set.borrow_mut().insert(repo.clone())) {
+            return;
+        }
+        // Said on the button: a pre-push hook can be a test suite, and for
+        // two minutes the only sign of the push was a button gone grey.
         button.set_sensitive(false);
+        button.set_tooltip_text(Some("A push is under way"));
+        content.set_label("Pushing…");
         // What goes to git is the plan the button was drawn from, and only if
         // the repository still gives that plan when the worker asks again.
         let rx = crate::commit::spawn_push(repo.clone(), armed.clone());
-        let button = button.clone();
+        let repo = repo.clone();
         let toasts = toasts.clone();
-        let reload = Rc::clone(&reload);
+        let on_pushed = Rc::clone(&on_pushed);
         glib::spawn_future_local(async move {
-            match rx.recv().await {
-                Ok(Ok(line)) => {
-                    toasts.add_toast(crate::ui::toast(&line));
-                    if let Some(reload) = reload.borrow().clone() {
-                        reload();
-                    }
-                }
-                // The page was out of date. Say so, and read it again so the
-                // button shows what is true now.
+            let outcome = rx.recv().await;
+            PUSHING.with(|set| set.borrow_mut().remove(&repo));
+            match outcome {
+                Ok(Ok(line)) => toasts.add_toast(crate::ui::toast(&line)),
+                // The page was out of date, or git refused: a pre-push hook's
+                // refusal is quoted, not paraphrased. Either stays up until
+                // it has been read.
                 Ok(Err(crate::commit::PushError::Stale(why))) => {
-                    toasts.add_toast(crate::ui::toast(&why));
-                    if let Some(reload) = reload.borrow().clone() {
-                        reload();
-                    }
+                    crate::ui::complain(&toasts, &why)
                 }
-                // A pre-push hook's refusal is quoted, not paraphrased.
                 Ok(Err(crate::commit::PushError::Git(err))) => {
-                    button.set_sensitive(true);
-                    crate::ui::say(&toasts, &err);
+                    crate::ui::complain(&toasts, &err)
                 }
-                Err(_) => button.set_sensitive(true),
+                Err(_) => {}
             }
+            // The window has every open page of this repository read it
+            // again, this one included if it is still there. The button is
+            // then set from the repository, not from a guess made here.
+            on_pushed();
         });
     });
     *handler.borrow_mut() = Some(id);
 }
 
-/// Re-read the working tree whenever the window regains focus. It changes
-/// outside the app — that is rather the point of it — and nothing else would
-/// notice. The handler lives only while this page is on screen; left connected
-/// it would fire for pages the user has already left, and keep them alive.
-///
-/// `shown` is where HEAD was when the page was read: its name and its commit.
-/// When either has changed — a branch switched, a commit made, in the terminal
-/// this page offers on `l` — the whole page is read again, not just the count.
-/// The history, the ahead and behind figures and the push button all hang off
-/// HEAD, and all of them would otherwise go on describing where it used to be.
-fn watch_working_tree(
-    page: &adw::NavigationPage,
-    repo: &Path,
-    rows: &gtk::ListBox,
-    working: &gtk::ListBoxRow,
-    count_label: &gtk::Label,
-    load_detail: Rc<dyn Fn(PathBuf, crate::commit::Target)>,
-    handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
-    shown: (Option<String>, Option<String>),
-    reload: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
-) {
-    let Some(window) = page.root().and_downcast::<gtk::Window>() else { return };
-
-    // A reload populates the page again; without this the window would collect
-    // one handler per commit, each holding widgets that no longer exist.
-    if let Some(previous) = handler.borrow_mut().take() {
-        window.disconnect(previous);
-    }
-    {
-        let repo = repo.to_path_buf();
-        let rows = rows.clone();
-        let working = working.clone();
-        let count_label = count_label.clone();
-        let id = window.connect_is_active_notify(move |window| {
-            if !window.is_active() {
-                return;
-            }
-            let rx = crate::graph::spawn_glance(repo.clone());
-            let repo = repo.clone();
-            let rows = rows.clone();
-            let working = working.clone();
-            let count_label = count_label.clone();
-            let load_detail = Rc::clone(&load_detail);
-            let shown = shown.clone();
-            let reload = Rc::clone(&reload);
-            glib::spawn_future_local(async move {
-                let Ok(glance) = rx.recv().await else { return };
-                if (&glance.head, &glance.tip) != (&shown.0, &shown.1) {
-                    if let Some(reload) = reload.borrow().clone() {
-                        reload();
-                    }
-                    return;
-                }
-                let changes = glance.changes;
-                working.set_visible(changes > 0);
-                count_label.set_label(&entries(changes));
-                // Only re-read the pane when it is the working tree on show;
-                // a commit cannot have changed under us.
-                let on_working = rows
-                    .selected_row()
-                    .map(|row| row.index() == 0)
-                    .unwrap_or(false);
-                if on_working && changes > 0 {
-                    load_detail(repo, crate::commit::Target::Working);
-                }
-            });
-        });
-        *handler.borrow_mut() = Some(id);
-    }
-
-    let window = window.clone();
-    page.connect_hidden(move |_| {
-        if let Some(id) = handler.borrow_mut().take() {
+fn stop_watching(watcher: &Watcher) {
+    if let Some((window, id)) = watcher.borrow_mut().take() {
+        if let Some(window) = window.upgrade() {
             window.disconnect(id);
         }
+    }
+}
+
+/// Look at the repository again whenever the window regains focus. It changes
+/// outside the app — that is rather the point of it — and nothing else would
+/// notice. `on_glance` is handed what was seen. The handler is on the window,
+/// so it is taken off again when the page goes; left connected it would keep
+/// the page's widgets alive and go on firing for a page nobody can see.
+///
+/// `body` is the page's content, whichever of its faces is showing.
+fn watch(body: &gtk::Stack, repo: &Path, watcher: &Watcher, on_glance: Rc<dyn Fn(Glance)>) {
+    stop_watching(watcher);
+    let Some(window) = body.root().and_downcast::<gtk::Window>() else { return };
+    let repo = repo.to_path_buf();
+    let body = body.downgrade();
+    let id = window.connect_is_active_notify(move |window| {
+        if !window.is_active() {
+            return;
+        }
+        // Covered by another page, this one is not on screen, and what it
+        // would be told can wait for the next time it is.
+        if !body.upgrade().is_some_and(|body| body.is_mapped()) {
+            return;
+        }
+        let rx = graph::spawn_glance(repo.clone());
+        let on_glance = Rc::clone(&on_glance);
+        glib::spawn_future_local(async move {
+            if let Ok(glance) = rx.recv().await {
+                on_glance(glance);
+            }
+        });
     });
+    *watcher.borrow_mut() = Some((window.downgrade(), id));
 }
 
 fn entries(changes: usize) -> String {
     format!("{changes} {}", if changes == 1 { "entry" } else { "entries" })
 }
 
-fn working_row(changes: usize, graph_width: i32) -> (gtk::ListBoxRow, gtk::Label) {
+/// The row that stands for everything uncommitted. `tail` is the lane of the
+/// commit it would become a child of, when that commit is the row beneath: the
+/// dashed line is then drawn down to it, so the graph reads as continuing into
+/// the working tree. Without one the hollow dot stands alone.
+fn working_row(
+    changes: usize,
+    graph_width: i32,
+    tail: Option<usize>,
+) -> (gtk::ListBoxRow, gtk::Label) {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(ROW_H);
 
@@ -764,17 +953,20 @@ fn working_row(changes: usize, graph_width: i32) -> (gtk::ListBoxRow, gtk::Label
         .content_width(graph_width)
         .content_height(ROW_H)
         .build();
+    let lane = tail.unwrap_or(0).min(MAX_LANES - 1);
     area.set_draw_func(move |_, cr, _, height| {
         let mid = height as f64 / 2.0;
-        let x = lane_x(0);
-        set_color(cr, lane_color(0));
+        let x = lane_x(lane);
+        set_color(cr, lane_color(lane));
         cr.set_line_width(1.6);
-        // Dashed, because this is not a commit and should not pretend to be.
-        cr.set_dash(&[3.0, 3.0], 0.0);
-        cr.move_to(x, mid);
-        cr.line_to(x, height as f64);
-        let _ = cr.stroke();
-        cr.set_dash(&[], 0.0);
+        if tail.is_some() {
+            // Dashed, because this is not a commit and should not pretend to be.
+            cr.set_dash(&[3.0, 3.0], 0.0);
+            cr.move_to(x, mid);
+            cr.line_to(x, height as f64);
+            let _ = cr.stroke();
+            cr.set_dash(&[], 0.0);
+        }
         cr.arc(x, mid, DOT_R, 0.0, std::f64::consts::TAU);
         let _ = cr.stroke();
     });
@@ -800,6 +992,25 @@ fn working_row(changes: usize, graph_width: i32) -> (gtk::ListBoxRow, gtk::Label
     (row, count)
 }
 
+/// One ref label on a row, held to a width. A label that may not shorten has
+/// its whole text as its minimum width, a row is as wide as its labels, and
+/// the list as wide as its widest row: one commit carrying a long branch name
+/// pushed every row's summary, author and date out of the window.
+fn ref_pill(text: &str, tooltip: &str, kind: &str, current: bool) -> gtk::Label {
+    let pill = gtk::Label::builder()
+        .label(text)
+        .ellipsize(pango::EllipsizeMode::Middle)
+        .max_width_chars(PILL_CHARS)
+        .tooltip_text(tooltip)
+        .build();
+    pill.add_css_class("om-ref");
+    pill.add_css_class(kind);
+    if current {
+        pill.add_css_class("current");
+    }
+    pill
+}
+
 fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(ROW_H);
@@ -814,19 +1025,23 @@ fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
     sha.add_css_class("om-sha");
     line.append(&sha);
 
-    for label in &row.refs {
-        let pill = gtk::Label::new(Some(&label.name));
-        pill.add_css_class("om-ref");
-        pill.add_css_class(match label.kind {
-            RefKind::Head => "head",
-            RefKind::LocalBranch => "local",
-            RefKind::RemoteBranch => "remote",
-            RefKind::Tag => "tag",
-        });
-        if label.current {
-            pill.add_css_class("current");
-        }
-        line.append(&pill);
+    let kind = |kind: RefKind| match kind {
+        RefKind::Head => "head",
+        RefKind::LocalBranch => "local",
+        RefKind::RemoteBranch => "remote",
+        RefKind::Tag => "tag",
+    };
+    for label in row.refs.iter().take(MAX_PILLS) {
+        line.append(&ref_pill(&label.name, &label.name, kind(label.kind), label.current));
+    }
+    if let Some(rest) = row.refs.get(MAX_PILLS..).filter(|rest| !rest.is_empty()) {
+        let names: Vec<&str> = rest.iter().map(|label| label.name.as_str()).collect();
+        line.append(&ref_pill(
+            &format!("+{}", rest.len()),
+            &names.join("\n"),
+            kind(rest[0].kind),
+            false,
+        ));
     }
 
     let summary = gtk::Label::builder()

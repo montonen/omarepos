@@ -1,5 +1,7 @@
 pub mod card;
 pub mod commit;
+#[cfg(debug_assertions)]
+pub mod debug;
 pub mod dialogs;
 pub mod graph;
 pub mod search;
@@ -74,6 +76,71 @@ pub fn say(overlay: &adw::ToastOverlay, text: &str) {
         });
     }
     overlay.add_toast(toast);
+}
+
+/// A toast for something that went wrong. It stays until it is dismissed: five
+/// seconds is not long enough to read why a push was refused when the eye was
+/// on the terminal next door, and when it had gone there was nothing left on
+/// screen to say that anything had been.
+pub fn complain(overlay: &adw::ToastOverlay, text: &str) {
+    let text = text.trim();
+    if text.lines().count() > 1 {
+        // Already stays up, with a button for the rest.
+        say(overlay, text);
+        return;
+    }
+    let toast = toast(text);
+    toast.set_timeout(0);
+    overlay.add_toast(toast);
+}
+
+/// What fetching or updating one repository came to, worded to follow the
+/// repository's name: "billing: 3 commits pulled". One wording, because the
+/// card and the graph page ask the same question and used to answer it in two
+/// sets of words.
+pub fn outcome_text(outcome: &crate::refresh::Outcome) -> String {
+    use crate::refresh::Outcome;
+    match outcome {
+        Outcome::FastForwarded(1) => "1 commit pulled".to_string(),
+        Outcome::FastForwarded(n) => format!("{n} commits pulled"),
+        Outcome::UpToDate => "up to date".to_string(),
+        Outcome::Behind(n) => format!("fetched, {n} behind"),
+        Outcome::Skipped(skip) => format!("left alone: {}", skip.reason()),
+        Outcome::Refused(why) => format!("fetched, not updated. {why}"),
+        Outcome::Failed(err) => err.clone(),
+    }
+}
+
+/// How long after a press the same key is still the same press. A held key
+/// repeats: once after the keyboard's delay, four to six tenths of a second,
+/// and then some thirty times a second.
+const SAME_PRESS: std::time::Duration = std::time::Duration::from_millis(700);
+
+/// Lets a key that starts something outside the window (a terminal, an editor,
+/// a fetch) do it once for each time it is pressed. GTK delivers a held key as
+/// a run of presses, and a key held a second too long, or one that sticks,
+/// opened a terminal per repeat and started as many fetches of one repository.
+#[derive(Default)]
+pub struct OncePerPress {
+    last: std::cell::Cell<Option<(gtk::gdk::Key, std::time::Instant)>>,
+}
+
+impl OncePerPress {
+    /// Whether this is a new press of `key`, and not the last one still held.
+    pub fn first(&self, key: gtk::gdk::Key) -> bool {
+        self.first_at(key, std::time::Instant::now())
+    }
+
+    /// Every press moves the mark, taken or not, so a key held for a minute is
+    /// still one press at the end of it.
+    fn first_at(&self, key: gtk::gdk::Key, now: std::time::Instant) -> bool {
+        let held = self
+            .last
+            .get()
+            .is_some_and(|(last, when)| last == key && now.duration_since(when) < SAME_PRESS);
+        self.last.set(Some((key, now)));
+        !held
+    }
 }
 
 /// Human-friendly age of a unix timestamp, in the style git itself uses.
@@ -295,4 +362,35 @@ pub fn day_window(days: usize) -> crate::stats::Window {
     }
 
     crate::stats::Window { day_starts, day_labels, day_titles }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_held_key_is_one_press_however_long_it_is_held() {
+        let presses = OncePerPress::default();
+        let start = Instant::now();
+        let key = gtk::gdk::Key::p;
+        assert!(presses.first_at(key, start));
+        // The keyboard's delay, then thirty repeats a second for two seconds.
+        let mut at = start + Duration::from_millis(400);
+        for _ in 0..60 {
+            assert!(!presses.first_at(key, at), "a repeat was taken for a press");
+            at += Duration::from_millis(33);
+        }
+        // Let go, and pressed again a second later.
+        assert!(presses.first_at(key, at + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_different_key_is_a_different_press() {
+        let presses = OncePerPress::default();
+        let start = Instant::now();
+        assert!(presses.first_at(gtk::gdk::Key::f, start));
+        assert!(presses.first_at(gtk::gdk::Key::p, start + Duration::from_millis(100)));
+        assert!(presses.first_at(gtk::gdk::Key::f, start + Duration::from_millis(200)));
+    }
 }
