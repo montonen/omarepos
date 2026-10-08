@@ -422,9 +422,13 @@ fn pills(
 }
 
 /// Proportional language bar, drawn with cairo so the segments can be exact.
+///
+/// The six largest, scaled to fill the bar between them. The cut used to be
+/// made where the list was built, which is also the list the `lang:` filter
+/// reads; it belongs here, where the reason for it is.
 fn lang_bar(info: &RepoInfo) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::builder().content_height(5).hexpand(true).build();
-    let langs = info.langs.clone();
+    let langs: Vec<_> = info.langs.iter().take(6).cloned().collect();
     area.set_draw_func(move |_, cr, width, height| {
         let width = width as f64;
         let height = height as f64;

@@ -94,6 +94,8 @@ pub struct RepoInfo {
     pub local_branches: usize,
     pub stashes: usize,
     pub tracked_files: usize,
+    /// Every language among the tracked files, largest share first. The card
+    /// draws the first few; the `lang:` filter has to see all of them.
     pub langs: Vec<LangShare>,
     pub last_commit: Option<Commit>,
     /// `user.name` and `user.email` as libgit2 reads the configuration for
@@ -731,7 +733,9 @@ pub fn inspect(path: &Path) -> RepoInfo {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.name.cmp(&b.name))
             });
-            shares.truncate(6);
+            // All of them. The list was cut to six here, for the card's bar,
+            // and `speaks` reads the same list: `lang:docker` could not find a
+            // repository whose Dockerfile was its seventh language.
             info.langs = shares;
         }
     }
@@ -963,6 +967,45 @@ mod tests {
         assert_eq!(info.error, None);
         assert!(info.unborn);
         assert_eq!((info.tree.staged, info.tree.untracked), (1, 1));
+    }
+
+    #[test]
+    fn the_language_filter_finds_a_language_the_repository_has_little_of() {
+        let _guard = isolate();
+        let dir = scratch("inspect-many-languages");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let files = [
+            ("ts", 9),
+            ("tsx", 8),
+            ("json", 7),
+            ("md", 6),
+            ("yaml", 5),
+            ("css", 4),
+            ("js", 3),
+            ("html", 2),
+            ("sh", 1),
+        ];
+        for (extension, count) in files {
+            for n in 0..count {
+                write(&dir.join(format!("src/file{n}.{extension}")), "x\n");
+            }
+        }
+        write(&dir.join("Dockerfile"), "FROM scratch\n");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "one"]);
+
+        let info = inspect(&dir);
+        assert_eq!(info.tracked_files, 46);
+        // The seventh language and on. Six is how many the card's bar draws,
+        // and the filter used to see no further than the bar.
+        for wanted in ["javascript", "html", "shell", "docker"] {
+            assert!(info.speaks(wanted), "lang:{wanted} does not find it");
+        }
+        assert!(!info.speaks("rust"));
+        // Largest first still, which is the order the bar and its legend take.
+        let names: Vec<&str> = info.langs.iter().map(|lang| lang.name.as_str()).collect();
+        assert_eq!(names[..6], ["TypeScript", "TSX", "JSON", "Markdown", "YAML", "CSS"]);
+        assert_eq!(names.len(), 10);
     }
 
     // ---- who commits here, as far as can be read without asking git --------
