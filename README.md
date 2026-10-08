@@ -579,6 +579,18 @@ Optional, at `~/.config/omarepos/config.toml`:
 Everything here is also editable from the settings dialog, which rewrites this
 file (and drops your comments when it does).
 
+Edit it while the window is open and the edit is taken up at the next rescan
+(`Ctrl+R`, or any scan the app starts itself); a toast says so. Until then the
+app will not save over a file that is no longer what it read: change a setting
+in the window first and it tells you the file has changed, and to rescan. A
+file caught half-edited, one that does not parse, changes nothing: what was in
+force stays in force, a banner says where the parser stopped, and it is read
+again once mended.
+
+The launcher key brings an open window forward and does not start a second
+one. After installing a new build that window is still the old program, and
+it says so when it is brought forward: quit and start again for the new one.
+
 ```toml
 # Directories to scan. `~` is expanded. A root is either a bare path, or a
 # table when it needs options.

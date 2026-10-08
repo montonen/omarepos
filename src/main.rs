@@ -98,6 +98,12 @@ fn main() -> glib::ExitCode {
         // timer, fetching the same repositories alongside it.
         if let Some(window) = app.active_window().or_else(|| app.windows().into_iter().next()) {
             window.present();
+            // The launcher key after a reinstall brings this window forward,
+            // and this is the build from before. It looked exactly like the
+            // new one having started.
+            if replaced_on_disk() {
+                let _ = WidgetExt::activate_action(&window, "win.updated-on-disk", None);
+            }
             return;
         }
         // One provider for the whole app; the theme watcher reloads it in place.
@@ -120,7 +126,21 @@ fn main() -> glib::ExitCode {
     app.add_action(&quit);
     app.set_accels_for_action("app.quit", &["<Ctrl>q"]);
 
+    // Said on the way out when another process answers: this one's build and
+    // what it read from the config file are not what the user is about to
+    // look at.
+    if app.register(gtk::gio::Cancellable::NONE).is_ok() && app.is_remote() {
+        eprintln!("omarepos: already running; that window has been brought forward");
+    }
+
     // GTK's own argument parsing would choke on the flags handled above.
     let argv: [&str; 0] = [];
     app.run_with_args(&argv)
+}
+
+/// Whether the file this process was started from has since been replaced,
+/// which is what installing a new build does. The kernel marks the link.
+fn replaced_on_disk() -> bool {
+    std::fs::read_link("/proc/self/exe")
+        .is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)"))
 }

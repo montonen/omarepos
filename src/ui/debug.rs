@@ -53,6 +53,12 @@ pub fn install(window: &adw::ApplicationWindow) {
             None => out.push_str("keyboard: nowhere\n"),
         }
         out.push_str(&format!("dialog: {}\n", window.visible_dialog().is_some()));
+        // How narrow the window can be made before something is cut off,
+        // beside how wide it is.
+        if let Some(content) = window.content() {
+            let (least, _, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
+            out.push_str(&format!("width: {} (needs {least})\n", window.width()));
+        }
         walk(window.upcast_ref(), 0, &mut out);
         if let Err(err) = std::fs::write(&path, out) {
             eprintln!("omarepos: could not write the dump: {err}");
@@ -201,7 +207,8 @@ fn say(widget: &gtk::Widget) -> Option<String> {
         ));
     }
     if let Some(banner) = widget.downcast_ref::<adw::Banner>() {
-        return Some(banner.title().to_string());
+        // Mapped whether or not it is showing; say only what can be read.
+        return banner.is_revealed().then(|| banner.title().to_string());
     }
     None
 }

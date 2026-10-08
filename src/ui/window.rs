@@ -90,6 +90,8 @@ struct Ui {
     stack: gtk::Stack,
     flow: gtk::FlowBox,
     status: gtk::Label,
+    /// Up for as long as a file the app keeps cannot be read.
+    trouble: adw::Banner,
     toasts: adw::ToastOverlay,
     repos: RefCell<Vec<RepoInfo>>,
     /// The filtered, sorted repos currently in the grid, in flow box order.
@@ -334,6 +336,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         stack,
         flow,
         status,
+        trouble,
         toasts,
         repos: RefCell::new(Vec::new()),
         shown: RefCell::new(Vec::new()),
@@ -734,32 +737,37 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
 
     // At narrow widths the two labelled header buttons crowd out the title,
-    // so below this width they fall back to their icons.
+    // so below this width they fall back to their icons and the filter box
+    // gives up a third of its width. The width is the one the header needs
+    // with everything showing, measured at 1010: the labels used to stay
+    // until 920, and for the ninety pixels between, which is where half of a
+    // 1920 screen falls, the window was narrower than its own header.
     let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
         adw::BreakpointConditionLengthType::MaxWidth,
-        920.0,
+        1040.0,
         adw::LengthUnit::Px,
     ));
     breakpoint.add_setter(&ui.contrib_content, "label", Some(&"".to_value()));
     breakpoint.add_setter(&ui.tags_content, "label", Some(&"".to_value()));
+    breakpoint.add_setter(&ui.search, "width-request", Some(&160.to_value()));
     window.add_breakpoint(breakpoint);
 
-    let unusable: Vec<String> = [
-        ui.cfg.borrow().load_error.clone(),
-        ui.meta.borrow().load_error.clone(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if !unusable.is_empty() {
-        trouble.set_title(&format!(
-            "Could not read {}. Running without it, and nothing will be saved over it. \
-             Fix the file and start omarepos again.",
-            unusable.join("; ")
-        ));
-        trouble.set_revealed(true);
+    let act_updated = gio::SimpleAction::new("updated-on-disk", None);
+    {
+        // Sent by a second launch that found this window already open, when
+        // the program has been replaced on disk since this one started.
+        let ui = Rc::clone(&ui);
+        act_updated.connect_activate(move |_, _| {
+            ui::complain(
+                &ui.toasts,
+                "omarepos has been reinstalled since this window opened, and this is still \
+                 the old one. Quit (Ctrl+Q) and start it again for the new.",
+            );
+        });
     }
+    window.add_action(&act_updated);
 
+    ui.sync_trouble();
     #[cfg(debug_assertions)]
     ui::debug::install(&window);
 
@@ -815,7 +823,57 @@ impl Ui {
         self.monitors.borrow_mut().push(monitor);
     }
 
+    /// Say, for as long as it is so, that a file the app keeps cannot be read.
+    /// A banner and not a toast: the app is running without the file and will
+    /// not save over it, and a toast that came and went would leave that to be
+    /// found out later.
+    fn sync_trouble(&self) {
+        let unusable: Vec<String> = [
+            self.cfg.borrow().load_error.clone(),
+            self.meta.borrow().load_error.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !unusable.is_empty() {
+            self.trouble.set_title(&format!(
+                "Could not read {}. Nothing will be saved over it. Fix the file, then \
+                 rescan (Ctrl+R) for the settings or start omarepos again for the tags.",
+                unusable.join("; ")
+            ));
+        }
+        self.trouble.set_revealed(!unusable.is_empty());
+    }
+
+    /// Take up an edit made to the config file since it was read. The README
+    /// offers the file as a way to configure the app, and until now only a
+    /// restart read it: Ctrl+R scanned the roots held in memory, and the next
+    /// save put the launch-time settings back over the edit.
+    fn reread_config(self: &Rc<Self>) {
+        // Not while something up the stack is holding the settings.
+        let Ok(mut cfg) = self.cfg.try_borrow_mut() else { return };
+        let followed = cfg.follow_omarchy_theme;
+        let outcome = cfg.reread();
+        let follows = cfg.follow_omarchy_theme;
+        drop(cfg);
+        match outcome {
+            crate::config::Reread::Unchanged => {}
+            crate::config::Reread::Loaded => {
+                self.sync_trouble();
+                self.schedule_refresh();
+                if follows != followed {
+                    self.apply_theme();
+                }
+                self.sync_subtitle();
+                self.toasts.add_toast(ui::toast("Read config.toml again"));
+            }
+            // The banner has the reason.
+            crate::config::Reread::Broken(_) => self.sync_trouble(),
+        }
+    }
+
     fn start_scan(self: &Rc<Self>) {
+        self.reread_config();
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         self.scanning.set(true);
@@ -2131,7 +2189,9 @@ impl Ui {
             }
             ui.cfg.borrow_mut().commit_detail = open;
             if let Err(err) = ui.cfg.borrow().save() {
-                eprintln!("omarepos: could not write the config file: {err}");
+                // Said in the window: one reason is that the file was edited
+                // elsewhere, and that wants doing something about.
+                ui::complain(&ui.toasts, &format!("The pane's setting was {err}"));
             }
         });
         (open, remember)

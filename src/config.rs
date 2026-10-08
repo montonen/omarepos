@@ -2,6 +2,7 @@
 //!
 //! Every field is optional; a missing file just means defaults.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -106,14 +107,14 @@ impl RootSpec {
 
     fn to_toml(&self) -> String {
         match self {
-            RootSpec::Simple(path) => format!("{path:?}"),
+            RootSpec::Simple(path) => quote(path),
             RootSpec::Detailed(entry) => {
-                let mut parts = vec![format!("path = {:?}", entry.path)];
+                let mut parts = vec![format!("path = {}", quote(&entry.path))];
                 if entry.nested {
                     parts.push("nested = true".to_string());
                 }
                 if let Some(tag) = &entry.tag {
-                    parts.push(format!("tag = {tag:?}"));
+                    parts.push(format!("tag = {}", quote(tag)));
                 }
                 if let Some(include) = entry.include_self {
                     parts.push(format!("include_self = {include}"));
@@ -167,6 +168,27 @@ impl Default for Refresh {
             timeout_seconds: 60,
         }
     }
+}
+
+/// A string as TOML writes one. The writer used Rust's `{:?}` for this, which
+/// is TOML for plain text and not for the rest: it spells a combining accent,
+/// a variation selector or a no-break space as `\u{301}`, and TOML reads
+/// `\uXXXX` only. A directory named on a Mac, or a tag with a heart in it,
+/// produced a file the next launch could not parse.
+fn quote(text: &str) -> String {
+    toml::Value::String(text.to_string()).to_string()
+}
+
+/// What reading the file again came to.
+#[derive(Debug, PartialEq)]
+pub enum Reread {
+    /// The file is as it was last read or written.
+    Unchanged,
+    /// It had changed, and what it says is now in force.
+    Loaded,
+    /// It had changed into something that cannot be read. What was in force
+    /// stays in force, and nothing is saved over the file until it can be.
+    Broken(String),
 }
 
 /// One line saying why a file was not used: where the parser stopped, and
@@ -402,6 +424,13 @@ pub struct Config {
     /// them the rest of it.
     #[serde(skip)]
     pub load_error: Option<String>,
+    /// The file as it was last read or written: its text, or `None` for no
+    /// file. `save` looks before it replaces. The file is offered as a way to
+    /// configure the app, the app read it once at launch, and the next save of
+    /// anything (hiding the detail pane was enough) wrote the launch-time
+    /// copy back over whatever had been typed into it since.
+    #[serde(skip)]
+    on_disk: RefCell<Option<String>>,
 }
 
 impl Default for Config {
@@ -419,6 +448,7 @@ impl Default for Config {
             roots_override: None,
             depth_override: None,
             load_error: None,
+            on_disk: RefCell::new(None),
         }
     }
 }
@@ -442,7 +472,7 @@ impl Config {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
             Err(err) => return Self::unusable(&path, &err.to_string()),
         };
-        match toml::from_str::<Config>(&text) {
+        let mut cfg = match toml::from_str::<Config>(&text) {
             Ok(mut cfg) => {
                 if cfg.roots.is_empty() {
                     cfg.roots = Self::default().roots;
@@ -450,6 +480,44 @@ impl Config {
                 cfg
             }
             Err(err) => Self::unusable(&path, &err.to_string()),
+        };
+        cfg.on_disk = RefCell::new(Some(text));
+        cfg
+    }
+
+    /// Read the file again if it is not what was last read or written. The
+    /// command line's roots and depth stay as they are: they were never the
+    /// file's.
+    pub fn reread(&mut self) -> Reread {
+        let path = Self::path();
+        let disk = std::fs::read_to_string(&path).ok();
+        if disk == *self.on_disk.borrow() {
+            return Reread::Unchanged;
+        }
+        let parsed = match &disk {
+            // Deleted: the defaults, as on a first run.
+            None => Ok(Self::default()),
+            Some(text) => toml::from_str::<Config>(text).map_err(|err| err.to_string()),
+        };
+        match parsed {
+            Ok(mut fresh) => {
+                if fresh.roots.is_empty() {
+                    fresh.roots = Self::default().roots;
+                }
+                fresh.roots_override = self.roots_override.take();
+                fresh.depth_override = self.depth_override;
+                fresh.on_disk = RefCell::new(disk);
+                *self = fresh;
+                Reread::Loaded
+            }
+            Err(why) => {
+                // Half-edited, most likely. Falling back to the defaults here
+                // would empty the grid under the person typing.
+                let why = why_unusable(&path, &why);
+                self.load_error = Some(why.clone());
+                *self.on_disk.borrow_mut() = disk;
+                Reread::Broken(why)
+            }
         }
     }
 
@@ -550,10 +618,17 @@ impl Config {
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::path();
         refuse_to_replace(&self.load_error)?;
+        if std::fs::read_to_string(&path).ok() != *self.on_disk.borrow() {
+            return Err(std::io::Error::other(format!(
+                "not saved: {} has been changed outside omarepos since it was read. \
+                 Rescan (Ctrl+R) to read it again, then make the change once more.",
+                tildify(&path)
+            )));
+        }
         let list = |values: &[String]| -> String {
             values
                 .iter()
-                .map(|v| format!("{:?}", v))
+                .map(|v| quote(v))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -571,15 +646,15 @@ impl Config {
         out.push_str("# Levels below each root to search for a `.git`.\n");
         out.push_str(&format!("max_depth = {}\n\n", self.max_depth));
         match &self.terminal {
-            Some(term) => out.push_str(&format!("terminal = {term:?}\n")),
+            Some(term) => out.push_str(&format!("terminal = {}\n", quote(term))),
             None => out.push_str("# terminal = \"alacritty\"   # defaults to $TERMINAL\n"),
         }
         match &self.editor {
-            Some(editor) => out.push_str(&format!("editor = {editor:?}\n")),
+            Some(editor) => out.push_str(&format!("editor = {}\n", quote(editor))),
             None => out.push_str("# editor = \"nvim\"          # defaults to $EDITOR\n"),
         }
         match &self.terminal_runs {
-            Some(cmd) => out.push_str(&format!("terminal_runs = {cmd:?}\n")),
+            Some(cmd) => out.push_str(&format!("terminal_runs = {}\n", quote(cmd))),
             None => out.push_str(
                 "# terminal_runs = \"lazygit\"  # run in the terminal; \"\" for a plain shell\n",
             ),
@@ -601,7 +676,9 @@ impl Config {
         out.push_str(&format!("max_parallel = {}\n", refresh.max_parallel));
         out.push_str(&format!("timeout_seconds = {}\n", refresh.timeout_seconds));
 
-        replace_file(&path, &out)
+        replace_file(&path, &out)?;
+        *self.on_disk.borrow_mut() = Some(out);
+        Ok(())
     }
 
     /// Terminal command, honouring `$TERMINAL` before guessing.
@@ -713,6 +790,114 @@ mod tests {
         assert!(client.nested && client.tag.as_deref() == Some("client"), "{client:?}");
 
         let _ = std::fs::remove_file(Config::path());
+    }
+
+    /// Every string the app writes, with the characters `{:?}` got wrong: a
+    /// variation selector, a zero-width joiner, a combining accent as a Mac
+    /// writes one, a no-break space, a soft hyphen, and the control characters.
+    #[test]
+    fn what_save_writes_load_can_read() {
+        let _guard = isolate();
+        let path = Config::path();
+        let _ = std::fs::remove_file(&path);
+        let awkward = [
+            "\u{2764}\u{fe0f} favourites",
+            "\u{1f468}\u{200d}\u{1f4bb}",
+            "Cafe\u{301}",
+            "a\u{a0}b",
+            "soft\u{ad}hyphen",
+            "esc\u{1b}del\u{7f}nul\u{0}",
+            "quote \" and \\ backslash and 'single'",
+            "two\nlines\tand a tab",
+        ];
+        for text in awkward {
+            let mut cfg = Config::default();
+            cfg.roots = vec![
+                RootSpec::Simple(format!("~/{text}")),
+                RootSpec::Detailed(RootEntry {
+                    path: format!("~/nested/{text}"),
+                    nested: true,
+                    tag: Some(text.to_string()),
+                    include_self: Some(false),
+                }),
+            ];
+            cfg.extra_repos = vec![format!("/srv/{text}")];
+            cfg.terminal = Some(text.to_string());
+            cfg.editor = Some(text.to_string());
+            cfg.terminal_runs = Some(text.to_string());
+            cfg.refresh.only_tags = vec![text.to_string()];
+            cfg.save().unwrap();
+
+            let back = Config::load();
+            assert_eq!(back.load_error, None, "{text:?} wrote a file that does not parse");
+            let roots = back.roots();
+            assert_eq!(roots.len(), 2, "{text:?}");
+            assert_eq!(roots[1].tag.as_deref(), Some(text), "{text:?}");
+            assert!(roots[1].nested && !roots[1].include_self, "{text:?}");
+            assert_eq!(back.extra_repos, vec![format!("/srv/{text}")]);
+            assert_eq!(back.terminal.as_deref(), Some(text));
+            assert_eq!(back.editor.as_deref(), Some(text));
+            assert_eq!(back.terminal_runs.as_deref(), Some(text));
+            assert_eq!(back.refresh.only_tags, vec![text.to_string()]);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn an_edit_made_outside_is_read_again_and_never_saved_over() {
+        let _guard = isolate();
+        let path = Config::path();
+        write(&path, WRITTEN_BY_HAND);
+        let mut cfg = Config::load();
+        assert_eq!(cfg.reread(), Reread::Unchanged);
+
+        // In an editor, with the window open.
+        let edited = WRITTEN_BY_HAND.replace("max_depth = 4", "max_depth = 6");
+        write(&path, &edited);
+
+        // Any save used to put the launch-time copy back.
+        cfg.commit_detail = false;
+        let refused = cfg.save().expect_err("the file is not what was read");
+        assert!(refused.to_string().contains("changed outside"), "{refused}");
+        assert_eq!(read(&path), edited);
+
+        assert_eq!(cfg.reread(), Reread::Loaded);
+        assert_eq!(cfg.depth(), 6);
+        assert!(cfg.commit_detail, "what the file says, not what was in memory");
+        cfg.commit_detail = false;
+        cfg.save().unwrap();
+        assert_eq!(cfg.reread(), Reread::Unchanged, "its own save is not an edit from outside");
+        assert_eq!(Config::load().depth(), 6);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_half_edited_file_leaves_what_was_in_force_and_is_not_saved_over() {
+        let _guard = isolate();
+        let path = Config::path();
+        write(&path, WRITTEN_BY_HAND);
+        let mut cfg = Config::load();
+        cfg.roots_override = Some(vec![RootSpec::Simple("/tmp/one-off".to_string())]);
+
+        let broken = WRITTEN_BY_HAND.replace("max_depth = 4", "max_depth = ");
+        write(&path, &broken);
+        let Reread::Broken(why) = cfg.reread() else { panic!("it does not parse") };
+        assert!(why.contains("config.toml"), "{why}");
+        assert_eq!(cfg.max_depth, 4, "not the defaults");
+        assert_eq!(cfg.roots.len(), 2, "not the defaults");
+        assert!(cfg.save().is_err());
+        assert_eq!(read(&path), broken);
+        // Said once, not on every rescan until it is mended.
+        assert_eq!(cfg.reread(), Reread::Unchanged);
+
+        write(&path, &WRITTEN_BY_HAND.replace("max_depth = 4", "max_depth = 5"));
+        assert_eq!(cfg.reread(), Reread::Loaded);
+        assert_eq!(cfg.load_error, None);
+        assert_eq!(cfg.max_depth, 5);
+        assert!(cfg.one_off(), "the command line's roots are kept across a re-read");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
