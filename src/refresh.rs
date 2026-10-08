@@ -106,9 +106,13 @@ impl Skip {
 
 #[derive(Debug, Clone)]
 pub enum Outcome {
-    /// Fetched, and the branch was already current.
+    /// Fetched, and there is nothing to bring in: the branch was already
+    /// current. On a pass that only fetches, also where there is nothing to
+    /// measure: no branch checked out, or one that tracks nothing.
     UpToDate,
-    /// Fetched, and the branch is now behind; not fast-forwarded.
+    /// Fetched, and the branch is now behind; not fast-forwarded. On a pass
+    /// that only fetches this is said whatever else is true of the branch,
+    /// commits of its own included.
     Behind(usize),
     /// Fetched and fast-forwarded by this many commits.
     FastForwarded(usize),
@@ -399,7 +403,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     if crate::git::belongs_here(&repo, path).is_err() {
         return report(Outcome::Skipped(Skip::Elsewhere));
     }
-    if let Some(skip) = disqualify(&repo) {
+    if let Some(skip) = disqualify(&repo, options.fast_forward) {
         return report(Outcome::Skipped(skip));
     }
 
@@ -425,27 +429,39 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     }
     let at = match tracking(&repo) {
         Ok(at) => at,
+        // Asked only to fetch, that has been done, and "left alone: no
+        // upstream" about a repository just fetched is not what happened.
+        // There is nothing here to count commits against, so nothing is.
+        Err(_) if !options.fast_forward => return report(Outcome::UpToDate),
         Err(skip) => return report(Outcome::Skipped(skip)),
     };
     let behind = at.behind;
 
-    if behind == 0 {
-        return report(Outcome::UpToDate);
-    }
-    if at.ahead > 0 {
-        return report(Outcome::Skipped(Skip::Diverged));
-    }
+    // A pass that only fetches reports the fetch. The reasons below are why a
+    // branch would not be *updated*, and were given for one that nobody had
+    // asked to update: "left alone: has unpushed commits" after a fetch that
+    // had worked, counted as skipped and not as fetched.
     if !options.fast_forward {
+        if behind == 0 {
+            return report(Outcome::UpToDate);
+        }
         // Nothing is updated on this pass, but an update that stopped
         // part-way on an earlier one is still lying here, and "fetched, 3
         // behind" would clear the only record of it.
-        if is_dirty(&repo) {
+        if at.ahead == 0 && is_dirty(&repo) {
             let left = half_applied(&repo, &at);
             if !left.is_empty() {
                 return report(Outcome::Refused(part_way(&left)));
             }
         }
         return report(Outcome::Behind(behind));
+    }
+
+    if behind == 0 {
+        return report(Outcome::UpToDate);
+    }
+    if at.ahead > 0 {
+        return report(Outcome::Skipped(Skip::Diverged));
     }
 
     // Cleanliness is checked again here rather than before the fetch: the fetch
@@ -539,20 +555,30 @@ fn gate(repo: &Repository) -> Arc<Mutex<()>> {
 }
 
 /// Reasons to leave a repository alone before touching the network at all.
-fn disqualify(repo: &Repository) -> Option<Skip> {
+///
+/// Which reasons depends on what the pass is for. A fetch needs a remote and
+/// nothing else: it does not care that HEAD is detached, that a rebase is
+/// under way or that there are no commits yet, and it disturbs none of them.
+/// Those are reasons not to *update*. They used to be applied to every pass,
+/// so the pass called "fetch only" never fetched such a repository at all,
+/// and its `origin/*` went stale for as long as the rebase took.
+///
+/// A bare repository is left out of both. A mirror's fetch writes straight
+/// into its branches, which is more than "fetch" means anywhere else here.
+fn disqualify(repo: &Repository, updating: bool) -> Option<Skip> {
     if repo.is_bare() {
         return Some(Skip::Bare);
     }
-    if repo.state() != RepositoryState::Clean {
-        return Some(Skip::Busy);
-    }
-    match repo.head() {
-        Err(err) if err.code() == git2::ErrorCode::UnbornBranch => return Some(Skip::Unborn),
-        Err(_) => return Some(Skip::Unborn),
-        Ok(_) => {}
-    }
-    if repo.head_detached().unwrap_or(false) {
-        return Some(Skip::Detached);
+    if updating {
+        if repo.state() != RepositoryState::Clean {
+            return Some(Skip::Busy);
+        }
+        if repo.head().is_err() {
+            return Some(Skip::Unborn);
+        }
+        if repo.head_detached().unwrap_or(false) {
+            return Some(Skip::Detached);
+        }
     }
     if repo.remotes().map(|r| r.is_empty()).unwrap_or(true) {
         return Some(Skip::NoUpstream);
@@ -1338,6 +1364,137 @@ mod tests {
 
         git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
         assert_eq!(landed(&f.work, upstream), Ok(()));
+    }
+
+    // ---- fetching is not updating ----------------------------------------
+
+    fn fetch_only(dir: &Path, pass: Pass) -> Report {
+        refresh_one(dir, &options(false, pass))
+    }
+
+    /// Where the clone under test thinks the remote's `main` is.
+    fn origin_main(dir: &Path) -> String {
+        let (ok, out) = try_git(dir, &["rev-parse", "--verify", "-q", "origin/main"]);
+        if ok { out.trim().to_string() } else { String::new() }
+    }
+
+    /// Fetch-only is `f`, and the timer with updates off. It went through the
+    /// fast-forward's list of reasons to leave a repository alone before it
+    /// fetched, so a detached HEAD or a rebase in progress, neither of which
+    /// a fetch touches, was never fetched at all.
+    #[test]
+    fn fetch_only_fetches_where_an_update_would_have_nothing_to_move() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let f = fleet(&format!("rf-fetch-only-detached-{pass:?}"));
+            git(&f.work, &["checkout", "-q", "--detach"]);
+            let before = f.head();
+            f.remote_moves(1);
+            let report = fetch_only(&f.work, pass);
+            assert_eq!(origin_main(&f.work), f.remote_ref("refs/heads/main"), "{pass:?}");
+            assert!(report.fetched, "{pass:?}");
+            assert!(matches!(report.outcome, Outcome::UpToDate), "{pass:?}: {:?}", report.outcome);
+            assert_eq!(f.head(), before, "{pass:?}");
+
+            let f = fleet(&format!("rf-fetch-only-mid-merge-{pass:?}"));
+            git(&f.work, &["checkout", "-q", "-b", "side"]);
+            commit_file(&f.work, "README.md", "side\n", "side");
+            git(&f.work, &["checkout", "-q", "main"]);
+            commit_file(&f.work, "README.md", "main\n", "main");
+            let (merged, _) = try_git(&f.work, &["merge", "side"]);
+            assert!(!merged, "the fixture needs a conflicted merge in progress");
+            let before = f.head();
+            f.remote_moves(1);
+            let report = fetch_only(&f.work, pass);
+            assert_eq!(origin_main(&f.work), f.remote_ref("refs/heads/main"), "{pass:?}");
+            assert!(report.fetched, "{pass:?}");
+            assert!(matches!(report.outcome, Outcome::Behind(1)), "{pass:?}: {:?}", report.outcome);
+            assert_eq!(f.head(), before, "{pass:?}");
+            assert!(f.work.join(".git/MERGE_HEAD").exists(), "{pass:?}: the merge was disturbed");
+
+            // No commits yet, and a remote to fetch from.
+            let f = fleet(&format!("rf-fetch-only-unborn-{pass:?}"));
+            let empty = f.root.join("empty");
+            std::fs::create_dir_all(&empty).unwrap();
+            git(&empty, &["init", "-q", "-b", "main"]);
+            git(&empty, &["remote", "add", "origin", f.remote.to_str().unwrap()]);
+            let report = fetch_only(&empty, pass);
+            assert_eq!(origin_main(&empty), f.remote_ref("refs/heads/main"), "{pass:?}");
+            assert!(report.fetched, "{pass:?}");
+            assert!(matches!(report.outcome, Outcome::UpToDate), "{pass:?}: {:?}", report.outcome);
+        }
+    }
+
+    /// And after the fetch it reported the fast-forward's refusals: "left
+    /// alone: has unpushed commits" about a repository it had just fetched.
+    #[test]
+    fn fetch_only_reports_the_fetch_and_not_why_an_update_would_not_happen() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let f = fleet(&format!("rf-fetch-only-diverged-{pass:?}"));
+            commit_file(&f.work, "mine.txt", "mine\n", "local work");
+            let before = f.head();
+            f.remote_moves(2);
+            let report = fetch_only(&f.work, pass);
+            assert!(matches!(report.outcome, Outcome::Behind(2)), "{pass:?}: {:?}", report.outcome);
+            assert!(report.fetched, "{pass:?}");
+            assert_eq!(f.head(), before, "{pass:?}");
+
+            // A branch that tracks nothing: fetched, and nothing to count.
+            let f = fleet(&format!("rf-fetch-only-no-upstream-{pass:?}"));
+            git(&f.work, &["checkout", "-q", "-b", "local-only"]);
+            f.remote_moves(1);
+            let report = fetch_only(&f.work, pass);
+            assert_eq!(origin_main(&f.work), f.remote_ref("refs/heads/main"), "{pass:?}");
+            assert!(matches!(report.outcome, Outcome::UpToDate), "{pass:?}: {:?}", report.outcome);
+            assert!(report.fetched, "{pass:?}");
+        }
+    }
+
+    /// What cannot be fetched is still not fetched, and with updates on
+    /// nothing has changed: the same repositories are left alone, before the
+    /// network is touched.
+    #[test]
+    fn what_cannot_be_fetched_is_left_alone_and_an_updating_pass_is_as_it_was() {
+        let _guard = isolate();
+
+        let f = fleet("rf-fetch-only-impossible");
+        let report = fetch_only(&f.remote, Pass::Fleet);
+        assert!(matches!(report.outcome, Outcome::Skipped(Skip::Bare)), "{:?}", report.outcome);
+        assert!(!report.fetched);
+        let alone = f.root.join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        git(&alone, &["init", "-q", "-b", "main"]);
+        commit_file(&alone, "README.md", "one\n", "first");
+        let report = fetch_only(&alone, Pass::Fleet);
+        assert!(matches!(report.outcome, Outcome::Skipped(Skip::NoUpstream)), "{:?}", report.outcome);
+        assert!(!report.fetched);
+
+        for pass in [Pass::Fleet, Pass::One] {
+            let f = fleet(&format!("rf-updating-detached-{pass:?}"));
+            git(&f.work, &["checkout", "-q", "--detach"]);
+            let seen = origin_main(&f.work);
+            f.remote_moves(1);
+            let report = refresh_one(&f.work, &options(true, pass));
+            assert!(
+                matches!(report.outcome, Outcome::Skipped(Skip::Detached)),
+                "{pass:?}: {:?}",
+                report.outcome
+            );
+            assert!(!report.fetched, "{pass:?}");
+            assert_eq!(origin_main(&f.work), seen, "{pass:?}");
+
+            let f = fleet(&format!("rf-updating-diverged-{pass:?}"));
+            commit_file(&f.work, "mine.txt", "mine\n", "local work");
+            f.remote_moves(1);
+            let report = refresh_one(&f.work, &options(true, pass));
+            assert!(
+                matches!(report.outcome, Outcome::Skipped(Skip::Diverged)),
+                "{pass:?}: {:?}",
+                report.outcome
+            );
+            assert!(report.fetched, "{pass:?}");
+        }
     }
 
     // ---- an update that stops part-way -----------------------------------
