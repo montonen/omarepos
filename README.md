@@ -53,10 +53,34 @@ sudo pacman -S --needed gtk4 libadwaita libgit2 git rust base-devel
 with a bare remote beside it and a home directory of its own, and touches
 nothing else on the machine.
 
-A debug build started with `OMAREPOS_DUMP=<file>` gains two window actions for
-checking a page from a script: `dump` writes what is on screen to that file as
-text, with where the keyboard is, and `press` clicks a button by what it says.
-`src/ui/debug.rs` has the details. A release build has neither.
+A panic inside a GTK callback ends the program, and most of what a window
+does cannot be reached by a unit test. So there is a second kind of test, a
+walk:
+
+```bash
+scripts/walk/walk.sh
+```
+
+It builds fixture repositories under `target/walk` (one of each kind: ahead,
+behind, no commits yet, merges and long branch names, a detached HEAD, a
+conflict, an index nothing can read, odd file names, a binary, a NUL late in
+a text file), starts a debug build on a hidden Hyprland workspace with a
+scratch configuration, and then uses every page and every action once: the
+grid and its filter, every commit and file of every repository, staging, a
+commit and a push, the commit search, contributions, tags and the tag editor,
+light, broken and missing themes, Settings row by row, and the config and tag
+files broken and mended under the running window. After each of some five
+hundred steps it runs the drawing code and checks that the program is still
+there; it exits non-zero, with the panic, if it is not. `walk.sh quick` does
+one repository instead of eight. It needs Hyprland, `python3`, `gdbus` and
+`busctl`, takes about ten minutes, puts nothing on screen and touches nothing
+of yours: everything goes over D-Bus to actions that only a debug build has,
+and only when it is started with `OMAREPOS_DUMP=<file>` (`src/ui/debug.rs`).
+`scripts/walk/drive.py` is the same thing by hand: `dump` what is on screen
+as text, `press` a button by what it says, hand the app a `key`, set a
+settings `row`, `pick` a list row, `paint`. A release build has none of it.
+
+Run the walk after changing anything a person can click.
 
 ## Install
 
@@ -794,7 +818,8 @@ counts.
 | `src/ui/graph.rs` | Commit graph page and its cairo row renderer |
 | `src/ui/commit.rs` | The pane under the graph: changed files, diff, stage and commit |
 | `src/ui/shortcuts.rs` | The keyboard, written down |
-| `src/ui/debug.rs` | Debug builds only: dump the window as text, press a button by name |
+| `src/ui/debug.rs` | Debug builds only: what `scripts/walk` drives the window through |
+| `scripts/walk/` | The walk: fixtures, the driver, and the script that uses everything once |
 | `src/ui/stats.rs` | Contributions page |
 | `src/ui/search.rs` | Commit search page |
 | `src/ui/dialogs.rs` | Settings dialog and the tag editor |
