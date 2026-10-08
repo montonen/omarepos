@@ -629,10 +629,118 @@ fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> Option<(usize, us
     } else {
         Some(commit.parent(0).ok()?.tree().ok()?)
     };
-    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None).ok()?;
+
+    // Left to itself libgit2 opens every directory of both trees and compares
+    // them file by file, so a commit that touched one file cost as much as the
+    // repository has files: milliseconds each on a large tree, for every
+    // commit in the window. The files that differ are found first, by going
+    // down only where two directories disagree, and libgit2 is given the list.
+    // Its iterators then leave every other directory shut, and the diff it
+    // makes of what is left is the same diff.
+    let mut opts = git2::DiffOptions::new();
+    if let Some(parent) = &parent_tree {
+        let mut changed = Changed::default();
+        changed.below(repo, Some(parent), Some(&tree), &mut Vec::new()).ok()?;
+        if changed.paths.is_empty() {
+            return Some((0, 0, 0));
+        }
+        if !changed.submodule {
+            opts.disable_pathspec_match(true);
+            for path in changed.paths {
+                opts.pathspec(path);
+            }
+        }
+    }
+    let mut diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
+        .ok()?;
     find_renames(&mut diff).ok()?;
     let stats = diff.stats().ok()?;
     Some((stats.insertions(), stats.deletions(), stats.files_changed()))
+}
+
+/// What differs between two trees, for [`diff_stats`] to point libgit2 at.
+#[derive(Default)]
+struct Changed {
+    /// The full path of each file and link that differs. Never a directory's:
+    /// libgit2 walks this list in step with the tree, and a directory's bare
+    /// name is not where the tree's order puts the directory. `foo-bar/x`
+    /// comes before `foo/y` in a tree, and `foo` sorts before both.
+    paths: Vec<Vec<u8>>,
+    /// A submodule is among them. libgit2 takes the list as it stands for
+    /// files and links, and reads each entry as a pattern for anything else:
+    /// a submodule at `!vendor` would be a negation, and missed. A commit that
+    /// moves one is rare enough to be diffed the long way.
+    submodule: bool,
+}
+
+impl Changed {
+    /// Compare two directories, either of which may not be there, going down
+    /// into the directories inside them only where the two differ.
+    fn below(
+        &mut self,
+        repo: &Repository,
+        old: Option<&git2::Tree<'_>>,
+        new: Option<&git2::Tree<'_>>,
+        prefix: &mut Vec<u8>,
+    ) -> Result<(), git2::Error> {
+        if let Some(new) = new {
+            for entry in new.iter() {
+                let before = old.and_then(|tree| tree.get_name_bytes(entry.name_bytes()));
+                let same = before.as_ref().is_some_and(|before| {
+                    before.id() == entry.id() && before.filemode_raw() == entry.filemode_raw()
+                });
+                if !same {
+                    self.named(repo, before.as_ref(), Some(&entry), prefix)?;
+                }
+            }
+        }
+        if let Some(old) = old {
+            for entry in old.iter() {
+                if new.is_none_or(|tree| tree.get_name_bytes(entry.name_bytes()).is_none()) {
+                    self.named(repo, Some(&entry), None, prefix)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One name that is not the same thing on both sides. Where either side is
+    /// a file its path goes on the list, and where either is a directory it is
+    /// gone into, against the other side's if that is a directory too and
+    /// against nothing if not.
+    fn named(
+        &mut self,
+        repo: &Repository,
+        old: Option<&git2::TreeEntry<'_>>,
+        new: Option<&git2::TreeEntry<'_>>,
+        prefix: &mut Vec<u8>,
+    ) -> Result<(), git2::Error> {
+        let Some(name) = new.or(old).map(|entry| entry.name_bytes()) else { return Ok(()) };
+        let length = prefix.len();
+        prefix.extend_from_slice(name);
+
+        let (mut old_dir, mut new_dir) = (None, None);
+        for (entry, dir) in [(old, &mut old_dir), (new, &mut new_dir)] {
+            match entry.map(|entry| (entry, entry.kind())) {
+                Some((entry, Some(git2::ObjectType::Tree))) => *dir = Some(repo.find_tree(entry.id())?),
+                Some((_, kind)) => {
+                    self.submodule |= kind == Some(git2::ObjectType::Commit);
+                    if self.paths.last() != Some(&*prefix) {
+                        self.paths.push(prefix.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+        if old_dir.is_some() || new_dir.is_some() {
+            prefix.push(b'/');
+            self.below(repo, old_dir.as_ref(), new_dir.as_ref(), prefix)?;
+        }
+
+        prefix.truncate(length);
+        Ok(())
+    }
 }
 
 /// Past this many pairs of a removed file and an added one, only files moved
@@ -1282,5 +1390,178 @@ mod tests {
         let result = contributions(&[&dir]);
         assert_eq!(listed(&result, "move the lot").lines, Some((0, 0)));
         assert_eq!(totals(&result), git_totals(&dir, &["HEAD"]));
+    }
+
+    // ---- what libgit2 is asked to compare -------------------------------------
+
+    /// What `diff_stats` did before it told libgit2 where to look: the same
+    /// diff over the whole of both trees.
+    fn whole_tree_stats(repo: &Repository, commit: &git2::Commit<'_>) -> (usize, usize, usize) {
+        let tree = commit.tree().unwrap();
+        let parent = commit.parent(0).ok().map(|parent| parent.tree().unwrap());
+        let mut diff = repo.diff_tree_to_tree(parent.as_ref(), Some(&tree), None).unwrap();
+        find_renames(&mut diff).unwrap();
+        let stats = diff.stats().unwrap();
+        (stats.insertions(), stats.deletions(), stats.files_changed())
+    }
+
+    /// Hold every commit reachable from HEAD to the whole-tree diff, and say
+    /// how many file changes that was.
+    fn same_as_the_whole_tree(dir: &Path) -> (usize, usize) {
+        let repo = Repository::open(dir).unwrap();
+        let mut walk = repo.revwalk().unwrap();
+        walk.push_head().unwrap();
+        let (mut commits, mut files) = (0, 0);
+        for oid in walk {
+            let commit = repo.find_commit(oid.unwrap()).unwrap();
+            let whole = whole_tree_stats(&repo, &commit);
+            assert_eq!(diff_stats(&repo, &commit), Some(whole), "{:?}", commit.summary());
+            commits += 1;
+            files += whole.2;
+        }
+        (commits, files)
+    }
+
+    /// Every shape a change to a tree can take, under names picked to sort
+    /// awkwardly beside each other and to mean something to a pattern. The
+    /// list of paths handed to libgit2 comes from a walk written here, and a
+    /// path missing from it is a change that silently is not counted.
+    #[test]
+    fn telling_libgit2_where_to_look_does_not_change_what_it_finds() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let _guard = isolate();
+        let dir = scratch("stats-paths");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let put = |file: &str| write(&dir.join(file), &text(file, 12));
+        let commit = |message: &str| {
+            git(&dir, &["add", "-A", "."]);
+            git(&dir, &["commit", "-q", "--allow-empty", "-m", message]);
+        };
+        let awkward = ["!bang", "sp ace", "back\\slash", "ünï.txt", "[b]", "st*r", "#hash", "tab\there"];
+
+        for file in ["foo", "foo-bar/x", "foo-bar/y", "foo.txt", "foo+", "foo0", "dir/a"] {
+            put(file);
+        }
+        for file in ["dir/sub/b", "dir/sub/c", "z/deep/er/one", "z/deep/er/two", "z/top"] {
+            put(file);
+        }
+        awkward.iter().for_each(|file| put(file));
+        commit("base");
+
+        write(&dir.join("dir/sub/b"), &text("b again", 14));
+        commit("edit a file two folders down");
+
+        put("dir/sub/new");
+        std::fs::remove_file(dir.join("dir/a")).unwrap();
+        commit("add one and remove one");
+
+        std::fs::remove_file(dir.join("foo")).unwrap();
+        put("foo/inner");
+        put("foo/other");
+        commit("a file becomes a folder");
+
+        std::fs::remove_dir_all(dir.join("foo-bar")).unwrap();
+        put("foo-bar");
+        commit("a folder becomes a file");
+
+        std::fs::set_permissions(dir.join("foo.txt"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        commit("only the mode");
+
+        symlink("foo.txt", dir.join("link")).unwrap();
+        commit("a link");
+        std::fs::remove_file(dir.join("link")).unwrap();
+        symlink("foo+", dir.join("link")).unwrap();
+        commit("the link points elsewhere");
+        std::fs::remove_file(dir.join("foo0")).unwrap();
+        symlink("foo.txt", dir.join("foo0")).unwrap();
+        commit("a file becomes a link");
+
+        git(&dir, &["mv", "dir", "moved"]);
+        commit("move a folder");
+        git(&dir, &["mv", "moved/sub/c", "moved/sub/sea"]);
+        write(&dir.join("moved/sub/sea"), &text("dir/sub/c", 12).replace("line 5\n", "line five\n"));
+        commit("rename a file and touch it");
+
+        std::fs::remove_dir_all(dir.join("z/deep")).unwrap();
+        commit("remove a tree and leave its neighbour");
+        put("n/e/w/t/r/e/e/leaf");
+        commit("a tree seven folders deep");
+        commit("nothing at all");
+
+        for file in awkward {
+            write(&dir.join(file), &text(file, 13));
+        }
+        write(&dir.join("foo/inner"), &text("inner again", 5));
+        write(&dir.join("foo-bar"), &text("bar again", 5));
+        write(&dir.join("foo.txt"), &text("txt again", 5));
+        commit("the awkward names, all at once");
+
+        // A submodule is a line in a tree that names a commit somewhere else.
+        // Nothing has to be checked out for it to be there.
+        let pin = |path: &str, at: &str, message: &str| {
+            let id = git(&dir, &["rev-parse", at]);
+            git(&dir, &["update-index", "--add", "--cacheinfo", &format!("160000,{id},{path}")]);
+            git(&dir, &["commit", "-q", "-m", message]);
+        };
+        pin("sub", "HEAD", "a submodule");
+        pin("!sub", "HEAD~1", "a submodule a pattern would read as a negation");
+        pin("sub", "HEAD~3", "the submodule moves");
+        git(&dir, &["rm", "-q", "--cached", "sub", "!sub"]);
+        git(&dir, &["commit", "-q", "-m", "the submodules go"]);
+
+        assert_eq!(same_as_the_whole_tree(&dir).0, 19);
+        assert_eq!(totals(&contributions(&[&dir])), git_totals(&dir, &["HEAD"]));
+    }
+
+    /// The same over a history nobody chose: two hundred commits of files
+    /// written, removed and turned into folders and back, a few names deep,
+    /// from eight names that are each other's prefixes. The sequence is fixed,
+    /// so what fails here fails every time.
+    #[test]
+    fn nor_over_a_history_of_changes_picked_at_random() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = isolate();
+        let dir = scratch("stats-paths-random");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let names = ["a", "a-b", "a.b", "a0", "a+", "ab", "a b", "b"];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut below = |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+
+        for round in 0..200 {
+            for _ in 0..1 + below(4) {
+                let path: PathBuf = (0..1 + below(3)).map(|_| names[below(names.len())]).collect();
+                let full = dir.join(&path);
+                // Whatever is in the way goes: a file where a folder has to
+                // be, a folder where the file is going.
+                for above in full.ancestors().skip(1).filter(|above| above.starts_with(&dir)) {
+                    if above.is_file() {
+                        std::fs::remove_file(above).unwrap();
+                    }
+                }
+                if full.is_dir() {
+                    std::fs::remove_dir_all(&full).unwrap();
+                } else if full.is_file() && below(3) == 0 {
+                    std::fs::remove_file(&full).unwrap();
+                    continue;
+                }
+                write(&full, &text(&format!("round {round}"), 1 + below(6)));
+                if below(6) == 0 {
+                    std::fs::set_permissions(&full, std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+            }
+            git(&dir, &["add", "-A", "."]);
+            git(&dir, &["commit", "-q", "--allow-empty", "-m", &format!("round {round}")]);
+        }
+
+        let (commits, files) = same_as_the_whole_tree(&dir);
+        assert_eq!(commits, 200);
+        assert!(files > 400, "the history has to have had something in it: {files}");
     }
 }
