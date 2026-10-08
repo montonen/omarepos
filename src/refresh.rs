@@ -8,10 +8,11 @@
 //! applies unchanged, and a repository they cannot fetch by hand is one
 //! omarepos does not pretend it can fetch either.
 //!
-//! What this will never do: merge, rebase, stash, reset, force anything, touch
-//! a dirty working tree, or move a branch that has commits of its own. The only
-//! write it performs is a fast-forward of the checked-out branch, and `git
-//! merge --ff-only` refuses anything else even if the checks here were wrong.
+//! What this will never do: merge, rebase, stash, reset, force anything, update
+//! under uncommitted changes unless asked for that one repository, or move a
+//! branch that has commits of its own. The only write it performs is a
+//! fast-forward of the checked-out branch, and `git merge --ff-only` refuses
+//! anything else even if the checks here were wrong.
 //!
 //! Three things about git had to be dealt with for that paragraph to be true,
 //! and all three were found the hard way:
@@ -202,6 +203,8 @@ impl Cancel {
 pub struct Options {
     pub fast_forward: bool,
     pub max_parallel: usize,
+    /// How long a fetch may go without anything arriving before it is given
+    /// up on. Not how long it may take: see [`FETCH_PATIENCE`].
     pub timeout: Duration,
     pub pass: Pass,
     pub cancel: Cancel,
@@ -361,10 +364,10 @@ fn fast_forward(repo: &Repository, branch: &str) -> Result<Vec<String>, String> 
         ));
     }
     args.extend(FAST_FORWARD.iter().map(|arg| arg.to_string()));
+    // The last word on it wins, as it does for git.
     let signed = own
         .split_whitespace()
-        .filter(|option| matches!(*option, "--verify-signatures" | "--no-verify-signatures"))
-        .next_back();
+        .rfind(|option| matches!(*option, "--verify-signatures" | "--no-verify-signatures"));
     if signed == Some("--verify-signatures") {
         args.push("--verify-signatures".to_string());
     }
@@ -735,10 +738,9 @@ fn landed(path: &Path, meant: git2::Oid) -> Result<(), String> {
     match now {
         Some(at) if at.local == meant || at.local == at.upstream => Ok(()),
         Some(at) => Err(format!(
-            "git reported the update as done, but the branch is at {} and its upstream at {}. \
-             Something in this repository's merge settings made `git merge --ff-only` do \
-             something other than fast-forward: look at `git status` and `git log -3` before \
-             anything else.",
+            "git reported the update as done, but the branch is at {} and its upstream at {}, \
+             which is not what a fast-forward leaves. Look at `git status` and `git log -3` \
+             before anything else.",
             short(at.local),
             short(at.upstream)
         )),
@@ -1701,7 +1703,7 @@ mod tests {
         git(&alone, &["init", "-q", "-b", "main"]);
         commit_file(&alone, "README.md", "one\n", "first");
         let report = fetch_only(&alone, Pass::Fleet);
-        assert!(matches!(report.outcome, Outcome::Skipped(Skip::NoUpstream)), "{:?}", report.outcome);
+        assert!(matches!(report.outcome, Outcome::Skipped(Skip::NoUpstream)), "{report:?}");
         assert!(!report.fetched);
 
         for pass in [Pass::Fleet, Pass::One] {
@@ -1942,7 +1944,8 @@ mod tests {
         // On the timer with updates on, on the timer with only fetching on,
         // and when the user fetches it by hand.
         let mut said = Vec::new();
-        for (fast_forward, pass) in [(true, Pass::Fleet), (false, Pass::Fleet), (false, Pass::One)] {
+        let later = [(true, Pass::Fleet), (false, Pass::Fleet), (false, Pass::One)];
+        for (fast_forward, pass) in later {
             let got = refresh_one(&f.work, &options(fast_forward, pass)).outcome;
             let Outcome::Refused(why) = got else { panic!("{fast_forward} {pass:?}: {got:?}") };
             assert!(names_what_was_left(&why), "{fast_forward} {pass:?}: {why}");
@@ -1965,6 +1968,37 @@ mod tests {
         let got = fleet_pass(&f);
         assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
         assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// An update that only adds files leaves nothing "modified" behind it,
+    /// only files git calls untracked, and the tree does not even look dirty.
+    /// The next attempt is then refused over a file "in the way" that the
+    /// attempt before it put there.
+    #[test]
+    fn a_file_an_update_added_before_it_stopped_is_recognised_as_its_own() {
+        let _guard = isolate();
+        let f = fleet("rf-part-way-added");
+        f.remote_commits("somewhere for the docs", |seed| {
+            write(&seed.join("docs/index.md"), "index\n");
+        });
+        assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(1)));
+        let before = f.head();
+        f.remote_commits("two new files", |seed| {
+            write(&seed.join("a/new.txt"), "new\n");
+            write(&seed.join("docs/new.md"), "new\n");
+        });
+        let locked = ReadOnly::new(f.work.join("docs"));
+        let first = fleet_pass(&f);
+        drop(locked);
+        let Outcome::Refused(why) = &first else { panic!("{first:?}") };
+        assert!(why.contains("docs/new.md"), "git's own reason: {why}");
+        assert!(why.contains("a/new.txt holds the incoming version"), "{why}");
+
+        let got = fleet_pass(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("would be overwritten"), "git's own reason: {why}");
+        assert!(why.contains("a/new.txt holds the incoming version"), "{why}");
+        assert_eq!(f.head(), before);
     }
 
     /// Changes that are the user's own are still theirs, and still reported

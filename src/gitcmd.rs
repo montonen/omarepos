@@ -531,19 +531,21 @@ mod tests {
     // ---- given up on for silence, not for taking long ----------------------
 
     /// Something that takes two seconds and says so five times a second.
-    const BUSY: &str = "i=0; while [ $i -lt 10 ]; do echo 'still going' >&2; sleep 0.2; i=$((i+1)); done";
+    const BUSY: &str =
+        "i=0; while [ $i -lt 10 ]; do echo 'still going' >&2; sleep 0.2; i=$((i+1)); done";
 
     #[test]
     fn a_command_that_keeps_talking_outlasts_the_limit_on_silence() {
         let _guard = isolate();
-        let dir = repo("gitcmd-talking");
+        let dir = repo("rf-gitcmd-talking");
         hook(&dir, "pre-commit", BUSY);
         stage_something(&dir);
         let second = Duration::from_secs(1);
 
         // The limit `run` applies is on the whole command, whatever it is
         // doing, and this is what it did to a fetch that was still arriving.
-        assert_eq!(run(&dir, &["commit", "-m", "second"], second), Err("timed out after 1s".into()));
+        let cut_off = run(&dir, &["commit", "-m", "second"], second);
+        assert_eq!(cut_off, Err("timed out after 1s".into()));
         assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first");
 
         let got = transfer(&dir, &["commit", "-m", "second"], second, PATIENT);
@@ -554,7 +556,7 @@ mod tests {
     #[test]
     fn a_command_that_goes_quiet_is_given_up_on() {
         let _guard = isolate();
-        let dir = repo("gitcmd-quiet");
+        let dir = repo("rf-gitcmd-quiet");
         hook(&dir, "pre-commit", "echo 'starting' >&2\nsleep 12");
         stage_something(&dir);
 
@@ -570,11 +572,12 @@ mod tests {
     #[test]
     fn a_command_that_keeps_talking_still_has_a_ceiling() {
         let _guard = isolate();
-        let dir = repo("gitcmd-ceiling");
+        let dir = repo("rf-gitcmd-ceiling");
         hook(&dir, "pre-commit", BUSY);
         stage_something(&dir);
 
-        let got = transfer_fenced(&dir, &["commit", "-m", "second"], PATIENT, Duration::from_secs(1));
+        let ceiling = Duration::from_secs(1);
+        let got = transfer_fenced(&dir, &["commit", "-m", "second"], PATIENT, ceiling);
 
         assert_eq!(got, Err("timed out after 1s".into()));
         assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first");
@@ -677,7 +680,7 @@ mod tests {
     #[test]
     fn a_pass_nobody_is_watching_opens_no_password_dialog() {
         let _guard = isolate();
-        let (dir, askpass, log) = needs_a_password("gitcmd-askpass-fenced");
+        let (dir, askpass, log) = needs_a_password("rf-gitcmd-askpass-fenced");
 
         // Named by the repository itself, which needs no environment at all.
         git(&dir, &["config", "core.askPass", askpass.to_str().unwrap()]);
@@ -701,7 +704,7 @@ mod tests {
     #[test]
     fn asked_for_one_repository_the_users_askpass_is_still_theirs() {
         let _guard = isolate();
-        let (dir, askpass, log) = needs_a_password("gitcmd-askpass-attended");
+        let (dir, askpass, log) = needs_a_password("rf-gitcmd-askpass-attended");
         // SAFETY: under the isolation lock, and taken out again below.
         unsafe { std::env::set_var("GIT_ASKPASS", &askpass) };
         let got = run(&dir, &["fetch", "--quiet"], PATIENT);
@@ -715,7 +718,7 @@ mod tests {
     #[test]
     fn an_exported_ssh_command_is_kept_and_batched_only_when_unattended() {
         let _guard = isolate();
-        let dir = ssh_repo("gitcmd-ssh-exported");
+        let dir = ssh_repo("rf-gitcmd-ssh-exported");
         let (ssh, log) = recording(&dir, "ssh");
         let exported = format!("{} -i id_session", ssh.display());
 
