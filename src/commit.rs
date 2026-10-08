@@ -830,7 +830,8 @@ pub struct PushPlan {
     pub remote: String,
     /// The ref on the remote, in full, e.g. `refs/heads/main`.
     pub destination: String,
-    /// The branch has never been pushed. Publishing is a different act from
+    /// The branch has never been pushed: it has no upstream, and the remote
+    /// has no branch of its name. Publishing is a different act from
     /// pushing — it is what makes the branch visible — and is named
     /// differently in the UI. It is the only time an upstream is set.
     pub publish: bool,
@@ -877,6 +878,19 @@ pub fn push_plan(repo: &Repository) -> Result<PushPlan, String> {
     let (remote, destination, publish) = match tracked {
         Some((remote, merge)) => (remote, merge, false),
         None => match crate::graph::only_remote(repo) {
+            // No upstream is not the same as never published. A branch cut
+            // with `--no-track` from the remote's, or pushed once without
+            // `-u`, has no upstream either, and the remote has a branch of
+            // its name: "Publish" there lands the local commits on a branch
+            // other people may already be using, under a word that says a
+            // new one is being made.
+            Some(remote) if repo.find_reference(&format!("refs/remotes/{remote}/{branch}")).is_ok() => {
+                return Err(format!(
+                    "{remote}/{branch} already exists and {branch} does not track it, so this \
+                     would not be publishing a new branch. Set the upstream from a terminal: \
+                     git branch --set-upstream-to={remote}/{branch} {branch}"
+                ));
+            }
             Some(remote) => (remote, refname.clone(), true),
             None => {
                 return Err(
@@ -907,6 +921,24 @@ pub fn push_plan(repo: &Repository) -> Result<PushPlan, String> {
         return Err(format!(
             "{branch} tracks {remote} {destination}, which omarepos will not push to. \
              Push it from a terminal."
+        ));
+    }
+    // An upstream that is configured and cannot be found. Either the branch
+    // was deleted on the remote and pruned here, which is how a merged pull
+    // request ends, or this clone does not fetch it (`--single-branch`, and
+    // so `--depth`). There is then nothing to count ahead and behind against,
+    // and a push would create the branch: for the first of those, a branch
+    // somebody deleted on purpose. Whether to bring it back is not a button.
+    let found = repo
+        .find_branch(&branch, git2::BranchType::Local)
+        .and_then(|local| local.upstream())
+        .is_ok();
+    if !publish && !found {
+        let gone = destination.trim_start_matches("refs/heads/");
+        return Err(format!(
+            "The upstream of {branch}, {remote}/{gone}, is gone: deleted on {remote}, or not \
+             fetched by this clone. A push would create it again, and that is for a terminal: \
+             git push -u {remote} {branch}"
         ));
     }
 
@@ -1982,6 +2014,68 @@ mod tests {
         assert!(why.contains("another name"), "{why}");
         assert!(why.contains("git push -u origin topic"), "it should say what to run: {why}");
         assert_eq!(f.remote_ref("refs/heads/main"), main_there);
+    }
+
+    /// The everyday end of a pull request: merged on the server, the branch
+    /// deleted there, and the clone prunes on fetch. The branch still names
+    /// its upstream; the upstream is not there to be found.
+    #[test]
+    fn a_branch_whose_upstream_was_deleted_is_not_offered_for_publishing() {
+        let _guard = isolate();
+        let f = fleet("cm-push-gone");
+        git(&f.work, &["checkout", "-q", "-b", "feature"]);
+        commit_file(&f.work, "feature.txt", "new\n", "a feature");
+        git(&f.work, &["push", "-q", "-u", "origin", "feature"]);
+        assert!(!plan(&f).unwrap().publish, "pushed and tracked: an ordinary push");
+
+        git(&f.remote, &["update-ref", "-d", "refs/heads/feature"]);
+        git(&f.work, &["fetch", "-q", "--prune"]);
+        assert!(git(&f.work, &["status", "-sb"]).contains("[gone]"), "git says so");
+
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("origin/feature") && why.contains("gone"), "{why}");
+        assert!(why.contains("git push -u origin feature"), "it should say what would bring it back: {why}");
+        assert_eq!(f.remote_ref("refs/heads/feature"), "");
+    }
+
+    /// `git clone --single-branch` fetches one branch and no other. A second
+    /// branch pushed from it tracks a branch this clone keeps no copy of.
+    #[test]
+    fn a_branch_this_clone_does_not_fetch_is_not_offered_for_publishing() {
+        let _guard = isolate();
+        let f = fleet("cm-push-single-branch");
+        let url = format!("file://{}", f.remote.display());
+        git(&f.root, &["clone", "-q", "--single-branch", &url, "single"]);
+        let single = f.root.join("single");
+        git(&single, &["checkout", "-q", "-b", "topic"]);
+        commit_file(&single, "topic.txt", "x\n", "topic work");
+        git(&single, &["push", "-q", "-u", "origin", "topic"]);
+        assert_eq!(git(&single, &["config", "branch.topic.merge"]), "refs/heads/topic");
+
+        let why = push_plan(&Repository::open(&single).unwrap()).unwrap_err();
+        assert!(why.contains("origin/topic"), "{why}");
+    }
+
+    /// `git switch -c develop --no-track origin/develop`, or a branch pushed
+    /// once without `-u`: no upstream is configured, and the remote has a
+    /// branch of this name all the same. "Publish" would land on it.
+    #[test]
+    fn a_branch_with_a_namesake_on_the_remote_is_not_published_over_it() {
+        let _guard = isolate();
+        let f = fleet("cm-push-namesake");
+        git(&f.seed, &["checkout", "-q", "-b", "develop"]);
+        commit_file(&f.seed, "shared.txt", "theirs\n", "shared work");
+        git(&f.seed, &["push", "-q", "-u", "origin", "develop"]);
+        let theirs = f.remote_ref("refs/heads/develop");
+        git(&f.work, &["fetch", "-q"]);
+        git(&f.work, &["checkout", "-q", "-b", "develop", "--no-track", "origin/develop"]);
+        commit_file(&f.work, "mine.txt", "mine\n", "two local commits");
+        assert!(try_git(&f.work, &["config", "branch.develop.merge"]).1.is_empty(), "no upstream is set");
+
+        let why = plan(&f).unwrap_err();
+        assert!(why.contains("origin/develop already exists"), "{why}");
+        assert!(why.contains("--set-upstream-to=origin/develop"), "{why}");
+        assert_eq!(f.remote_ref("refs/heads/develop"), theirs);
     }
 
     #[test]
