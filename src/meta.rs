@@ -122,6 +122,19 @@ pub fn is_one_tag(tag: &str) -> bool {
     parse_list(tag) == [tag]
 }
 
+/// A directory as written and as it resolves. The store holds resolved paths,
+/// because a scan resolves what it finds, and a configured root is held as the
+/// user wrote it; the two differ when a root is reached through a symlink.
+fn spellings(dir: &Path) -> Vec<PathBuf> {
+    let mut both = vec![dir.to_path_buf()];
+    if let Ok(real) = dir.canonicalize() {
+        if real != dir {
+            both.push(real);
+        }
+    }
+    both
+}
+
 impl Meta {
     pub fn load() -> Self {
         let path = path();
@@ -373,6 +386,74 @@ impl Meta {
             }
         }
         counts.into_values().collect()
+    }
+
+    /// The entries a removed source leaves behind: those nothing in `kept`
+    /// reaches any more, and those something still does.
+    ///
+    /// An entry is the source's when its path lies under it, or when the
+    /// source is on record as having tagged it. The record is what still
+    /// answers for a root on a disk that has since gone, whose path no longer
+    /// resolves to where its repositories were found.
+    fn left_behind(&self, gone: &Path, kept: &[PathBuf]) -> (Vec<String>, Vec<String>) {
+        let root = gone.display().to_string();
+        let gone = spellings(gone);
+        let kept: Vec<PathBuf> = kept.iter().flat_map(|dir| spellings(dir)).collect();
+        let mut orphaned = Vec::new();
+        let mut reached = Vec::new();
+        for (key, meta) in &self.repos {
+            let path = Path::new(key);
+            let theirs = gone.iter().any(|dir| path.starts_with(dir))
+                || meta.seeded_by.contains_key(&root);
+            if !theirs {
+                continue;
+            }
+            if kept.iter().any(|dir| path.starts_with(dir)) {
+                reached.push(key.clone());
+            } else {
+                orphaned.push(key.clone());
+            }
+        }
+        (orphaned, reached)
+    }
+
+    /// How many tagged repositories `forget_source` would forget outright,
+    /// for asking before it does.
+    pub fn tagged_only_under(&self, gone: &Path, kept: &[PathBuf]) -> usize {
+        let (orphaned, _) = self.left_behind(gone, kept);
+        orphaned
+            .iter()
+            .filter(|key| self.repos.get(*key).is_some_and(|meta| !meta.tags.is_empty()))
+            .count()
+    }
+
+    /// Forget what a scan root, or an individually listed repository, brought
+    /// in, once the user has removed it in Settings. `kept` is every source
+    /// that is still configured. Returns how many entries changed.
+    ///
+    /// Removing a root used to leave the path and tags of every repository
+    /// under it in the file for good: no scan visits them again, so nothing
+    /// retires a tag, and `prune` keeps whatever is still on disk or went
+    /// along with its whole directory. A repository only the removed source
+    /// reached is forgotten whole, hand-made tags included, which is what
+    /// "stop looking here" has to mean for the file to stop naming it. One
+    /// that something else still reaches keeps its entry and loses what the
+    /// removed root applied, as when the root's tag is cleared.
+    ///
+    /// Deliberately not done from a scan, by dropping whatever no configured
+    /// root contains: `--root` and a config that failed to parse both scan
+    /// with roots that are not the user's, and would take every tag with them.
+    pub fn forget_source(&mut self, gone: &Path, kept: &[PathBuf]) -> usize {
+        let (orphaned, reached) = self.left_behind(gone, kept);
+        let root = gone.display().to_string();
+        let mut changed = orphaned.len();
+        for key in &orphaned {
+            self.repos.remove(key);
+        }
+        for key in &reached {
+            changed += usize::from(self.apply_root_tag(Path::new(key), &root, None));
+        }
+        changed
     }
 
     /// Every tag in the store, with how many entries carry it. That is not
@@ -680,6 +761,89 @@ mod tests {
         assert!(meta.tags_among(std::iter::empty()).is_empty());
 
         assert_eq!(meta.all_tags(), counted(&[("acme", 3), ("former", 1), ("rust", 1)]));
+    }
+
+    fn stored(meta: &Meta) -> Vec<&str> {
+        meta.repos.keys().map(String::as_str).collect()
+    }
+
+    /// "Remove this root" took the root out of the config and left in
+    /// repos.toml the path and the tags of every repository it had brought
+    /// in, for good: nothing scans them again, and `prune` keeps anything
+    /// that is still on disk, or that went along with its whole directory.
+    #[test]
+    fn removing_a_root_forgets_what_only_it_reached() {
+        let mut meta = Meta::default();
+        meta.apply_root_tag(&repo("api"), ROOT, Some("acme"));
+        meta.apply_root_tag(&repo("web"), ROOT, Some("acme"));
+        // Tagged by hand, and nothing from the root.
+        meta.set_tags(&repo("notes"), vec!["mine".to_string()]);
+        // Only a record: the root's tag was deleted here.
+        meta.apply_root_tag(&repo("infra"), ROOT, Some("acme"));
+        meta.set_tags(&repo("infra"), Vec::new());
+        // Under another root, and under a folder whose name merely starts
+        // the same way.
+        meta.set_tags(Path::new("/home/me/code/app"), vec!["acme".to_string()]);
+        meta.set_tags(Path::new("/home/me/work/acme-old/app"), vec!["acme".to_string()]);
+
+        let kept = [PathBuf::from("/home/me/code")];
+        assert_eq!(meta.tagged_only_under(Path::new(ROOT), &kept), 3);
+        assert_eq!(meta.forget_source(Path::new(ROOT), &kept), 4);
+        assert_eq!(stored(&meta), ["/home/me/code/app", "/home/me/work/acme-old/app"]);
+        assert_eq!(meta.forget_source(Path::new(ROOT), &kept), 0, "and once is enough");
+    }
+
+    /// A repository something else still reaches keeps its entry and its
+    /// hand-made tags. What the removed root applied goes with the root, as
+    /// it does when the root's tag is cleared: nothing would retire it later.
+    #[test]
+    fn removing_a_root_inside_another_takes_only_its_own_tag_along() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.apply_root_tag(&api, ROOT, Some("acme"));
+        meta.set_tags(&api, vec!["acme".to_string(), "mine".to_string()]);
+
+        let kept = [PathBuf::from("/home/me/work")];
+        assert_eq!(meta.tagged_only_under(Path::new(ROOT), &kept), 0);
+        assert_eq!(meta.forget_source(Path::new(ROOT), &kept), 1);
+        assert_eq!(meta.tags_for(&api), ["mine"]);
+        assert!(meta.repos[&Meta::key(&api)].seeded_by.is_empty());
+
+        // An individually listed repository is a source too: the one under
+        // the removed root that is also listed by itself stays.
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["mine".to_string()]);
+        meta.set_tags(&repo("web"), vec!["mine".to_string()]);
+        assert_eq!(meta.forget_source(Path::new(ROOT), std::slice::from_ref(&api)), 1);
+        assert_eq!(stored(&meta), ["/home/me/work/acme/api"]);
+        // ...until it is removed in its turn.
+        assert_eq!(meta.forget_source(&api, &[]), 1);
+        assert!(meta.repos.is_empty());
+    }
+
+    /// The store holds resolved paths, because a scan resolves what it finds;
+    /// a root is held as the user wrote it. Comparing the two as text would
+    /// forget nothing under a root reached through a symlink.
+    #[test]
+    fn a_root_reached_through_a_symlink_is_forgotten_all_the_same() {
+        let _guard = isolate();
+        let base = scratch("meta-forget-symlink");
+        std::fs::create_dir_all(base.join("disk/acme/api")).unwrap();
+        std::os::unix::fs::symlink(base.join("disk/acme"), base.join("acme")).unwrap();
+        let written = base.join("acme");
+        let found = written.join("api").canonicalize().unwrap();
+        assert!(!found.starts_with(&written), "the fixture is not a symlink after all");
+
+        let mut meta = Meta::default();
+        meta.set_tags(&found, vec!["mine".to_string()]);
+        // Seeded by the root, and its disk has gone since: the path proves
+        // nothing any more, the record still does.
+        let offline = Path::new("/mnt/unplugged/acme/web");
+        meta.apply_root_tag(offline, &written.display().to_string(), Some("acme"));
+
+        assert_eq!(meta.tagged_only_under(&written, &[]), 2);
+        assert_eq!(meta.forget_source(&written, &[]), 2);
+        assert!(meta.repos.is_empty(), "{:?}", meta.repos);
     }
 
     /// The unmounted disk the doc comment is about. A mount point from fstab

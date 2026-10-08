@@ -1,7 +1,7 @@
 //! Dialogs: where repositories are looked for, and how they are tagged.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -17,9 +17,28 @@ use crate::meta::{self, Meta};
 /// grid's contents changed and a rescan is due, while `on_refresh` only
 /// re-arms a timer. Sharing one callback made flipping a refresh switch
 /// rescan every repository for nothing.
+///
+/// Opened this way the dialog cannot reach the tag store, so removing a root
+/// leaves what the store holds about its repositories where it is. The window
+/// has the store and wants `settings_with_tags`.
 pub fn settings(
     parent: &impl IsA<gtk::Widget>,
     cfg: Rc<RefCell<Config>>,
+    on_sources: Rc<dyn Fn()>,
+    on_refresh: Rc<dyn Fn()>,
+    on_restyle: Rc<dyn Fn()>,
+) {
+    settings_with_tags(parent, cfg, None, on_sources, on_refresh, on_restyle);
+}
+
+/// The settings dialog, with the tag store: removing a root, or an
+/// individually listed repository, then also forgets what the store holds
+/// about the repositories nothing else reaches (`Meta::forget_source`). The
+/// store is saved here; the rescan that `on_sources` starts redraws the tags.
+pub fn settings_with_tags(
+    parent: &impl IsA<gtk::Widget>,
+    cfg: Rc<RefCell<Config>>,
+    meta: Option<Rc<RefCell<Meta>>>,
     on_sources: Rc<dyn Fn()>,
     on_refresh: Rc<dyn Fn()>,
     on_restyle: Rc<dyn Fn()>,
@@ -65,12 +84,90 @@ pub fn settings(
     // The row builders need to call themselves after an edit.
     let rebuild: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
+    // Taking a source out: of the config, of the tag store, then of the list
+    // here and of the grid.
+    let remove: Rc<dyn Fn(Source)> = {
+        let cfg = Rc::clone(&cfg);
+        let rebuild = Rc::clone(&rebuild);
+        let on_change = Rc::clone(&on_change);
+        let anchor = roots_group.clone();
+        Rc::new(move |source: Source| {
+            let go = {
+                let cfg = Rc::clone(&cfg);
+                let meta = meta.clone();
+                let rebuild = Rc::clone(&rebuild);
+                let on_change = Rc::clone(&on_change);
+                let source = source.clone();
+                move || {
+                    source.remove_from(&mut cfg.borrow_mut());
+                    // Only a removal that reached the config file is one to
+                    // forget for. A file that could not be read at launch is
+                    // never saved over, and what is in memory then is not
+                    // what the user configured.
+                    if let (true, Some(meta)) = (persist(&cfg), &meta) {
+                        let kept = sources(&cfg.borrow());
+                        let mut meta = meta.borrow_mut();
+                        if meta.forget_source(source.path(), &kept) > 0 {
+                            if let Err(err) = meta.save() {
+                                eprintln!("omarepos: could not write the tag file: {err}");
+                            }
+                        }
+                    }
+                    if let Some(f) = rebuild.borrow().clone() {
+                        f();
+                    }
+                    on_change();
+                }
+            };
+
+            // Forgetting takes tags typed by hand with it, and the trash
+            // button is one click with no way back. So when there are tags to
+            // lose, say so first; a source that tagged nothing goes at once,
+            // as it always did.
+            let tagged = match &meta {
+                Some(meta) if cfg.borrow().load_error.is_none() => {
+                    let mut after = cfg.borrow().clone();
+                    source.remove_from(&mut after);
+                    meta.borrow().tagged_only_under(source.path(), &sources(&after))
+                }
+                _ => 0,
+            };
+            if tagged == 0 {
+                go();
+                return;
+            }
+            let body = match &source {
+                Source::Root(_) => format!(
+                    "The tags on {tagged} {} found only through this folder will be forgotten \
+                     as well. Adding the folder again brings back a tag it applies itself, not \
+                     tags typed by hand.",
+                    if tagged == 1 { "repository" } else { "repositories" }
+                ),
+                Source::Repo(_) => "Its tags will be forgotten as well.".to_string(),
+            };
+            let question = adw::AlertDialog::builder()
+                .heading(format!("Remove {}?", tildify(source.path())))
+                .body(body)
+                .build();
+            question.add_response("cancel", "Cancel");
+            question.add_response("remove", "Remove");
+            question.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+            question.set_default_response(Some("cancel"));
+            question.set_close_response("cancel");
+            question.connect_response(None, move |_, response| {
+                if response == "remove" {
+                    go();
+                }
+            });
+            question.present(Some(&anchor));
+        })
+    };
+
     let build_rows: Rc<dyn Fn()> = {
         let cfg = Rc::clone(&cfg);
         let roots_group = roots_group.clone();
         let repos_group = repos_group.clone();
         let listed = Rc::clone(&listed);
-        let rebuild = Rc::clone(&rebuild);
         let on_change = Rc::clone(&on_change);
         Rc::new(move || {
             for (group, row) in listed.borrow_mut().drain(..) {
@@ -94,18 +191,9 @@ pub fn settings(
             }
             for spec in roots {
                 let row = root_row(&spec, Rc::clone(&cfg), Rc::clone(&on_change), {
-                    let cfg = Rc::clone(&cfg);
-                    let rebuild = Rc::clone(&rebuild);
-                    let on_change = Rc::clone(&on_change);
+                    let remove = Rc::clone(&remove);
                     let path = crate::config::expand(spec.path_str());
-                    move || {
-                        cfg.borrow_mut().remove_root(&path);
-                        persist(&cfg);
-                        if let Some(f) = rebuild.borrow().clone() {
-                            f();
-                        }
-                        on_change();
-                    }
+                    move || remove(Source::Root(path.clone()))
                 });
                 roots_group.add(&row);
                 added.push((roots_group.clone(), row.upcast()));
@@ -113,19 +201,9 @@ pub fn settings(
 
             for entry in extras {
                 let row = removable_row(&entry, "Remove this repository", {
-                    let cfg = Rc::clone(&cfg);
-                    let rebuild = Rc::clone(&rebuild);
-                    let on_change = Rc::clone(&on_change);
-                    let entry = entry.clone();
-                    move || {
-                        cfg.borrow_mut()
-                            .remove_extra_repo(&crate::config::expand(&entry));
-                        persist(&cfg);
-                        if let Some(f) = rebuild.borrow().clone() {
-                            f();
-                        }
-                        on_change();
-                    }
+                    let remove = Rc::clone(&remove);
+                    let path = crate::config::expand(&entry);
+                    move || remove(Source::Repo(path.clone()))
                 });
                 repos_group.add(&row);
                 added.push((repos_group.clone(), row.upcast()));
@@ -583,10 +661,47 @@ fn pick_folder(
     });
 }
 
-fn persist(cfg: &Rc<RefCell<Config>>) {
-    if let Err(err) = cfg.borrow().save() {
-        eprintln!("omarepos: could not write the config file: {err}");
+/// Whether the file was written.
+fn persist(cfg: &Rc<RefCell<Config>>) -> bool {
+    match cfg.borrow().save() {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("omarepos: could not write the config file: {err}");
+            false
+        }
     }
+}
+
+/// Something the grid is filled from, as far as taking it out again goes.
+#[derive(Clone)]
+enum Source {
+    Root(PathBuf),
+    Repo(PathBuf),
+}
+
+impl Source {
+    fn path(&self) -> &Path {
+        match self {
+            Source::Root(path) | Source::Repo(path) => path,
+        }
+    }
+
+    fn remove_from(&self, cfg: &mut Config) {
+        match self {
+            Source::Root(path) => cfg.remove_root(path),
+            Source::Repo(path) => cfg.remove_extra_repo(path),
+        }
+    }
+}
+
+/// Everywhere the configuration has repositories come from: the roots as
+/// configured, not as a command line may have overridden them for this run.
+fn sources(cfg: &Config) -> Vec<PathBuf> {
+    cfg.roots
+        .iter()
+        .map(|spec| crate::config::expand(spec.path_str()))
+        .chain(cfg.extra_repos())
+        .collect()
 }
 
 fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
