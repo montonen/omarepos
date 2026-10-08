@@ -56,14 +56,73 @@ const KEEP: usize = 1 << 20;
 /// The signal goes to git's whole process group, so a hook or filter it
 /// started stops with it.
 pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    exec(dir, args, timeout, true)
+    exec(dir, args, Limit::Whole(timeout), true)
 }
 
 /// As [`run`], for a pass nobody is watching. Two differences: whose word is
 /// taken for the ssh command (see [`ssh_command`]), and that nothing is
 /// allowed to ask (see [`UNASKED`]).
 pub fn run_fenced(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    exec(dir, args, timeout, false)
+    exec(dir, args, Limit::Whole(timeout), false)
+}
+
+/// As [`run`], for a command that is moving data and says so as it goes: a
+/// fetch run with `--progress`. It is given up on when nothing has arrived
+/// from it for `quiet`, and otherwise left to finish, up to `ceiling`.
+///
+/// A fetch used to get one limit on the whole of it, the same minute that is
+/// right for noticing a dead network. A fetch that needed longer than that
+/// could then never finish: far behind, or on a slow link, it was stopped at
+/// the minute with data still arriving, started again from nothing on the
+/// next pass, and left what it had received in `.git/objects/pack` each time,
+/// where git keeps it for two weeks. Silence is the sign of a dead link. Time
+/// taken is not.
+pub fn transfer(
+    dir: &Path,
+    args: &[&str],
+    quiet: Duration,
+    ceiling: Duration,
+) -> Result<String, String> {
+    exec(dir, args, Limit::WhileTalking { quiet, ceiling }, true)
+}
+
+/// As [`transfer`], with the fence of [`run_fenced`].
+pub fn transfer_fenced(
+    dir: &Path,
+    args: &[&str],
+    quiet: Duration,
+    ceiling: Duration,
+) -> Result<String, String> {
+    exec(dir, args, Limit::WhileTalking { quiet, ceiling }, false)
+}
+
+/// How long a command is given.
+#[derive(Clone, Copy)]
+enum Limit {
+    /// This long, start to finish, whatever it is doing.
+    Whole(Duration),
+    /// For as long as it keeps saying something, with no gap longer than
+    /// `quiet`; and however talkative, no longer than `ceiling`.
+    WhileTalking { quiet: Duration, ceiling: Duration },
+}
+
+impl Limit {
+    /// Why to give up now, if it is time to: on a command started at `started`
+    /// that last wrote to either pipe at `heard`.
+    fn passed(self, started: Instant, heard: Instant) -> Option<String> {
+        let timed_out = |limit: Duration| {
+            (started.elapsed() >= limit).then(|| format!("timed out after {}s", limit.as_secs()))
+        };
+        match self {
+            Limit::Whole(timeout) => timed_out(timeout),
+            Limit::WhileTalking { quiet, ceiling } => {
+                if heard.elapsed() >= quiet {
+                    return Some(format!("nothing arrived for {}s, gave up", quiet.as_secs()));
+                }
+                timed_out(ceiling)
+            }
+        }
+    }
 }
 
 /// The environment of a pass nobody is watching, on top of what every command
@@ -166,7 +225,7 @@ fn talks_to_a_remote(args: &[&str]) -> bool {
     false
 }
 
-fn exec(dir: &Path, args: &[&str], timeout: Duration, attended: bool) -> Result<String, String> {
+fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<String, String> {
     let mut command = Command::new("git");
     command.current_dir(dir);
     if !attended {
@@ -188,19 +247,21 @@ fn exec(dir: &Path, args: &[&str], timeout: Duration, attended: bool) -> Result<
     }
 
     let mut child = command.spawn().map_err(|err| format!("git: {err}"))?;
-    let out = child.stdout.take().map(drain);
-    let err = child.stderr.take().map(drain);
+    let started = Instant::now();
+    // When either pipe last had something on it.
+    let heard = Arc::new(Mutex::new(started));
+    let out = child.stdout.take().map(|pipe| drain(pipe, Arc::clone(&heard)));
+    let err = child.stderr.take().map(|pipe| drain(pipe, Arc::clone(&heard)));
 
-    // None when the timeout is too long to be a point in time: no deadline.
-    let deadline = Instant::now().checked_add(timeout);
     let mut nap = Duration::from_millis(1);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                let heard = heard.lock().map(|heard| *heard).unwrap_or(started);
+                if let Some(why) = limit.passed(started, heard) {
                     stop(&mut child);
-                    return Err(format!("timed out after {}s", timeout.as_secs()));
+                    return Err(why);
                 }
                 // Short commands are the common case; do not make each one
                 // wait out a fixed nap.
@@ -223,8 +284,8 @@ fn exec(dir: &Path, args: &[&str], timeout: Duration, attended: bool) -> Result<
 type Reader = (Arc<Mutex<Vec<u8>>>, JoinHandle<()>);
 
 /// Read a pipe to its end on a thread of its own, into a buffer that can be
-/// looked at before the end arrives.
-fn drain(mut pipe: impl Read + Send + 'static) -> Reader {
+/// looked at before the end arrives, noting in `heard` when anything came.
+fn drain(mut pipe: impl Read + Send + 'static, heard: Arc<Mutex<Instant>>) -> Reader {
     let kept = Arc::new(Mutex::new(Vec::new()));
     let into = Arc::clone(&kept);
     let handle = std::thread::spawn(move || {
@@ -233,6 +294,9 @@ fn drain(mut pipe: impl Read + Send + 'static) -> Reader {
             match pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
+                    if let Ok(mut heard) = heard.lock() {
+                        *heard = Instant::now();
+                    }
                     let Ok(mut kept) = into.lock() else { return };
                     let room = KEEP.saturating_sub(kept.len());
                     kept.extend_from_slice(&chunk[..n.min(room)]);
@@ -288,9 +352,15 @@ const SAID_LINES: usize = 40;
 fn explain(stderr: &str, stdout: &str) -> String {
     // A hook's standard output arrives on git's; put it ahead of what git
     // adds on the way out.
+    //
+    // A carriage return ends a line as well. Progress is written over itself
+    // with them, and an error that interrupts it arrives on the end of the
+    // progress line: read as one line it does not start with "fatal:", and
+    // what was shown was forty lines of percentages.
+    let ends = ['\n', '\r'];
     let lines: Vec<&str> = stdout
-        .lines()
-        .chain(stderr.lines())
+        .split(ends)
+        .chain(stderr.split(ends))
         .filter(|line| !line.trim().is_empty())
         // git's closing remark after a hook or the remote has already said
         // why. On its own it sends the reader to look for a reason that was
@@ -456,6 +526,58 @@ mod tests {
         // And the repository still takes a command.
         let (ok, said) = try_git(&f.work, &["add", "-A"]);
         assert!(ok, "{said}");
+    }
+
+    // ---- given up on for silence, not for taking long ----------------------
+
+    /// Something that takes two seconds and says so five times a second.
+    const BUSY: &str = "i=0; while [ $i -lt 10 ]; do echo 'still going' >&2; sleep 0.2; i=$((i+1)); done";
+
+    #[test]
+    fn a_command_that_keeps_talking_outlasts_the_limit_on_silence() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-talking");
+        hook(&dir, "pre-commit", BUSY);
+        stage_something(&dir);
+        let second = Duration::from_secs(1);
+
+        // The limit `run` applies is on the whole command, whatever it is
+        // doing, and this is what it did to a fetch that was still arriving.
+        assert_eq!(run(&dir, &["commit", "-m", "second"], second), Err("timed out after 1s".into()));
+        assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first");
+
+        let got = transfer(&dir, &["commit", "-m", "second"], second, PATIENT);
+        assert!(got.is_ok(), "{got:?}");
+        assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "second");
+    }
+
+    #[test]
+    fn a_command_that_goes_quiet_is_given_up_on() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-quiet");
+        hook(&dir, "pre-commit", "echo 'starting' >&2\nsleep 12");
+        stage_something(&dir);
+
+        let started = Instant::now();
+        let got = transfer(&dir, &["commit", "-m", "second"], Duration::from_secs(1), PATIENT);
+
+        assert_eq!(got, Err("nothing arrived for 1s, gave up".into()));
+        assert!(started.elapsed() < PROMPT, "took {:?}", started.elapsed());
+        assert!(!dir.join(".git/index.lock").exists());
+    }
+
+    /// Talking is not a licence to go on for ever.
+    #[test]
+    fn a_command_that_keeps_talking_still_has_a_ceiling() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-ceiling");
+        hook(&dir, "pre-commit", BUSY);
+        stage_something(&dir);
+
+        let got = transfer_fenced(&dir, &["commit", "-m", "second"], PATIENT, Duration::from_secs(1));
+
+        assert_eq!(got, Err("timed out after 1s".into()));
+        assert_eq!(git(&dir, &["log", "--format=%s", "-1"]), "first");
     }
 
     // ---- whose ssh --------------------------------------------------------
@@ -628,6 +750,16 @@ mod tests {
              .env, local/notes.md"
         );
         assert_eq!(explain("", ""), "git failed");
+        // Progress is written over itself with carriage returns, and what
+        // went wrong arrives on the end of the line it interrupted.
+        assert_eq!(
+            explain(
+                "remote: Counting objects: 100% (9/9), done.\n\
+                 Receiving objects:  33% (3/9)\rReceiving objects:  44% (4/9)\rfatal: early EOF\n",
+                ""
+            ),
+            "fatal: early EOF"
+        );
     }
 
     /// The README promises a hook's refusal "quoted back as git wrote it".

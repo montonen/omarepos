@@ -219,9 +219,38 @@ impl Pass {
             }
         }
     }
+
+    /// Fetch for this kind of pass. `quiet` is how long the fetch may go
+    /// without anything arriving, which is what `Options::timeout` now means
+    /// for a fetch; see [`FETCH`].
+    fn fetch(self, path: &Path, quiet: Duration) -> Result<String, String> {
+        match self {
+            Pass::One => crate::gitcmd::transfer(path, &FETCH, quiet, FETCH_PATIENCE),
+            Pass::Fleet => {
+                let mut all = UNATTENDED.to_vec();
+                all.extend_from_slice(&FETCH);
+                crate::gitcmd::transfer_fenced(path, &all, quiet, FETCH_PATIENCE)
+            }
+        }
+    }
 }
 
-/// The fetch, and the two things a plain `git fetch` does besides fetching.
+/// How long a fetch may take while it is still arriving. `Options::timeout`
+/// is a minute by default, and was the limit on the whole fetch: right for
+/// giving up on a dead network, and a wall for a repository far behind or a
+/// slow link, whose fetch was stopped with data still coming in, on every
+/// pass, for ever. That limit is now on silence. This one is the backstop for
+/// a remote that goes on saying something and never finishes.
+const FETCH_PATIENCE: Duration = Duration::from_secs(60 * 60);
+
+/// The fetch, what it is told to say, and the two things a plain `git fetch`
+/// does besides fetching.
+///
+/// `--progress` where this used to say `--quiet`: progress is how a fetch
+/// that is slow is told from one that is dead. git reports what the remote is
+/// counting and what has been received as it goes, and the runner gives up
+/// when that stops instead of when a clock runs out. None of it is shown; on
+/// failure the line that complains is still picked out.
 ///
 /// `--no-write-fetch-head`: a fetch rewrites `.git/FETCH_HEAD`, and that file
 /// is the user's. `git fetch origin pull/42/head` followed by `git checkout
@@ -238,7 +267,7 @@ impl Pass {
 /// of a repository that had itself fetched fine.
 const FETCH: [&str; 4] = [
     "fetch",
-    "--quiet",
+    "--progress",
     "--no-write-fetch-head",
     "--no-recurse-submodules",
 ];
@@ -415,7 +444,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     let fetch = {
         let gate = gate(&repo);
         let _alone_in_this_ref_store = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        options.pass.git(path, &FETCH, options.timeout)
+        options.pass.fetch(path, options.timeout)
     };
     if let Err(err) = fetch {
         return report(Outcome::Failed(err));
@@ -1474,6 +1503,101 @@ mod tests {
 
         git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
         assert_eq!(landed(&f.work, upstream), Ok(()));
+    }
+
+    // ---- a fetch is given up on for silence, not for taking long ----------
+
+    fn executable(path: &Path, script: &str) {
+        write(path, script);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A remote with something under a megabyte to send that does not
+    /// compress, and a link that lets it through 8 KiB at a time: about three
+    /// seconds, with git reporting progress all the way.
+    fn on_a_slow_link(name: &str) -> Fleet {
+        let f = fleet(name);
+        f.remote_commits("a hundred files of noise", |seed| {
+            let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+            for i in 0..100 {
+                let noise: Vec<u8> = (0..8192)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        (state >> 32) as u8
+                    })
+                    .collect();
+                std::fs::write(seed.join(format!("noise-{i}.bin")), noise).unwrap();
+            }
+        });
+        let slow = f.root.join("slow-upload-pack");
+        executable(
+            &slow,
+            "#!/bin/sh\n\
+             git upload-pack \"$@\" | {\n\
+             \twhile :; do\n\
+             \t\tsaid=$(LC_ALL=C dd bs=8192 count=1 2>&1 >&3)\n\
+             \t\tcase \"$said\" in \"0+0 records in\"*) break ;; esac\n\
+             \t\tsleep 0.03\n\
+             \tdone\n\
+             } 3>&1\n",
+        );
+        git(&f.work, &["config", "remote.origin.uploadpack", slow.to_str().unwrap()]);
+        f
+    }
+
+    fn partial_packs(repo: &Path) -> Vec<String> {
+        std::fs::read_dir(repo.join(".git/objects/pack"))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().to_string())
+                    .filter(|name| name.starts_with("tmp_"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The limit on a fetch was on the whole of it. A fetch that needed
+    /// longer could never finish: it was stopped at the limit with data still
+    /// arriving, started again from nothing on the next pass, and left what
+    /// it had received so far in `.git/objects/pack` every time.
+    #[test]
+    fn a_fetch_that_is_still_arriving_is_not_cut_off() {
+        let _guard = isolate();
+        let f = on_a_slow_link("rf-slow-link");
+        let hurried = Options { timeout: Duration::from_secs(1), ..options(false, Pass::Fleet) };
+
+        let started = std::time::Instant::now();
+        let got = refresh_one(&f.work, &hurried).outcome;
+        let took = started.elapsed();
+
+        assert!(matches!(got, Outcome::Behind(1)), "{got:?} after {took:?}");
+        assert!(took > Duration::from_secs(2), "over in {took:?}, which shows nothing");
+        assert_eq!(origin_main(&f.work), f.remote_ref("refs/heads/main"));
+        assert_eq!(partial_packs(&f.work), Vec::<String>::new());
+    }
+
+    /// A link that has gone dead is still given up on, after `timeout` of
+    /// nothing, and said to be that.
+    #[test]
+    fn a_fetch_that_has_gone_quiet_is_given_up_on() {
+        let _guard = isolate();
+        let f = fleet("rf-dead-link");
+        f.remote_moves(1);
+        let dead = f.root.join("dead-upload-pack");
+        executable(&dead, "#!/bin/sh\nsleep 30\n");
+        git(&f.work, &["config", "remote.origin.uploadpack", dead.to_str().unwrap()]);
+        let hurried = Options { timeout: Duration::from_secs(1), ..options(false, Pass::Fleet) };
+
+        let started = std::time::Instant::now();
+        let report = refresh_one(&f.work, &hurried);
+
+        let Outcome::Failed(why) = &report.outcome else { panic!("{report:?}") };
+        assert!(why.contains("nothing arrived for 1s"), "{why}");
+        assert!(!report.fetched);
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 
     // ---- fetching is not updating ----------------------------------------
