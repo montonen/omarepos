@@ -133,7 +133,12 @@ fn spawn_within(
         std::thread::spawn(move || {
             let total = repos.len();
             let workers = parallel.clamp(1, 8).min(total.max(1));
-            let queue = Arc::new(Mutex::new(repos.into_iter()));
+            // Each under the name the page will show it by. That was the
+            // folder name alone, and two repositories in folders of the same
+            // name came out as one colour and one label, their matches
+            // indistinguishable.
+            let named = crate::stats::labels(&repos);
+            let queue = Arc::new(Mutex::new(repos.into_iter().zip(named)));
             let done = Arc::new(Mutex::new(0usize));
             let mut handles = Vec::with_capacity(workers);
 
@@ -155,9 +160,9 @@ fn spawn_within(
                             };
                             guard.next()
                         };
-                        let Some(path) = next else { return };
+                        let Some((path, name)) = next else { return };
 
-                        let (hits, stopped) = search_one(&path, &needle, &cancel, limits);
+                        let (hits, stopped) = search_one(&path, &name, &needle, &cancel, limits);
                         let finished = {
                             let mut guard = match done.lock() {
                                 Ok(guard) => guard,
@@ -195,6 +200,7 @@ fn spawn_within(
 /// stopped at a limit looked the same as one that had read everything.
 fn search_one(
     path: &Path,
+    name: &str,
     needle: &str,
     cancel: &Cancel,
     limits: Limits,
@@ -202,10 +208,6 @@ fn search_one(
     let nothing = (Vec::new(), None);
     let unreadable = (Vec::new(), Some(Stopped::Unreadable));
     let Ok(repo) = Repository::open(path) else { return unreadable };
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.display().to_string());
 
     let Ok(mut walk) = repo.revwalk() else { return unreadable };
     if walk.set_sorting(Sort::TIME).is_err() {
@@ -281,7 +283,7 @@ fn search_one(
 
         if let Some(matched) = matched {
             hits.push(Hit {
-                repo: name.clone(),
+                repo: name.to_string(),
                 path: path.to_path_buf(),
                 short_id: id.chars().take(7).collect(),
                 id,
@@ -362,14 +364,14 @@ mod tests {
         let repo = history("search-match-limit", THEN, &said);
 
         let three = Limits { commits: 1000, hits: 3 };
-        let (hits, stopped) = search_one(&repo, "hotfix", &never(), three);
+        let (hits, stopped) = search_one(&repo, "fixture", "hotfix", &never(), three);
         assert_eq!(summaries(&hits), ["hotfix 5", "hotfix 4", "hotfix 3"], "its newest");
         assert_eq!(stopped, Some(Stopped::Matches));
 
         // Room for every one of them, and the history read to its end: then
         // the count is the count, and nothing is said.
         let five = Limits { commits: 1000, hits: 5 };
-        let (hits, stopped) = search_one(&repo, "hotfix", &never(), five);
+        let (hits, stopped) = search_one(&repo, "fixture", "hotfix", &never(), five);
         assert_eq!(hits.len(), 5);
         assert_eq!(stopped, None);
 
@@ -387,7 +389,7 @@ mod tests {
         let repo = history("search-depth-limit", THEN, &said);
 
         let four_deep = Limits { commits: 4, hits: 10 };
-        let (hits, stopped) = search_one(&repo, "rare", &never(), four_deep);
+        let (hits, stopped) = search_one(&repo, "fixture", "rare", &never(), four_deep);
         assert!(hits.is_empty(), "{:?}", summaries(&hits));
         assert_eq!(stopped, Some(Stopped::Depth));
 
@@ -397,7 +399,7 @@ mod tests {
 
         // A history exactly as long as the limit was read to its end.
         let six_deep = Limits { commits: 6, hits: 10 };
-        let (hits, stopped) = search_one(&repo, "rare", &never(), six_deep);
+        let (hits, stopped) = search_one(&repo, "fixture", "rare", &never(), six_deep);
         assert_eq!(summaries(&hits), ["the rare one"]);
         assert_eq!(stopped, None);
     }

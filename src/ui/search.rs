@@ -483,7 +483,7 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
     row.add_css_class("om-row");
     row.set_tooltip_text(Some(&format!(
         "{}\n{}\n{} · {}\n{}\n\nEnter opens this repository's graph.",
-        hit.repo,
+        crate::config::tildify(&hit.path),
         hit.summary,
         hit.author,
         absolute_time(hit.when),

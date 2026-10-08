@@ -341,7 +341,7 @@ impl Tally {
 /// the folders above it in front as it takes to tell it from the others being
 /// read. `api` is `api` until there are two of them, and then they are
 /// `personal/api` and `client/api`.
-fn labels(paths: &[PathBuf]) -> Vec<String> {
+pub(crate) fn labels(paths: &[PathBuf]) -> Vec<String> {
     let parts: Vec<Vec<String>> = paths
         .iter()
         .map(|path| {
