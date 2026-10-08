@@ -41,6 +41,59 @@ fn is_light(background: &str) -> bool {
 /// catppuccin-latte a card's name drops under 4.5:1 below 0.88.
 const STEPPED_BACK: f64 = 0.90;
 
+/// How much of the foreground is laid over a row under the pointer, and over
+/// the selected one. They are named because the status letters in a row are
+/// fitted to these backgrounds.
+const ROW_LIT: f64 = 0.07;
+const ROW_SELECTED: f64 = 0.10;
+
+/// How much of its own hue the fill of a coloured label carries.
+const WASH: f64 = 0.16;
+
+/// The contrast a coloured label's text is fitted to. WCAG asks 4.5:1 of text
+/// this small. The little over it is for what happens between here and the
+/// screen, where GTK blends a see-through row or a card at 90% and rounds
+/// the result to whole bytes.
+const LEGIBLE: f64 = 4.6;
+
+/// An opaque colour as `Palette::rgb` gives it, each channel in 0.0..=1.0.
+type Rgb = (f64, f64, f64);
+
+/// `from`, moved `by` of the way to `to`. This is GTK's `mix()`, and what
+/// drawing `to` at an alpha or an opacity of `by` over `from` comes to: GTK
+/// blends the encoded values, not linear light.
+fn mix(from: Rgb, to: Rgb, by: f64) -> Rgb {
+    (
+        from.0 + (to.0 - from.0) * by,
+        from.1 + (to.1 - from.1) * by,
+        from.2 + (to.2 - from.2) * by,
+    )
+}
+
+/// The WCAG 2 contrast ratio of two colours: 1 for the same colour twice, 21
+/// for black on white.
+fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let luminance = |(r, g, b): Rgb| {
+        let linear =
+            |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The nearest colour that can be written as `#rrggbb`, so that what is
+/// measured is what goes into the stylesheet.
+fn whole(colour: Rgb) -> Rgb {
+    let byte = |v: f64| (v * 255.0).round() / 255.0;
+    (byte(colour.0), byte(colour.1), byte(colour.2))
+}
+
+fn hex(colour: Rgb) -> String {
+    let byte = |v: f64| (v * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(colour.0), byte(colour.1), byte(colour.2))
+}
+
 /// A fully resolved palette: no optionals left for the stylesheet to worry about.
 #[derive(Debug, Clone)]
 pub struct Palette {
@@ -199,9 +252,89 @@ impl Palette {
         (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
     }
 
+    /// `hue` as a text colour: the hue itself where `reads` accepts it, and
+    /// otherwise moved toward the foreground, a twentieth at a time, as far
+    /// as it has to go. Where not even the foreground is accepted it is the
+    /// foreground, which is the most a palette has to give.
+    fn ink(&self, hue: &str, reads: impl Fn(Rgb) -> bool) -> String {
+        let (hue, fg) = (Self::rgb(hue), Self::rgb(&self.fg));
+        let ink = (0..=20)
+            .map(|step| whole(mix(hue, fg, f64::from(step) / 20.0)))
+            .find(|&ink| reads(ink))
+            .unwrap_or(fg);
+        hex(ink)
+    }
+
     /// The GTK stylesheet for this palette.
     pub fn stylesheet(&self) -> String {
         let p = self;
+        let (page, card, fg) = (Self::rgb(&p.bg), Self::rgb(&p.bg_raised), Self::rgb(&p.fg));
+
+        // The coloured labels: the pills on a card, the ref names in the
+        // graph, the status letters in the file list. Each was a theme colour
+        // written on an 18 to 30% wash of that same colour. A colour is
+        // closer to a wash of itself than to the bare surface, and these
+        // colours come from a terminal palette, which nobody chose for 11px
+        // text on a tint: of the pill and palette pairs tested below, 46 in
+        // 54 were under 4.5:1 and the worst was 1.66.
+        //
+        // The fill still carries the hue, and the text as much of it as can
+        // be read (`ink`). The fill is also opaque now, mixed here into the
+        // surface the label rests on, where it was a see-through `alpha()`.
+        // A card changes colour when it is ticked, focused or under the
+        // pointer, and a see-through fill changed with it, under text that
+        // did not: "held back" on a ticked, focused kanagawa card was 1.04:1.
+        let label = |family: &str, surface: Rgb, steps_back: bool, class: &str, hue: &str| {
+            let fill = whole(mix(surface, Self::rgb(hue), WASH));
+            let behind = |colour: Rgb| mix(page, colour, STEPPED_BACK);
+            let text = p.ink(hue, |ink| {
+                contrast(ink, fill) >= LEGIBLE
+                    && (!steps_back || contrast(behind(ink), behind(fill)) >= LEGIBLE)
+            });
+            format!(
+                ".{family}.{class} {{\n  background-color: {};\n  color: {text};\n}}",
+                hex(fill)
+            )
+        };
+        // A pill is read on a card that has stepped back as well as on one
+        // that has not, so its text is fitted to both.
+        let pills = [
+            ("branch", &p.accent),
+            ("clean", &p.green),
+            ("dirty", &p.yellow),
+            ("ahead", &p.cyan),
+            ("behind", &p.magenta),
+            ("danger", &p.red),
+        ]
+        .map(|(class, hue)| label("om-pill", card, true, class, hue))
+        .join("\n\n");
+        // In this order: the branch HEAD is on is `local` and `current`, and
+        // takes the later rule's accent; a detached HEAD is `current` and
+        // `head`, and stays red.
+        let refs = [
+            ("local", &p.green),
+            ("current", &p.accent),
+            ("remote", &p.cyan),
+            ("tag", &p.yellow),
+            ("head", &p.red),
+        ]
+        .map(|(class, hue)| label("om-ref", page, false, class, hue))
+        .join("\n\n");
+        // A status letter has no fill. It is drawn straight on the row, and
+        // has to be read on each background a row can have.
+        let rows = [page, mix(page, fg, ROW_LIT), mix(page, fg, ROW_SELECTED)];
+        let letters = [
+            ("added", &p.green),
+            ("deleted", &p.red),
+            ("renamed", &p.cyan),
+            ("modified", &p.yellow),
+        ]
+        .map(|(class, hue)| {
+            let text = p.ink(hue, |ink| rows.iter().all(|&row| contrast(ink, row) >= LEGIBLE));
+            format!(".om-status.{class} {{\n  color: {text};\n}}")
+        })
+        .join("\n\n");
+
         format!(
             r#"
 @define-color om_bg {bg};
@@ -391,35 +524,7 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
   color: @om_fg;
 }}
 
-.om-pill.branch {{
-  background-color: alpha(@om_accent, 0.20);
-  color: {accent};
-}}
-
-.om-pill.clean {{
-  background-color: alpha({green}, 0.18);
-  color: {green};
-}}
-
-.om-pill.dirty {{
-  background-color: alpha({yellow}, 0.18);
-  color: {yellow};
-}}
-
-.om-pill.ahead {{
-  background-color: alpha({cyan}, 0.18);
-  color: {cyan};
-}}
-
-.om-pill.behind {{
-  background-color: alpha({magenta}, 0.18);
-  color: {magenta};
-}}
-
-.om-pill.danger {{
-  background-color: alpha({red}, 0.20);
-  color: {red};
-}}
+{pills}
 
 .om-dot {{
   border-radius: 999px;
@@ -549,25 +654,11 @@ list.om-results > row.om-aside {{
   color: @om_dim;
 }}
 
-.om-status.added {{
-  color: {green};
-}}
-
-.om-status.deleted {{
-  color: {red};
-}}
-
-.om-status.renamed {{
-  color: {cyan};
-}}
-
 .om-status.untracked {{
   color: @om_dim;
 }}
 
-.om-status.modified {{
-  color: {yellow};
-}}
+{letters}
 
 paned > separator {{
   background-color: @om_border;
@@ -575,7 +666,7 @@ paned > separator {{
 }}
 
 list.om-results > row:selected {{
-  background-color: alpha(@om_fg, 0.10);
+  background-color: alpha(@om_fg, {row_selected});
 }}
 
 /* The commit you followed a search result to. It has to be findable at a
@@ -600,7 +691,7 @@ list.om-results > row:focus-visible {{
 }}
 
 .om-row:hover {{
-  background-color: alpha(@om_fg, 0.07);
+  background-color: alpha(@om_fg, {row_lit});
 }}
 
 /* In the file list `om-row` is on the line inside the row and not on the row,
@@ -625,30 +716,7 @@ list.om-results > row:selected .om-row:hover {{
   color: @om_fg;
 }}
 
-.om-ref.local {{
-  background-color: alpha({green}, 0.20);
-  color: {green};
-}}
-
-.om-ref.current {{
-  background-color: alpha(@om_accent, 0.30);
-  color: {accent};
-}}
-
-.om-ref.remote {{
-  background-color: alpha({cyan}, 0.18);
-  color: {cyan};
-}}
-
-.om-ref.tag {{
-  background-color: alpha({yellow}, 0.20);
-  color: {yellow};
-}}
-
-.om-ref.head {{
-  background-color: alpha({red}, 0.24);
-  color: {red};
-}}
+{refs}
 
 .om-big {{
   font-size: 22px;
@@ -701,12 +769,11 @@ popover.menu contents, popover contents {{
             dim = p.fg_dim,
             border = p.border,
             accent = p.accent,
-            green = p.green,
             yellow = p.yellow,
             red = p.red,
-            cyan = p.cyan,
-            magenta = p.magenta,
             stepped_back = STEPPED_BACK,
+            row_lit = ROW_LIT,
+            row_selected = ROW_SELECTED,
         )
     }
 }
@@ -1103,16 +1170,15 @@ mod tests {
     /// The rule that steps a card back once another is ticked.
     const STEPS_BACK: &str = "flowbox.om-flow.om-has-selection .om-card:not(.om-selected)";
 
-    /// Every background a row of the commit graph, the file list or the
-    /// search results can have, over the page the list lies on.
+    /// Every background a row of the file list or the search results can
+    /// have, over the page the list lies on.
     fn rows(sheet: &Sheet) -> Vec<(&'static str, Solid)> {
         let page = sheet.solid("scrolledwindow.om-grid", "background-color");
         let of = |rule: &str| sheet.colour(rule, "background-color");
-        let pointer = of(".om-row:hover");
         let selected = over(of("list.om-results > row:selected"), page);
         vec![
             ("at rest", over(of("list.om-results > row"), over(of("list.om-results"), page))),
-            ("under the pointer", over(pointer, page)),
+            ("under the pointer", over(of(".om-row:hover"), page)),
             ("selected", selected),
             // In the file list the pointer is over the line inside the row,
             // which has a background of its own to lay on the selection.
@@ -1120,9 +1186,22 @@ mod tests {
                 "selected, under the pointer",
                 over(of("list.om-results > row:selected .om-row:hover"), selected),
             ),
-            ("followed from a search", over(of("list.om-results > row.om-target"), page)),
         ]
     }
+
+    /// The same for the commit graph, where one row more can be the commit a
+    /// search led to.
+    fn graph_rows(sheet: &Sheet) -> Vec<(&'static str, Solid)> {
+        let page = sheet.solid("scrolledwindow.om-grid", "background-color");
+        let followed = sheet.colour("list.om-results > row.om-target", "background-color");
+        let mut all = rows(sheet);
+        all.push(("followed from a search", over(followed, page)));
+        all
+    }
+
+    const PILLS: [&str; 6] = ["branch", "clean", "dirty", "ahead", "behind", "danger"];
+    const REFS: [&str; 5] = ["local", "current", "remote", "tag", "head"];
+    const LETTERS: [&str; 4] = ["added", "deleted", "renamed", "modified"];
 
     /// The element names in a selector: `list` and `row` in
     /// `list.om-results > row:selected`.
@@ -1468,7 +1547,7 @@ brown = "#743d1e"
         let mut muted = Measured::new("the sha, author and date in a row", FLOOR);
         for palette in palettes() {
             let sheet = Sheet::of(&palette);
-            for (state, row) in rows(&sheet) {
+            for (state, row) in graph_rows(&sheet) {
                 summaries.add(&palette, state, ratio(sheet.solid(".om-summary", "color"), row));
                 for rule in [".om-sha", ".om-meta"] {
                     muted.add(&palette, state, ratio(sheet.solid(rule, "color"), row));
@@ -1493,5 +1572,132 @@ brown = "#743d1e"
         }
         headings.check();
         notes.check();
+    }
+
+    /// The pills are what the grid is looked at for, and each drew its hue
+    /// on a wash of that hue laid over whatever the card was doing: 1.66:1
+    /// for "dirty" on a flexoki-light card at rest, and 1.04 for "held back"
+    /// on a kanagawa card that was ticked and had the focus.
+    #[test]
+    fn a_pill_reads_on_its_fill_whatever_state_its_card_is_in() {
+        let mut pills = Measured::new("a pill on its card", AA);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            for (state, rule) in CARD_STATES {
+                let card = sheet.solid(rule, "background-color");
+                for class in PILLS {
+                    let pill = format!(".om-pill.{class}");
+                    let fill = over(sheet.colour(&pill, "background-color"), card);
+                    let text = sheet.solid(&pill, "color");
+                    pills.add(&palette, &format!("{class}, {state}"), ratio(text, fill));
+                }
+            }
+        }
+        pills.check();
+    }
+
+    /// On a card that has stepped back a pill is faded with the rest of it.
+    /// Its text is fitted to that as well, and where a palette cannot manage
+    /// it the text is the plain foreground: there is nothing more to give,
+    /// and such a pill is held to the floor instead.
+    #[test]
+    fn a_pill_reads_on_a_card_that_has_stepped_back_or_is_in_the_plain_foreground() {
+        let mut pills = Measured::new("a pill on a card that has stepped back", AA);
+        let mut plain = Measured::new("a pill in the plain foreground, stepped back", FLOOR);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let page = sheet.solid("flowbox.om-flow", "background-color");
+            let card = sheet.solid(".om-card", "background-color");
+            let opacity = sheet.number(STEPS_BACK, "opacity");
+            for class in PILLS {
+                let pill = format!(".om-pill.{class}");
+                let fill = over(sheet.colour(&pill, "background-color"), card);
+                let text = sheet.solid(&pill, "color");
+                let seen = ratio(faded(text, opacity, page), faded(fill, opacity, page));
+                if text == sheet.solid(".om-pill", "color") {
+                    plain.add(&palette, class, seen);
+                } else {
+                    pills.add(&palette, class, seen);
+                }
+            }
+        }
+        pills.check();
+        plain.check();
+    }
+
+    /// The names of branches and tags in the graph were drawn the way the
+    /// pills were, on washes of up to 30%: 1.78:1 for a tag on rose-pine.
+    #[test]
+    fn a_ref_label_reads_on_its_fill_whatever_state_its_row_is_in() {
+        let mut labels = Measured::new("a ref label in its row", AA);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            for (state, row) in graph_rows(&sheet) {
+                for class in REFS {
+                    let label = format!(".om-ref.{class}");
+                    let fill = over(sheet.colour(&label, "background-color"), row);
+                    let text = sheet.solid(&label, "color");
+                    labels.add(&palette, &format!("{class}, {state}"), ratio(text, fill));
+                }
+            }
+        }
+        labels.check();
+    }
+
+    /// A status letter is a theme colour with nothing behind it but the row:
+    /// the M of a modified file was 2.05:1 on rose-pine.
+    #[test]
+    fn a_status_letter_reads_on_every_background_a_row_can_have() {
+        let mut letters = Measured::new("a status letter in its row", AA);
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            for (state, row) in rows(&sheet) {
+                for class in LETTERS {
+                    let text = sheet.solid(&format!(".om-status.{class}"), "color");
+                    letters.add(&palette, &format!("{class}, {state}"), ratio(text, row));
+                }
+            }
+        }
+        letters.check();
+    }
+
+    /// Making everything the foreground colour would pass every test above.
+    /// The colours are how a pill is told from the one beside it without
+    /// reading it, so a hue that can be read is left exactly as the theme
+    /// has it, and one that cannot is moved no further than it must be.
+    #[test]
+    fn a_hue_that_can_be_read_is_left_alone() {
+        let retro = &palettes()[0];
+        assert_eq!(retro.ink("#faa968", |_| true), "#faa968");
+        assert_eq!(retro.ink("#028391", |_| false), retro.fg);
+
+        let sheet = Sheet::of(retro);
+        let colour = |rule: &str| sheet.value(rule, "color").to_string();
+        assert_eq!(colour(".om-pill.branch"), retro.accent);
+        assert_eq!(colour(".om-pill.ahead"), retro.cyan);
+        assert_eq!(colour(".om-ref.tag"), retro.yellow);
+        assert_eq!(colour(".om-status.modified"), retro.yellow);
+
+        // "clean" is #028391 there, which was 2.82:1 on its fill. It is
+        // moved, and stops short of the foreground.
+        let clean = colour(".om-pill.clean");
+        assert!(clean != retro.green && clean != retro.fg, "{clean}");
+    }
+
+    /// The figure the labels are fitted to, held against values that are
+    /// common knowledge and against these tests' own arithmetic.
+    #[test]
+    fn contrast_is_the_wcag_ratio() {
+        let (black, white) = ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0));
+        assert!((contrast(black, white) - 21.0).abs() < 1e-9);
+        assert_eq!(contrast(white, white), 1.0);
+        // #767676 is the lightest grey that passes on white, and the usual
+        // example of it.
+        assert!((contrast(Palette::rgb("#767676"), white) - 4.54).abs() < 0.005);
+        assert!(contrast(Palette::rgb("#777777"), white) < 4.5);
+
+        let (a, b) = (Palette::rgb("#e97b3c"), Palette::rgb("#0a2540"));
+        assert_eq!(contrast(a, b), contrast(b, a));
+        assert_eq!(contrast(a, b), ratio(a, b));
     }
 }
