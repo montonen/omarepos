@@ -54,8 +54,9 @@ pub struct Commit {
     pub short_id: String,
     pub summary: String,
     pub when: i64,
-    pub insertions: usize,
-    pub deletions: usize,
+    /// Lines added and removed, or nothing where they could not be read: see
+    /// [`diff_stats`]. A merge has none of its own and says `(0, 0)`.
+    pub lines: Option<(usize, usize)>,
     pub merge: bool,
 }
 
@@ -82,6 +83,9 @@ pub struct Author {
     pub insertions: usize,
     pub deletions: usize,
     pub files: usize,
+    /// How many of `commits` have no line counts. The three figures above
+    /// leave those commits out, so with any of these they are a lower bound.
+    pub uncounted: usize,
     pub per_day: Vec<usize>,
     /// Repository -> what they did there. Keyed by path: keyed by folder name,
     /// two repositories called `api` under two roots were one group, with one
@@ -107,6 +111,11 @@ pub struct Contributions {
     pub total_commits: usize,
     pub total_insertions: usize,
     pub total_deletions: usize,
+    /// Commits counted whose lines could not be read, and so are in neither
+    /// total above.
+    pub uncounted: usize,
+    /// One line for each repository that could not be read: what it is called
+    /// and why. None of its commits are counted.
     pub errors: Vec<String>,
 }
 
@@ -125,31 +134,16 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
     let (tx, rx) = async_channel::unbounded();
 
     std::thread::spawn(move || {
-        let days = window.days();
         let total = repos.len();
-        let mut acc: HashMap<String, Author> = HashMap::new();
-        let mut per_day_total = vec![0usize; days];
+        let mut tally = Tally::new(window.days());
         let mut errors = Vec::new();
-        let mut repos_active = 0usize;
-        let mut total_commits = 0usize;
-        let mut total_insertions = 0usize;
-        let mut total_deletions = 0usize;
-        // Every commit counted so far, in any repository. A linked worktree, a
-        // second clone and a fork beside its upstream are each a card of their
-        // own and hold the same commits; counted once per path, one repository
-        // with a worktree and a spare clone tripled everything on the page.
-        let mut counted: HashSet<Oid> = HashSet::new();
 
         for (n, (path, name)) in repos.iter().zip(labels(&repos)).enumerate() {
-            match collect(path, &name, &window, &mut acc, &mut per_day_total, &mut counted) {
-                Ok(found) => {
-                    if found.commits > 0 {
-                        repos_active += 1;
-                    }
-                    total_commits += found.commits;
-                    total_insertions += found.insertions;
-                    total_deletions += found.deletions;
-                }
+            // A repository is read to the end before any of it is counted, so
+            // one that fails part of the way through is left out whole and
+            // named, not counted as far as it got.
+            match collect(path, &window, &tally.counted) {
+                Ok(seen) => tally.add(path, &name, seen),
                 Err(err) => errors.push(format!("{name}: {err}")),
             }
 
@@ -161,28 +155,131 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
             }
         }
 
-        let mut authors: Vec<Author> = acc.into_values().collect();
+        let _ = tx.send_blocking(Event::Done(Box::new(tally.finish(window, total, errors))));
+    });
+
+    rx
+}
+
+/// Everything counted so far in one run.
+struct Tally {
+    days: usize,
+    authors: HashMap<String, Author>,
+    per_day_total: Vec<usize>,
+    /// Every commit counted, in any repository. A linked worktree, a second
+    /// clone and a fork beside its upstream are each a card of their own and
+    /// hold the same commits; counted once per path, one repository with a
+    /// worktree and a spare clone tripled everything on the page.
+    counted: HashSet<Oid>,
+    repos_active: usize,
+    total_commits: usize,
+    total_insertions: usize,
+    total_deletions: usize,
+    uncounted: usize,
+}
+
+impl Tally {
+    fn new(days: usize) -> Tally {
+        Tally {
+            days,
+            authors: HashMap::new(),
+            per_day_total: vec![0; days],
+            counted: HashSet::new(),
+            repos_active: 0,
+            total_commits: 0,
+            total_insertions: 0,
+            total_deletions: 0,
+            uncounted: 0,
+        }
+    }
+
+    /// Count what [`collect`] found in the repository at `path`.
+    fn add(&mut self, path: &Path, repo_name: &str, seen: Vec<Seen>) {
+        if !seen.is_empty() {
+            self.repos_active += 1;
+        }
+        for commit in seen {
+            self.counted.insert(commit.oid);
+
+            let key = if commit.email.is_empty() {
+                commit.name.to_lowercase()
+            } else {
+                commit.email.clone()
+            };
+            let entry = self.authors.entry(key).or_insert_with(|| Author {
+                name: commit.name.clone(),
+                email: commit.email.clone(),
+                commits: 0,
+                merges: 0,
+                insertions: 0,
+                deletions: 0,
+                files: 0,
+                uncounted: 0,
+                per_day: vec![0; self.days],
+                repos: BTreeMap::new(),
+                last_seen: 0,
+            });
+            entry.commits += 1;
+            if commit.merge {
+                entry.merges += 1;
+            }
+            match commit.lines {
+                Some((insertions, deletions, files)) => {
+                    entry.insertions += insertions;
+                    entry.deletions += deletions;
+                    entry.files += files;
+                    self.total_insertions += insertions;
+                    self.total_deletions += deletions;
+                }
+                None => {
+                    entry.uncounted += 1;
+                    self.uncounted += 1;
+                }
+            }
+            entry.per_day[commit.day] += 1;
+            entry.last_seen = entry.last_seen.max(commit.when);
+
+            let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
+                name: repo_name.to_string(),
+                ..RepoCommits::default()
+            });
+            in_repo.total += 1;
+            if in_repo.commits.len() < MAX_COMMITS_LISTED {
+                in_repo.commits.push(Commit {
+                    short_id: commit.oid.to_string().chars().take(7).collect(),
+                    summary: commit.summary,
+                    when: commit.when,
+                    lines: commit.lines.map(|(insertions, deletions, _)| (insertions, deletions)),
+                    merge: commit.merge,
+                });
+            }
+
+            self.per_day_total[commit.day] += 1;
+            self.total_commits += 1;
+        }
+    }
+
+    fn finish(self, window: Window, repos_scanned: usize, errors: Vec<String>) -> Contributions {
+        let mut authors: Vec<Author> = self.authors.into_values().collect();
         authors.sort_by(|a, b| {
             b.commits
                 .cmp(&a.commits)
                 .then_with(|| b.churn().cmp(&a.churn()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
-
-        let _ = tx.send_blocking(Event::Done(Box::new(Contributions {
+        Contributions {
             window,
             authors,
-            per_day_total,
-            repos_scanned: total,
-            repos_active,
-            total_commits,
-            total_insertions,
-            total_deletions,
+            per_day_total: self.per_day_total,
+            repos_scanned,
+            repos_active: self.repos_active,
+            total_commits: self.total_commits,
+            total_insertions: self.total_insertions,
+            total_deletions: self.total_deletions,
+            uncounted: self.uncounted,
             errors,
-        })));
-    });
-
-    rx
+        }
+    }
 }
 
 /// What to call each repository on the page: its folder name, with as many of
@@ -231,20 +328,23 @@ fn labels(paths: &[PathBuf]) -> Vec<String> {
     }
 }
 
-struct Found {
-    commits: usize,
-    insertions: usize,
-    deletions: usize,
+/// One commit inside the window, read and not yet counted.
+struct Seen {
+    oid: Oid,
+    name: String,
+    email: String,
+    summary: String,
+    when: i64,
+    day: usize,
+    merge: bool,
+    /// Insertions, deletions and files changed, or nothing where they could
+    /// not be read.
+    lines: Option<(usize, usize, usize)>,
 }
 
-fn collect(
-    path: &Path,
-    repo_name: &str,
-    window: &Window,
-    acc: &mut HashMap<String, Author>,
-    per_day_total: &mut [usize],
-    counted: &mut HashSet<Oid>,
-) -> Result<Found, String> {
+/// The commits of one repository that fall inside the window and are not in
+/// `counted`, newest first.
+fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Vec<Seen>, String> {
     let said = |e: git2::Error| e.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
     let mut walk = repo.revwalk().map_err(said)?;
@@ -254,7 +354,7 @@ fn collect(
     // used to be walked only when no branch could be, so a commit made on a
     // detached HEAD was counted nowhere.
     let Some(head) = head_commit(&repo).map_err(said)? else {
-        return Ok(Found { commits: 0, insertions: 0, deletions: 0 });
+        return Ok(Vec::new());
     };
     walk.push(head).map_err(said)?;
     let mut rewritten = HashSet::new();
@@ -264,15 +364,20 @@ fn collect(
     }
 
     let days = window.days();
-    let mut found = Found { commits: 0, insertions: 0, deletions: 0 };
+    let mut seen = Vec::new();
     let mut stale = 0usize;
 
     for oid in walk {
-        let Ok(oid) = oid else { continue };
+        // A step that failed used to be skipped. A walk in time order reads
+        // all of the history before it yields any of it, so one object missing
+        // anywhere fails the first step and ends the walk: the repository came
+        // out as having no commits at all, and the page said that nothing had
+        // been committed.
+        let oid = oid.map_err(said)?;
         if rewritten.contains(&oid) {
             continue;
         }
-        let Ok(commit) = repo.find_commit(oid) else { continue };
+        let commit = repo.find_commit(oid).map_err(said)?;
         let when = commit.time().seconds();
 
         let Some(day) = window.index_of(when) else {
@@ -287,73 +392,31 @@ fn collect(
             // Committed with a clock ahead of ours; fold into today.
             continue;
         }
-        if !counted.insert(oid) {
+        if counted.contains(&oid) {
             continue;
         }
 
         let author = commit.author();
-        let name = author.name().unwrap_or("unknown").to_string();
-        let email = author.email().unwrap_or("").trim().to_lowercase();
-        let key = if email.is_empty() { name.to_lowercase() } else { email.clone() };
-
-        let is_merge = commit.parent_count() > 1;
-        let (insertions, deletions, files) = if is_merge {
-            (0, 0, 0)
-        } else {
-            diff_stats(&repo, &commit)
-        };
-
-        let entry = acc.entry(key).or_insert_with(|| Author {
-            name: name.clone(),
-            email: email.clone(),
-            commits: 0,
-            merges: 0,
-            insertions: 0,
-            deletions: 0,
-            files: 0,
-            per_day: vec![0; days],
-            repos: BTreeMap::new(),
-            last_seen: 0,
+        let merge = commit.parent_count() > 1;
+        seen.push(Seen {
+            oid,
+            name: author.name().unwrap_or("unknown").to_string(),
+            email: author.email().unwrap_or("").trim().to_lowercase(),
+            summary: commit
+                .summary()
+                .ok()
+                .flatten()
+                .unwrap_or("(no message)")
+                .trim()
+                .to_string(),
+            when,
+            day,
+            merge,
+            lines: if merge { Some((0, 0, 0)) } else { diff_stats(&repo, &commit) },
         });
-        entry.commits += 1;
-        if is_merge {
-            entry.merges += 1;
-        }
-        entry.insertions += insertions;
-        entry.deletions += deletions;
-        entry.files += files;
-        entry.per_day[day] += 1;
-
-        let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
-            name: repo_name.to_string(),
-            ..RepoCommits::default()
-        });
-        in_repo.total += 1;
-        if in_repo.commits.len() < MAX_COMMITS_LISTED {
-            in_repo.commits.push(Commit {
-                short_id: oid.to_string().chars().take(7).collect(),
-                summary: commit
-                    .summary()
-                    .ok()
-                    .flatten()
-                    .unwrap_or("(no message)")
-                    .trim()
-                    .to_string(),
-                when,
-                insertions,
-                deletions,
-                merge: is_merge,
-            });
-        }
-        entry.last_seen = entry.last_seen.max(when);
-
-        per_day_total[day] += 1;
-        found.commits += 1;
-        found.insertions += insertions;
-        found.deletions += deletions;
     }
 
-    Ok(found)
+    Ok(seen)
 }
 
 /// The commit HEAD is on, or nothing in a repository that has no commit yet.
@@ -437,19 +500,32 @@ fn only_on(
     Ok(side)
 }
 
-fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> (usize, usize, usize) {
-    let Ok(tree) = commit.tree() else { return (0, 0, 0) };
-    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
-    let Ok(mut diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
-        return (0, 0, 0);
+/// Insertions, deletions and files changed against the first parent, or
+/// nothing when they cannot be read.
+///
+/// "Cannot be read" used to come out as a number. Any failure was +0 −0, which
+/// is what a partial clone showed for every commit whose files it had not
+/// fetched. And a parent that could not be read was taken for no parent, so
+/// the commit was compared with nothing and credited with every line in the
+/// repository: the commit at the edge of a shallow clone, whose parent is not
+/// there, was the largest contribution on the page.
+fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> Option<(usize, usize, usize)> {
+    let tree = commit.tree().ok()?;
+    let parent_tree = if commit.parent_count() == 0 {
+        // No parent, or none that libgit2 will admit to: at the edge of a
+        // shallow clone it reports none, and the commit itself still names
+        // the one that was not fetched.
+        if commit.header_field_bytes("parent").is_ok() {
+            return None;
+        }
+        None
+    } else {
+        Some(commit.parent(0).ok()?.tree().ok()?)
     };
-    if find_renames(&mut diff).is_err() {
-        return (0, 0, 0);
-    }
-    match diff.stats() {
-        Ok(stats) => (stats.insertions(), stats.deletions(), stats.files_changed()),
-        Err(_) => (0, 0, 0),
-    }
+    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None).ok()?;
+    find_renames(&mut diff).ok()?;
+    let stats = diff.stats().ok()?;
+    Some((stats.insertions(), stats.deletions(), stats.files_changed()))
 }
 
 /// Past this many pairs of a removed file and an added one, only files moved
@@ -800,6 +876,92 @@ mod tests {
         assert_eq!(named(&["/"]), ["/"]);
     }
 
+    // ---- what could not be read ---------------------------------------------
+
+    /// One commit object gone from the middle of the history. A walk in time
+    /// order reads all of the history before it yields any of it, so it fails
+    /// once and ends. That one failure was skipped, and the page said nothing
+    /// had been committed in a repository with five commits made today.
+    #[test]
+    fn a_history_that_cannot_be_walked_is_unreadable_and_not_quiet() {
+        let _guard = isolate();
+        let dir = scratch("stats-hole");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for i in 0..5 {
+            commit_file(&dir, &format!("f{i}.txt"), "x\n", &format!("commit {i}"));
+        }
+        let lost = git(&dir, &["rev-parse", "HEAD~3"]);
+        std::fs::remove_file(dir.join(".git/objects").join(&lost[..2]).join(&lost[2..])).unwrap();
+
+        let result = contributions(&[&dir]);
+        assert_eq!(result.total_commits, 0);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(result.errors[0].starts_with("stats-hole: "), "{:?}", result.errors);
+    }
+
+    #[test]
+    fn what_is_not_a_repository_is_an_error_and_an_empty_one_is_not() {
+        let _guard = isolate();
+        let plain = scratch("stats-not-a-repository");
+        let empty = scratch("stats-unborn");
+        git(&empty, &["init", "-q", "-b", "main"]);
+        let f = fleet("stats-beside-unreadable");
+
+        let result = contributions(&[&plain, &empty, &f.work]);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(result.errors[0].starts_with("stats-not-a-repository: "), "{:?}", result.errors);
+        assert_eq!((result.repos_active, result.repos_scanned), (1, 3));
+        assert_eq!(result.total_commits, 1);
+    }
+
+    /// The commit at the edge of a shallow clone has a parent that was not
+    /// fetched. Compared with nothing, it was every line in the repository.
+    #[test]
+    fn the_edge_of_a_shallow_clone_is_not_credited_with_the_whole_tree() {
+        let _guard = isolate();
+        let f = fleet("stats-shallow");
+        f.remote_commits("the codebase", |seed| write(&seed.join("big.txt"), &lines(2000)));
+        f.remote_commits("a small change", |seed| write(&seed.join("small.txt"), &lines(2)));
+        f.remote_commits("another", |seed| write(&seed.join("other.txt"), &lines(3)));
+        let url = format!("file://{}", f.remote.display());
+        git(&f.root, &["clone", "-q", "--depth", "2", &url, "shallow"]);
+
+        let result = contributions(&[&f.root.join("shallow")]);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(listed(&result, "another").lines, Some((3, 0)));
+        assert_eq!(listed(&result, "a small change").lines, None, "its parent is not here");
+        assert_eq!((totals(&result), result.uncounted), ((2, 3, 0), 1));
+        assert_eq!(result.authors[0].uncounted, 1);
+
+        // The first commit of a history has no parent to be missing, and is
+        // every line it adds.
+        let result = contributions(&[&f.seed]);
+        assert_eq!(listed(&result, "first").lines, Some((1, 0)));
+        assert_eq!((totals(&result), result.uncounted), ((4, 2006, 0), 0));
+    }
+
+    /// A blobless clone has every commit, and of the files only what the
+    /// checkout needed. Every diff it could not take was +0 −0.
+    #[test]
+    fn a_partial_clone_says_which_lines_it_could_not_read() {
+        let _guard = isolate();
+        let f = fleet("stats-partial");
+        f.remote_commits("add", |seed| write(&seed.join("a.txt"), &lines(10)));
+        f.remote_commits("grow", |seed| write(&seed.join("a.txt"), &lines(20)));
+        f.remote_commits("grow again", |seed| write(&seed.join("a.txt"), &lines(30)));
+        git(&f.remote, &["config", "uploadpack.allowFilter", "true"]);
+        let url = format!("file://{}", f.remote.display());
+        git(&f.root, &["clone", "-q", "--filter=blob:none", &url, "partial"]);
+
+        let result = contributions(&[&f.root.join("partial")]);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(listed(&result, "first").lines, Some((1, 0)), "README.md is checked out");
+        for unread in ["add", "grow", "grow again"] {
+            assert_eq!(listed(&result, unread).lines, None, "{unread}");
+        }
+        assert_eq!((totals(&result), result.uncounted), ((4, 1, 0), 3));
+    }
+
     // ---- what a commit is counted as -----------------------------------------
 
     #[test]
@@ -828,14 +990,11 @@ mod tests {
         git(&dir, &["commit", "-q", "-m", "copy a file and touch the original"]);
 
         let result = contributions(&[&dir]);
-        let churn = |summary: &str| {
-            let commit = listed(&result, summary);
-            (commit.insertions, commit.deletions)
-        };
-        assert_eq!(churn("rename one file"), (0, 0));
-        assert_eq!(churn("move the directory"), (0, 0));
-        assert_eq!(churn("rename and touch one line"), (1, 1));
-        assert_eq!(churn("copy a file and touch the original"), (201, 1));
+        let churn = |summary: &str| listed(&result, summary).lines;
+        assert_eq!(churn("rename one file"), Some((0, 0)));
+        assert_eq!(churn("move the directory"), Some((0, 0)));
+        assert_eq!(churn("rename and touch one line"), Some((1, 1)));
+        assert_eq!(churn("copy a file and touch the original"), Some((201, 1)));
         assert_eq!(totals(&result), git_totals(&dir, &["HEAD"]));
         assert_eq!(totals(&result), (5, 1302, 2));
     }
@@ -857,8 +1016,7 @@ mod tests {
         git(&dir, &["commit", "-q", "-m", "move the lot"]);
 
         let result = contributions(&[&dir]);
-        let moved = listed(&result, "move the lot");
-        assert_eq!((moved.insertions, moved.deletions), (0, 0));
+        assert_eq!(listed(&result, "move the lot").lines, Some((0, 0)));
         assert_eq!(totals(&result), git_totals(&dir, &["HEAD"]));
     }
 }

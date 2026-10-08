@@ -110,6 +110,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
             };
             stack.set_visible_child_name("loading");
             status.set_label("Reading history…");
+            status.set_tooltip_text(None);
 
             let rx = stats::spawn((*repos).clone(), day_window(days));
             let generation = Rc::clone(&generation);
@@ -132,15 +133,18 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
                                 content.remove(&child);
                             }
                             if result.total_commits == 0 {
-                                empty.set_title("No commits");
-                                empty.set_description(Some(&format!(
-                                    "Nothing was committed in the last {} days across {} {}.",
-                                    result.window.days(),
-                                    result.repos_scanned,
-                                    plural(result.repos_scanned, "repository", "repositories"),
+                                let (title, description) = empty_state(&result);
+                                empty.set_title(title);
+                                // The description is markup, and what goes in
+                                // it now includes paths and what libgit2 said.
+                                empty.set_description(Some(&glib::markup_escape_text(
+                                    &description,
                                 )));
                                 stack.set_visible_child_name("empty");
                             } else {
+                                if !result.errors.is_empty() {
+                                    content.append(&not_counted(&result.errors));
+                                }
                                 content.append(&overview(&result));
                                 for author in &result.authors {
                                     content.append(&author_row(author, &result));
@@ -148,6 +152,11 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
                                 stack.set_visible_child_name("content");
                             }
                             status.set_label(&status_line(&result));
+                            // The label is one line and cut short when the
+                            // window is narrow; the reasons are many lines.
+                            if !result.errors.is_empty() {
+                                status.set_tooltip_text(Some(&result.errors.join("\n")));
+                            }
                             break;
                         }
                     }
@@ -172,7 +181,14 @@ pub fn page(repos: Vec<PathBuf>, scope: String) -> adw::NavigationPage {
 }
 
 fn status_line(result: &Contributions) -> String {
-    let mut parts = vec![
+    let mut parts = Vec::new();
+    // First, where a narrow window cuts off something else. It used to be
+    // last, and was the only sign on the page that a repository had been left
+    // out of every figure before it.
+    if !result.errors.is_empty() {
+        parts.push(format!("{} unreadable", result.errors.len()));
+    }
+    parts.extend([
         format!("{} commits", thousands(result.total_commits)),
         format!(
             "{} {}",
@@ -185,11 +201,72 @@ fn status_line(result: &Contributions) -> String {
             thousands(result.total_insertions),
             thousands(result.total_deletions)
         ),
-    ];
-    if !result.errors.is_empty() {
-        parts.push(format!("{} unreadable", result.errors.len()));
+    ]);
+    if result.uncounted > 0 {
+        parts.push(format!("{} without line counts", thousands(result.uncounted)));
     }
     parts.join("  ·  ")
+}
+
+/// What the page says when it has no commit to show: a title, and a
+/// description in plain text.
+///
+/// It used to say "Nothing was committed … across 3 repositories" of three
+/// repositories none of which could be opened. One that was not read is not
+/// one where nothing happened, so it is not counted among those, and it is
+/// named with the reason.
+fn empty_state(result: &Contributions) -> (&'static str, String) {
+    let unread = result.errors.len();
+    let read = result.repos_scanned.saturating_sub(unread);
+    if read == 0 && unread > 0 {
+        return ("Nothing could be read", result.errors.join("\n"));
+    }
+    let mut description = format!(
+        "Nothing was committed in the last {} days across {} {}.",
+        result.window.days(),
+        read,
+        plural(read, "repository", "repositories"),
+    );
+    if unread > 0 {
+        description.push_str(&format!(
+            "\n\n{unread} more could not be read:\n{}",
+            result.errors.join("\n")
+        ));
+    }
+    ("No commits", description)
+}
+
+/// The repositories that are in none of the figures below, and why. The
+/// reasons were collected and never shown: all the page had was a count at the
+/// end of the status bar.
+fn not_counted(errors: &[String]) -> gtk::Widget {
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    card.add_css_class("om-card");
+
+    let heading = gtk::Label::builder()
+        .label(format!(
+            "{} {} could not be read and {} not counted",
+            errors.len(),
+            plural(errors.len(), "repository", "repositories"),
+            plural(errors.len(), "is", "are"),
+        ))
+        .xalign(0.0)
+        .build();
+    heading.add_css_class("om-summary");
+    card.append(&heading);
+
+    for error in errors {
+        let reason = gtk::Label::builder()
+            .label(error)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(pango::WrapMode::WordChar)
+            .build();
+        reason.add_css_class("om-meta");
+        card.append(&reason);
+    }
+
+    card.upcast()
 }
 
 /// Totals, plus a bar per day across every author.
@@ -353,14 +430,17 @@ fn author_row(author: &Author, result: &Contributions) -> gtk::Widget {
     commits.add_css_class("om-summary");
     counts.append(&commits);
 
-    let churn = gtk::Label::builder()
-        .label(format!(
-            "+{} −{}",
-            thousands(author.insertions),
-            thousands(author.deletions)
-        ))
-        .xalign(1.0)
-        .build();
+    let mut lines = format!(
+        "+{} −{}",
+        thousands(author.insertions),
+        thousands(author.deletions)
+    );
+    // Somebody whose commits could not be diffed is not somebody who changed
+    // nothing, which is what a bare +0 −0 said of them.
+    if author.uncounted > 0 {
+        lines.push_str(&format!(" and {} unread", thousands(author.uncounted)));
+    }
+    let churn = gtk::Label::builder().label(lines).xalign(1.0).build();
     churn.add_css_class("om-meta");
     counts.append(&churn);
     head.append(&counts);
@@ -405,6 +485,12 @@ fn tooltip(author: &Author) -> String {
         tip.push_str(&format!(
             "\n{} of them merges (not counted in lines)",
             author.merges
+        ));
+    }
+    if author.uncounted > 0 {
+        tip.push_str(&format!(
+            "\n{} of them with lines that could not be read (not counted in lines)",
+            author.uncounted
         ));
     }
     // Not "files touched": the figure is summed commit by commit, so ten
@@ -467,10 +553,14 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
             row.append(&summary);
 
             let churn = gtk::Label::builder()
-                .label(if commit.merge {
-                    "merge".to_string()
-                } else {
-                    format!("+{} −{}", thousands(commit.insertions), thousands(commit.deletions))
+                .label(match commit.lines {
+                    _ if commit.merge => "merge".to_string(),
+                    Some((insertions, deletions)) => {
+                        format!("+{} −{}", thousands(insertions), thousands(deletions))
+                    }
+                    // Not +0 −0, which is what it used to say: lines that
+                    // could not be read are not lines that are not there.
+                    None => "?".to_string(),
                 })
                 .xalign(1.0)
                 .width_chars(14)
@@ -486,12 +576,19 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)]) -> gtk::Box {
             when.add_css_class("om-meta");
             row.append(&when);
 
-            row.set_tooltip_text(Some(&format!(
+            let mut tip = format!(
                 "{}\n{}\n{}",
                 commit.short_id,
                 commit.summary,
                 crate::ui::absolute_time(commit.when)
-            )));
+            );
+            if commit.lines.is_none() {
+                tip.push_str(
+                    "\nIts lines could not be counted: this clone does not hold \
+                     everything the commit changed, or the commit it was made on.",
+                );
+            }
+            row.set_tooltip_text(Some(&tip));
             group.append(&row);
         }
 
@@ -596,4 +693,65 @@ fn thousands(n: usize) -> String {
         out.push(c);
     }
     out
+}
+
+// Only what the page says in words. Nothing here builds a widget.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A week over `scanned` repositories in which no commit was found, the
+    /// ones in `errors` because they could not be read.
+    fn nothing_found(scanned: usize, errors: &[&str]) -> Contributions {
+        Contributions {
+            window: stats::Window {
+                day_starts: (0..7).map(|day| day * 86_400).collect(),
+                day_labels: vec![String::new(); 7],
+                day_titles: vec![String::new(); 7],
+            },
+            authors: Vec::new(),
+            per_day_total: vec![0; 7],
+            repos_scanned: scanned,
+            repos_active: 0,
+            total_commits: 0,
+            total_insertions: 0,
+            total_deletions: 0,
+            uncounted: 0,
+            errors: errors.iter().map(|error| error.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_repository_that_was_not_read_is_not_one_where_nothing_happened() {
+        let (title, text) = empty_state(&nothing_found(3, &[]));
+        assert_eq!(title, "No commits");
+        assert_eq!(text, "Nothing was committed in the last 7 days across 3 repositories.");
+
+        let unopened = "api: could not find repository at '/srv/api'";
+        let (title, text) = empty_state(&nothing_found(1, &[unopened]));
+        assert_eq!(title, "Nothing could be read");
+        assert_eq!(text, unopened);
+
+        let (title, text) = empty_state(&nothing_found(3, &["api: object not found"]));
+        assert_eq!(title, "No commits");
+        assert_eq!(
+            text,
+            "Nothing was committed in the last 7 days across 2 repositories.\n\n\
+             1 more could not be read:\napi: object not found"
+        );
+    }
+
+    #[test]
+    fn the_status_line_leads_with_what_was_left_out() {
+        assert_eq!(
+            status_line(&nothing_found(3, &[])),
+            "0 commits  ·  0 people  ·  0/3 repos active  ·  +0 −0"
+        );
+
+        let mut result = nothing_found(3, &["api: object not found"]);
+        result.uncounted = 2;
+        let line = status_line(&result);
+        assert!(line.starts_with("1 unreadable  ·  0 commits"), "{line}");
+        assert!(line.ends_with("+0 −0  ·  2 without line counts"), "{line}");
+    }
 }
