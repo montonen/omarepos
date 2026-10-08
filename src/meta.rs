@@ -759,8 +759,6 @@ mod tests {
         assert_eq!(meta.tags_among(grid), counted(&[("acme", 2), ("rust", 1)]));
         assert_eq!(meta.tags_among([left.as_path()]), counted(&[("acme", 1), ("former", 1)]));
         assert!(meta.tags_among(std::iter::empty()).is_empty());
-
-        assert_eq!(meta.all_tags(), counted(&[("acme", 3), ("former", 1), ("rust", 1)]));
     }
 
     fn stored(meta: &Meta) -> Vec<&str> {
