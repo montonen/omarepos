@@ -29,11 +29,29 @@ pub struct WorkTree {
     pub unstaged: usize,
     pub untracked: usize,
     pub conflicted: usize,
+    /// Why the counts above are not counts at all: libgit2 could not read the
+    /// index or the status, and said this. It refuses an index written with
+    /// `core.splitIndex` or as a sparse index, both of which git itself reads
+    /// without a word, and one cut short by a crash. The counts stay at zero,
+    /// and zero used to be drawn as a green "clean" on a repository with
+    /// edits in it.
+    ///
+    /// Kept apart from [`RepoInfo::error`] on purpose. That one means the
+    /// repository could not be read at all: it takes the card's other pills
+    /// away, refuses to open the commit graph and drops the repository from
+    /// every fetch, and none of that is true of a repository whose history
+    /// and remotes read perfectly well.
+    pub unreadable: Option<String>,
 }
 
 impl WorkTree {
+    /// Known to be clean. A tree that could not be read is not.
     pub fn is_clean(&self) -> bool {
-        self.staged == 0 && self.unstaged == 0 && self.untracked == 0 && self.conflicted == 0
+        self.unreadable.is_none()
+            && self.staged == 0
+            && self.unstaged == 0
+            && self.untracked == 0
+            && self.conflicted == 0
     }
 
     pub fn total(&self) -> usize {
@@ -62,6 +80,11 @@ pub struct RepoInfo {
     pub unpushed: usize,
     /// Other local branches that hold commits on no remote.
     pub stray_branches: usize,
+    /// Why `ahead`, `behind`, `unpushed` and `stray_branches` are not counts
+    /// at all: the commits between here and the remotes could not be walked,
+    /// and libgit2 said this. A zero that means "could not count" is not to be
+    /// shown as nothing to push.
+    pub history_unreadable: Option<String>,
     pub upstream: Option<String>,
     /// When the upstream tip was committed. Without it a card can only say how
     /// old the local commit is, which reads as "nothing has happened here"
@@ -80,7 +103,11 @@ pub struct RepoInfo {
     /// The credential helper that will be used for the remote's host, which is
     /// what decides *which account* a fetch authenticates as.
     pub credentials: Option<String>,
-    /// Set when libgit2 could not read the repository at all.
+    /// Set when libgit2 could not read the repository at all: it does not
+    /// open, it is not this directory's, or HEAD or the commit it names cannot
+    /// be read. A narrower failure has a field of its own, so that it does not
+    /// cost the repository everything else the card can still say:
+    /// [`WorkTree::unreadable`] and `history_unreadable`.
     pub error: Option<String>,
 }
 
@@ -100,6 +127,11 @@ impl RepoInfo {
         }
         if self.ahead > 0 {
             return Some("unpushed commits of its own");
+        }
+        // The refresher takes a status it cannot read as a reason not to
+        // proceed, so the card must not promise that it will.
+        if self.tree.unreadable.is_some() {
+            return Some("its working tree could not be read");
         }
         // Untracked files do not hold a fast-forward back. The exception, an
         // incoming file of the same name, is one only git can see coming: it
@@ -249,15 +281,22 @@ pub const UNPUSHED_CAP: usize = 1000;
 
 /// How many commits reachable from `from` are on no remote, counted up to
 /// `cap`. This is `git rev-list --count <from> --not --remotes`.
-fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> usize {
-    let Ok(mut walk) = repo.revwalk() else { return 0 };
-    if walk.push(from).is_err() {
-        return 0;
-    }
+///
+/// A walk that fails is an error and not a count. It used to be a count both
+/// ways: a walk that could not start was zero, and one that broke off at a
+/// commit it could not read counted the failure itself as a commit.
+fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> Result<usize, git2::Error> {
+    let mut walk = repo.revwalk()?;
+    walk.push(from)?;
     // No remote-tracking refs at all is not an error: then nothing is hidden,
     // and everything counts.
     let _ = walk.hide_glob("refs/remotes/*");
-    walk.take(cap).count()
+    let mut count = 0;
+    for step in walk.take(cap) {
+        step?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Walk `roots` looking for repositories, at most `max_depth` levels down.
@@ -399,7 +438,15 @@ fn walk(
     }
 }
 
-/// Inspect one repository. Never fails: problems land in `RepoInfo::error`.
+/// Inspect one repository. Never fails, and never passes a read that failed
+/// off as a reading of zero: a repository that cannot be read at all says so in
+/// [`RepoInfo::error`], a working tree that cannot in [`WorkTree::unreadable`],
+/// and commits that cannot be counted in [`RepoInfo::history_unreadable`].
+///
+/// It used to promise the first and do none of the three for anything past
+/// opening the repository. An index libgit2 refused came out as a clean tree
+/// with no files in it, and a newest commit lost to a power cut as "no commits
+/// yet", on the one screen meant to show which repositories need looking at.
 pub fn inspect(path: &Path) -> RepoInfo {
     let name = path
         .file_name()
@@ -418,6 +465,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
         behind: 0,
         unpushed: 0,
         stray_branches: 0,
+        history_unreadable: None,
         upstream: None,
         upstream_when: None,
         remote: None,
@@ -457,20 +505,29 @@ pub fn inspect(path: &Path) -> RepoInfo {
             } else {
                 info.head = head.shorthand().unwrap_or("HEAD").to_string();
             }
-            if let Ok(commit) = head.peel_to_commit() {
-                let author = commit.author();
-                info.last_commit = Some(Commit {
-                    summary: commit
-                        .summary()
-                        .ok()
-                        .flatten()
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                    author: author.name().unwrap_or("unknown").to_string(),
-                    when: commit.time().seconds(),
-                    short_id: short(&commit.id()),
-                });
+            match head.peel_to_commit() {
+                Ok(commit) => {
+                    let author = commit.author();
+                    info.last_commit = Some(Commit {
+                        summary: commit
+                            .summary()
+                            .ok()
+                            .flatten()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                        author: author.name().unwrap_or("unknown").to_string(),
+                        when: commit.time().seconds(),
+                        short_id: short(&commit.id()),
+                    });
+                }
+                // HEAD names a commit and the commit is not there, or is not
+                // one: git calls this a bad object and stops. The card went on
+                // to say "clean" and "no commits yet".
+                Err(err) => {
+                    info.error = Some(format!("Its newest commit cannot be read: {}", err.message()));
+                    return info;
+                }
             }
         }
         Err(err) if err.code() == git2::ErrorCode::UnbornBranch => {
@@ -499,9 +556,12 @@ pub fn inspect(path: &Path) -> RepoInfo {
                 let local = branch.get().target();
                 let remote = upstream.get().target();
                 if let (Some(local), Some(remote)) = (local, remote) {
-                    if let Ok((ahead, behind)) = repo.graph_ahead_behind(local, remote) {
-                        info.ahead = ahead;
-                        info.behind = behind;
+                    match repo.graph_ahead_behind(local, remote) {
+                        Ok((ahead, behind)) => {
+                            info.ahead = ahead;
+                            info.behind = behind;
+                        }
+                        Err(err) => info.history_unreadable = Some(err.message().to_string()),
                     }
                 }
             }
@@ -515,15 +575,26 @@ pub fn inspect(path: &Path) -> RepoInfo {
     if !info.bare && !info.unborn {
         let head = repo.head().ok().and_then(|head| head.target());
         if let Some(head) = head {
-            info.unpushed = on_no_remote(&repo, head, UNPUSHED_CAP);
+            match on_no_remote(&repo, head, UNPUSHED_CAP) {
+                Ok(count) => info.unpushed = count,
+                Err(err) => {
+                    info.history_unreadable.get_or_insert_with(|| err.message().to_string());
+                }
+            }
         }
         if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
-            info.stray_branches = branches
-                .flatten()
-                .filter_map(|(branch, _)| branch.get().target())
-                .filter(|tip| Some(*tip) != head)
-                .filter(|tip| on_no_remote(&repo, *tip, 1) > 0)
-                .count();
+            for tip in branches.flatten().filter_map(|(branch, _)| branch.get().target()) {
+                if Some(tip) == head {
+                    continue;
+                }
+                match on_no_remote(&repo, tip, 1) {
+                    Ok(0) => {}
+                    Ok(_) => info.stray_branches += 1,
+                    Err(err) => {
+                        info.history_unreadable.get_or_insert_with(|| err.message().to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -579,30 +650,35 @@ pub fn inspect(path: &Path) -> RepoInfo {
             .recurse_untracked_dirs(false)
             .include_ignored(false)
             .exclude_submodules(true);
-        if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
-            for entry in statuses.iter() {
-                let s = entry.status();
-                if s.is_conflicted() {
-                    info.tree.conflicted += 1;
-                } else if s.intersects(
-                    git2::Status::INDEX_NEW
-                        | git2::Status::INDEX_MODIFIED
-                        | git2::Status::INDEX_DELETED
-                        | git2::Status::INDEX_RENAMED
-                        | git2::Status::INDEX_TYPECHANGE,
-                ) {
-                    info.tree.staged += 1;
-                } else if s.contains(git2::Status::WT_NEW) {
-                    info.tree.untracked += 1;
-                } else if s.intersects(
-                    git2::Status::WT_MODIFIED
-                        | git2::Status::WT_DELETED
-                        | git2::Status::WT_RENAMED
-                        | git2::Status::WT_TYPECHANGE,
-                ) {
-                    info.tree.unstaged += 1;
+        match repo.statuses(Some(&mut opts)) {
+            Ok(statuses) => {
+                for entry in statuses.iter() {
+                    let s = entry.status();
+                    if s.is_conflicted() {
+                        info.tree.conflicted += 1;
+                    } else if s.intersects(
+                        git2::Status::INDEX_NEW
+                            | git2::Status::INDEX_MODIFIED
+                            | git2::Status::INDEX_DELETED
+                            | git2::Status::INDEX_RENAMED
+                            | git2::Status::INDEX_TYPECHANGE,
+                    ) {
+                        info.tree.staged += 1;
+                    } else if s.contains(git2::Status::WT_NEW) {
+                        info.tree.untracked += 1;
+                    } else if s.intersects(
+                        git2::Status::WT_MODIFIED
+                            | git2::Status::WT_DELETED
+                            | git2::Status::WT_RENAMED
+                            | git2::Status::WT_TYPECHANGE,
+                    ) {
+                        info.tree.unstaged += 1;
+                    }
                 }
             }
+            // There was no arm for this, so the counts stayed at zero and
+            // zero is what "clean" is drawn from.
+            Err(err) => info.tree.unreadable = Some(err.message().to_string()),
         }
     }
 
@@ -614,7 +690,19 @@ pub fn inspect(path: &Path) -> RepoInfo {
     info.stashes = stashes;
 
     // Language mix from the index: fast, and it only ever sees tracked files.
-    if let Ok(index) = repo.index() {
+    let index = match repo.index() {
+        Ok(index) => Some(index),
+        // The index the status was read from, and so nearly always the same
+        // refusal. Where the status somehow got by without it, "0 files" and
+        // an empty language bar are still not a reading.
+        Err(err) => {
+            if !info.bare {
+                info.tree.unreadable.get_or_insert_with(|| err.message().to_string());
+            }
+            None
+        }
+    };
+    if let Some(index) = index {
         let mut counts: HashMap<&'static str, (usize, &'static str)> = HashMap::new();
         let mut total = 0usize;
         for entry in index.iter() {
@@ -730,6 +818,104 @@ mod tests {
         git(&f.work, &["submodule", "add", "-q", lib.remote.to_str().unwrap(), "lib"]);
         assert_eq!(inspect(&f.work.join("lib")).error, None, "a submodule");
         assert_eq!(inspect(&f.work).error, None, "and the repository it lives in");
+    }
+
+    // ---- a read that fails is not a reading of zero ------------------------
+
+    /// Take a loose object away, the way a power cut in the middle of a commit
+    /// does.
+    fn lose_object(repo: &Path, rev: &str) {
+        let id = git(repo, &["rev-parse", rev]);
+        let file = repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
+        std::fs::remove_file(&file).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+    }
+
+    #[test]
+    fn an_index_that_cannot_be_read_is_not_a_clean_repository() {
+        let _guard = isolate();
+        let f = fleet("inspect-split-index");
+        // What `core.splitIndex` does on the next write. git reads it without
+        // a word; libgit2 refuses the whole index.
+        git(&f.work, &["update-index", "--split-index"]);
+        write(&f.work.join("README.md"), "one\ntwo\n");
+        assert_eq!(git(&f.work, &["status", "--short"]), "M README.md");
+
+        let info = inspect(&f.work);
+        assert!(!info.tree.is_clean(), "an edited file, and the card says clean");
+        let why = info.tree.unreadable.clone().expect("it has to say what stopped it");
+        assert!(why.contains("link"), "{why}");
+        // Not through `error`: that takes the commit graph and the fetch away
+        // from a repository whose history reads perfectly well.
+        assert_eq!(info.error, None);
+        assert_eq!(info.head, "main");
+        assert_eq!(info.history_unreadable, None);
+        // The refresher will not fast-forward over a status it cannot read,
+        // and the card has to agree with it.
+        assert_eq!(info.update_blocked_by(), Some("its working tree could not be read"));
+
+        // An index cut short, which is what a crash leaves.
+        let f = fleet("inspect-cut-index");
+        let index = f.work.join(".git/index");
+        let whole = std::fs::read(&index).unwrap();
+        std::fs::write(&index, &whole[..40]).unwrap();
+        let info = inspect(&f.work);
+        assert!(info.tree.unreadable.is_some() && !info.tree.is_clean());
+        assert_eq!(info.error, None);
+    }
+
+    #[test]
+    fn a_repository_whose_newest_commit_cannot_be_read_says_so() {
+        let _guard = isolate();
+        let f = fleet("inspect-lost-head");
+        commit_file(&f.work, "a.txt", "a\n", "one");
+        commit_file(&f.work, "b.txt", "b\n", "two");
+        lose_object(&f.work, "HEAD");
+
+        let info = inspect(&f.work);
+        assert!(info.error.is_some(), "it read as: {:?} {:?}", info.head, info.last_commit);
+    }
+
+    #[test]
+    fn commits_that_cannot_be_counted_are_not_counted_as_none() {
+        let _guard = isolate();
+        let f = fleet("inspect-lost-history");
+        for name in ["a", "b", "c"] {
+            commit_file(&f.work, &format!("{name}.txt"), "x\n", name);
+        }
+        assert_eq!(standing(&f.work), (3, 3, 0));
+        lose_object(&f.work, "HEAD~1");
+
+        // The newest commit, the index and the files are all still there.
+        let info = inspect(&f.work);
+        assert_eq!(info.error, None);
+        assert_eq!(info.tree.unreadable, None);
+        assert!(info.history_unreadable.is_some(), "{} ahead, {} unpushed", info.ahead, info.unpushed);
+
+        // A shallow clone stops short on purpose, and that is not damage.
+        let f = fleet("inspect-shallow");
+        f.remote_moves(3);
+        let url = format!("file://{}", f.remote.display());
+        git(&f.root, &["clone", "-q", "--depth", "1", &url, "shallow"]);
+        let shallow = f.root.join("shallow");
+        commit_file(&shallow, "mine.txt", "x\n", "mine");
+        let info = inspect(&shallow);
+        assert_eq!((info.error.clone(), info.history_unreadable.clone()), (None, None));
+        assert_eq!((info.ahead, info.unpushed), (1, 1));
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_still_has_a_working_tree() {
+        let _guard = isolate();
+        let dir = scratch("inspect-unborn");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        write(&dir.join("README.md"), "one\n");
+        write(&dir.join("main.rs"), "fn main() {}\n");
+        git(&dir, &["add", "--", "README.md"]);
+
+        let info = inspect(&dir);
+        assert_eq!(info.error, None);
+        assert!(info.unborn);
+        assert_eq!((info.tree.staged, info.tree.untracked), (1, 1));
     }
 
     #[test]

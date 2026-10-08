@@ -224,6 +224,15 @@ fn pills(
         row.append(&pill("bare", ""));
     } else if info.unborn {
         row.append(&pill("no commits", ""));
+    } else if let Some(why) = &info.tree.unreadable {
+        // Its own pill. "clean" would be false, and the pill below, with every
+        // count at zero, would be drawn with nothing in it.
+        let p = pill("status unreadable", "danger");
+        p.set_tooltip_text(Some(&format!(
+            "What is uncommitted here is not known: the index could not be read.\n{why}\n\
+             git itself may read it without trouble; `git status` in a terminal will say."
+        )));
+        row.append(&p);
     } else if info.tree.is_clean() {
         row.append(&pill("clean", "clean"));
     } else {
@@ -306,6 +315,16 @@ fn pills(
             "{} other local {} commits that are on no remote.",
             info.stray_branches,
             if info.stray_branches == 1 { "branch holds" } else { "branches hold" }
+        )));
+        row.append(&p);
+    }
+    // Without this, counts that could not be taken draw no pill at all, which
+    // is exactly how "nothing to push" is drawn.
+    if let Some(why) = &info.history_unreadable {
+        let p = pill("history unreadable", "danger");
+        p.set_tooltip_text(Some(&format!(
+            "How far this is from its remotes is not known: the commits in between could not \
+             be read.\n{why}"
         )));
         row.append(&p);
     }
