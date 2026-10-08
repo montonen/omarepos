@@ -9,16 +9,126 @@ use gtk::gdk;
 use gtk::glib;
 use gtk::pango;
 
-use crate::search::{self, Cancel, Hit};
+use crate::search::{self, Cancel, Hit, Stopped};
 use crate::ui::{absolute_time, key_color, relative_time};
 
 /// Below this a query matches most of history and the wait is not worth it.
 const MIN_QUERY: usize = 2;
 /// Typing is faster than walking a fleet's history, so wait for a pause.
 const DEBOUNCE_MS: u64 = 350;
-/// Rows past this are not worth building; the status bar says how many there
-/// were.
-const MAX_ROWS: usize = 500;
+/// Rows past this are not worth building. It is as many as one repository may
+/// hand over, which is what lets the status bar call the rows the newest: see
+/// `search::MAX_HITS_PER_REPO`. The status bar says when there were more, and
+/// when a repository stopped before the end of its history.
+const MAX_ROWS: usize = search::MAX_HITS_PER_REPO;
+
+/// What a finished search knows about itself, for the two places that say it:
+/// the status bar, and the page shown when nothing was found.
+///
+/// The last two fields are what used to be missing. A repository stops at a
+/// number of matches and at a number of commits, and told nobody: the sum of
+/// what arrived was printed as the number of commits that match, and "Nothing
+/// in N repositories matches" was said of history that had not been read.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    /// Matches that arrived.
+    found: usize,
+    /// Repositories at least one of them came from.
+    repos_hit: usize,
+    /// Repositories searched.
+    repos: usize,
+    /// Repositories that stopped at `search::MAX_HITS_PER_REPO` matches. Each
+    /// may hold more, older than the ones it handed over.
+    at_matches: usize,
+    /// Repositories read only `search::MAX_COMMITS_PER_REPO` commits back.
+    at_depth: usize,
+}
+
+impl Tally {
+    fn status(&self) -> String {
+        let commits = plural(self.found, "commit", "commits");
+        // With a repository that stopped, what arrived is a floor and not a
+        // count.
+        let partial = self.at_matches + self.at_depth > 0;
+        let mut parts = vec![
+            if partial && self.found > 0 {
+                format!("at least {} {commits}", thousands(self.found))
+            } else {
+                format!("{} {commits}", thousands(self.found))
+            },
+            format!("in {} of {} repos", self.repos_hit, self.repos),
+        ];
+        if self.at_matches > 0 {
+            parts.push(format!(
+                "{} {} stopped at {} matches, narrow the query",
+                self.at_matches,
+                plural(self.at_matches, "repo", "repos"),
+                thousands(search::MAX_HITS_PER_REPO),
+            ));
+        }
+        if self.at_depth > 0 {
+            parts.push(format!(
+                "{} {} read only {} commits back",
+                self.at_depth,
+                plural(self.at_depth, "repo", "repos"),
+                thousands(search::MAX_COMMITS_PER_REPO),
+            ));
+        }
+        if self.found > MAX_ROWS {
+            // Each repository hands over its newest matches, and as many as
+            // are listed here, so the rows are the newest there are. Unless
+            // one ran out of depth: what it did not read is older than
+            // everything it did, and may still be newer than a match from
+            // another repository.
+            parts.push(if self.at_depth == 0 {
+                format!("newest {MAX_ROWS} shown")
+            } else {
+                format!("{MAX_ROWS} shown")
+            });
+        }
+        parts.join("  ·  ")
+    }
+
+    /// For the page shown when no match arrived.
+    fn nothing(&self, query: &str) -> String {
+        let repositories = plural(self.repos, "repository", "repositories");
+        if self.at_depth == 0 {
+            return format!("Nothing in {} {repositories} matches “{query}”.", self.repos);
+        }
+        format!(
+            "Nothing found for “{query}” in {} {repositories}. {} of them {} read only {} \
+             commits back, so an older match would not have been found.",
+            self.repos,
+            self.at_depth,
+            plural(self.at_depth, "was", "were"),
+            thousands(search::MAX_COMMITS_PER_REPO),
+        )
+    }
+}
+
+fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+
+/// Digits in threes, the way the contributions page writes them.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('\u{202f}');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The status bar holds one line and cuts what does not fit, and a search
+/// that stopped somewhere has more to say than fits. The tooltip has it all.
+fn say(status: &gtk::Label, text: &str) {
+    status.set_label(text);
+    status.set_tooltip_text(Some(text));
+}
 
 /// `on_open` takes a repository, its name and the commit to open on.
 pub fn page(
@@ -74,7 +184,7 @@ pub fn page(
         .ellipsize(pango::EllipsizeMode::End)
         .build();
     status.add_css_class("om-statusbar");
-    status.set_label(&format!("{} · nothing searched yet", scope));
+    say(&status, &format!("{} · nothing searched yet", scope));
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     body.append(&stack);
@@ -181,11 +291,11 @@ pub fn page(
 
             if query.chars().count() < MIN_QUERY {
                 stack.set_visible_child_name("prompt");
-                status.set_label(&format!("{scope} · type at least {MIN_QUERY} characters"));
+                say(&status, &format!("{scope} · type at least {MIN_QUERY} characters"));
                 return;
             }
 
-            status.set_label(&format!("{scope} · searching…"));
+            say(&status, &format!("{scope} · searching…"));
 
             let (rx, cancel) = search::spawn((*repos).clone(), query.clone(), 6);
             *running.borrow_mut() = Some(cancel);
@@ -207,22 +317,25 @@ pub fn page(
                 }
 
                 let mut hits: Vec<Hit> = Vec::new();
-                let mut searched = 0usize;
-                let mut total = 0usize;
+                let mut tally = Tally::default();
                 while let Ok(event) = rx.recv().await {
                     if *generation.borrow() != mine {
                         return;
                     }
                     match event {
                         search::Event::Progress(done, of) => {
-                            searched = done;
-                            total = of;
-                            status.set_label(&format!(
-                                "{scope} · searching {done}/{of} · {} so far",
-                                hits.len()
-                            ));
+                            tally.repos = of;
+                            say(
+                                &status,
+                                &format!(
+                                    "{scope} · searching {done}/{of} · {} so far",
+                                    hits.len()
+                                ),
+                            );
                         }
                         search::Event::Hits(found) => hits.extend(found),
+                        search::Event::Stopped(Stopped::Matches) => tally.at_matches += 1,
+                        search::Event::Stopped(Stopped::Depth) => tally.at_depth += 1,
                         search::Event::Done => break,
                     }
                 }
@@ -231,12 +344,13 @@ pub fn page(
                 }
 
                 hits.sort_by(|a, b| b.when.cmp(&a.when));
-                let found = hits.len();
-                let repos_hit = {
-                    let mut names: Vec<&str> = hits.iter().map(|h| h.repo.as_str()).collect();
-                    names.sort_unstable();
-                    names.dedup();
-                    names.len()
+                tally.found = hits.len();
+                tally.repos_hit = {
+                    // By path: two repositories can have the same name.
+                    let mut from: Vec<&PathBuf> = hits.iter().map(|h| &h.path).collect();
+                    from.sort_unstable();
+                    from.dedup();
+                    from.len()
                 };
 
                 rows.remove_all();
@@ -246,25 +360,18 @@ pub fn page(
                 }
                 *listed.borrow_mut() = visible;
 
-                if found == 0 {
+                if tally.found == 0 {
                     // A status page's description is markup, with no switch
                     // to say otherwise, and this is what was typed.
-                    empty.set_description(Some(&glib::markup_escape_text(&format!(
-                        "Nothing in {searched} repositories matches “{query}”."
-                    ))));
+                    empty.set_description(Some(&glib::markup_escape_text(
+                        &tally.nothing(&query),
+                    )));
                     stack.set_visible_child_name("empty");
                 } else {
                     stack.set_visible_child_name("results");
                 }
 
-                let mut parts = vec![
-                    format!("{found} {}", if found == 1 { "commit" } else { "commits" }),
-                    format!("in {repos_hit} of {total} repos"),
-                ];
-                if found > MAX_ROWS {
-                    parts.push(format!("newest {MAX_ROWS} shown"));
-                }
-                status.set_label(&parts.join("  ·  "));
+                say(&status, &tally.status());
             });
         });
     }
@@ -364,4 +471,74 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
         hit.id,
     )));
     row
+}
+
+/// What the page says once a search is over. Words only: nothing here builds
+/// a widget, so nothing needs a display.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Thin spaces are for the screen. Here they are in the way.
+    fn plain(text: String) -> String {
+        text.replace('\u{202f}', ",")
+    }
+
+    #[test]
+    fn a_search_that_read_everything_gives_a_count() {
+        let all = Tally { found: 37, repos_hit: 3, repos: 44, ..Tally::default() };
+        assert_eq!(plain(all.status()), "37 commits  ·  in 3 of 44 repos");
+        let one = Tally { found: 1, repos_hit: 1, repos: 1, ..Tally::default() };
+        assert_eq!(plain(one.status()), "1 commit  ·  in 1 of 1 repos");
+
+        let none = Tally { repos: 44, ..Tally::default() };
+        assert_eq!(plain(none.status()), "0 commits  ·  in 0 of 44 repos");
+        assert_eq!(none.nothing("typo"), "Nothing in 44 repositories matches “typo”.");
+        let none_in_one = Tally { repos: 1, ..Tally::default() };
+        assert_eq!(none_in_one.nothing("typo"), "Nothing in 1 repository matches “typo”.");
+    }
+
+    /// Three repositories with 400, 300 and 300 matches used to read "600
+    /// commits · in 3 of 3 repos · newest 500 shown": a sum of limits given as
+    /// a count, over rows that were not the newest.
+    #[test]
+    fn a_repository_that_stopped_at_its_matches_turns_the_count_into_a_floor() {
+        let tally = Tally { found: 1037, repos_hit: 12, repos: 44, at_matches: 2, at_depth: 0 };
+        assert_eq!(
+            plain(tally.status()),
+            "at least 1,037 commits  ·  in 12 of 44 repos  ·  \
+             2 repos stopped at 500 matches, narrow the query  ·  newest 500 shown"
+        );
+        // Few enough to list them all: still not all there are.
+        let listed = Tally { found: 500, repos_hit: 1, repos: 1, at_matches: 1, at_depth: 0 };
+        assert_eq!(
+            plain(listed.status()),
+            "at least 500 commits  ·  in 1 of 1 repos  ·  \
+             1 repo stopped at 500 matches, narrow the query"
+        );
+    }
+
+    /// "Nothing in 1 repositories matches" was said of a repository whose
+    /// only matches were further back than it had been read.
+    #[test]
+    fn a_repository_that_ran_out_of_depth_is_not_said_to_hold_nothing() {
+        let tally = Tally { repos: 3, at_depth: 1, ..Tally::default() };
+        assert_eq!(
+            plain(tally.nothing("ticket-12")),
+            "Nothing found for “ticket-12” in 3 repositories. 1 of them was read only 50,000 \
+             commits back, so an older match would not have been found."
+        );
+        assert_eq!(
+            plain(tally.status()),
+            "0 commits  ·  in 0 of 3 repos  ·  1 repo read only 50,000 commits back"
+        );
+
+        // With rows to cut, they are no longer known to be the newest.
+        let cut = Tally { found: 620, repos_hit: 5, repos: 9, at_matches: 0, at_depth: 2 };
+        assert_eq!(
+            plain(cut.status()),
+            "at least 620 commits  ·  in 5 of 9 repos  ·  \
+             2 repos read only 50,000 commits back  ·  500 shown"
+        );
+    }
 }
