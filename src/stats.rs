@@ -78,7 +78,7 @@ pub struct Commit {
     /// `when` after a rebase, an amend or a cherry-pick.
     pub committed: i64,
     /// Lines added and removed, or nothing where they could not be read: see
-    /// [`diff_stats`]. A merge has none of its own and says `(0, 0)`.
+    /// `diff_stats`. A merge has none of its own and says `(0, 0)`.
     pub lines: Option<(usize, usize)>,
     pub merge: bool,
 }
@@ -88,7 +88,7 @@ pub struct Commit {
 /// message in memory for a list nobody scrolls that far down.
 #[derive(Debug, Clone, Default)]
 pub struct RepoCommits {
-    /// What to call the repository: see [`labels`].
+    /// What to call the repository: see `labels`.
     pub name: String,
     pub commits: Vec<Commit>,
     pub total: usize,
@@ -319,6 +319,7 @@ impl Tally {
                 .cmp(&a.commits)
                 .then_with(|| b.churn().cmp(&a.churn()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.email.cmp(&b.email))
         });
         Contributions {
             window,
@@ -414,18 +415,19 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Found
     let mut walk = repo.revwalk().map_err(said)?;
     walk.set_sorting(Sort::TIME).map_err(said)?;
 
-    // HEAD and its upstream, and nothing else: see the top of the file. HEAD
-    // used to be walked only when no branch could be, so a commit made on a
-    // detached HEAD was counted nowhere.
-    let mut found = Found::default();
-    let Some(head) = head_commit(&repo).map_err(said)? else {
-        return Ok(found);
-    };
     // A window of no days holds nothing, and has no end for a commit to be
     // dated after.
+    let mut found = Found::default();
     if window.days() == 0 {
         return Ok(found);
     }
+
+    // HEAD and its upstream, and nothing else: see the top of the file. HEAD
+    // used to be walked only when no branch could be, so a commit made on a
+    // detached HEAD was counted nowhere.
+    let Some(head) = head_commit(&repo).map_err(said)? else {
+        return Ok(found);
+    };
     walk.push(head).map_err(said)?;
     let mut rewritten = HashSet::new();
     if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
@@ -570,6 +572,9 @@ fn rewritten_upstream(
     upstream: Oid,
     since: i64,
 ) -> Result<HashSet<Oid>, git2::Error> {
+    if head == upstream {
+        return Ok(HashSet::new());
+    }
     let (ahead, behind) = repo.graph_ahead_behind(head, upstream)?;
     if ahead == 0 || behind == 0 {
         return Ok(HashSet::new());
@@ -897,6 +902,60 @@ mod tests {
     /// `n` lines that no other file has.
     fn text(name: &str, n: usize) -> String {
         (0..n).map(|i| format!("{name} line {i}\n")).collect()
+    }
+
+    // ---- beside git -----------------------------------------------------------
+
+    /// A week with nothing rewritten in it, across two repositories: several
+    /// authors, a branch merged the long way, work fetched and not merged,
+    /// work not pushed, and something from last month. This is where the page
+    /// and `git shortlog -sne --since=<the window> HEAD @{u}` have no reason to
+    /// differ, and the figures on the page were first put beside git's.
+    #[test]
+    fn an_ordinary_week_reads_the_same_here_and_in_git_shortlog() {
+        let _guard = isolate();
+        let f = fleet("stats-week");
+        let carol = ("Carol Example", "carol@example.invalid");
+        commit_as(&f.seed, BOB, "b1.txt", &lines(12), "bob one");
+        commit_as(&f.seed, carol, "c1.txt", &lines(7), "carol one");
+        git(&f.seed, &["checkout", "-q", "-b", "topic"]);
+        commit_as(&f.seed, carol, "c2.txt", &lines(5), "carol on a branch");
+        commit_as(&f.seed, BOB, "b1.txt", &lines(9), "bob trims");
+        git(&f.seed, &["checkout", "-q", "main"]);
+        commit_as(&f.seed, BOB, "b2.txt", &lines(4), "bob meanwhile");
+        git(&f.seed, &["merge", "-q", "--no-ff", "-m", "Merge topic", "topic"]);
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["fetch", "--quiet"]);
+        commit_as(&f.work, ("Dana", "dana@example.invalid"), "d.txt", &lines(3), "dana, not pushed");
+
+        let other = scratch("stats-week-other");
+        git(&other, &["init", "-q", "-b", "main"]);
+        write(&other.join("old.txt"), &lines(40));
+        git(&other, &["add", "."]);
+        git_at(&other, now() - 30 * DAY, &["commit", "-q", "-m", "last month"]);
+        commit_as(&other, carol, "x.txt", &lines(2), "carol elsewhere");
+
+        let result = contributions(&[&f.work, &other]);
+
+        let mut authors = shortlog(&f.work, &["HEAD", "@{u}"]);
+        for (who, commits) in shortlog(&other, &["HEAD"]) {
+            *authors.entry(who).or_insert(0) += commits;
+        }
+        assert_eq!(by_author(&result), authors);
+        let expected: BTreeMap<String, usize> =
+            [(BOB.1, 3), (carol.1, 3), ("dana@example.invalid", 1), ("fixture@example.invalid", 2)]
+                .map(|(who, commits)| (who.to_string(), commits))
+                .into();
+        assert_eq!(authors, expected);
+
+        let (here, there) = (git_totals(&f.work, &["HEAD", "@{u}"]), git_totals(&other, &["HEAD"]));
+        assert_eq!(totals(&result), (here.0 + there.0, here.1 + there.1, here.2 + there.2));
+        assert_eq!(totals(&result), (9, 34, 3));
+
+        let merger = result.authors.iter().find(|a| a.email == "fixture@example.invalid").unwrap();
+        assert_eq!((merger.commits, merger.merges, merger.insertions), (2, 1, 1));
+        assert_eq!((result.repos_active, result.uncounted, result.future), (2, 0, 0));
+        assert_eq!(result.errors, Vec::<String>::new());
     }
 
     // ---- which commits are walked -------------------------------------------
@@ -1269,6 +1328,28 @@ mod tests {
         assert_eq!(result.total_commits, 0);
         assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
         assert!(result.errors[0].starts_with("stats-hole: "), "{:?}", result.errors);
+    }
+
+    /// A commit whose tree is gone cannot be compared with its parent, and the
+    /// commit after it cannot be compared with it. The second used to be
+    /// compared with nothing, and came out as every line in the repository.
+    #[test]
+    fn a_missing_tree_is_two_commits_without_lines_and_not_one_with_all_of_them() {
+        let _guard = isolate();
+        let dir = scratch("stats-no-tree");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for (file, length) in [("a.txt", 10), ("b.txt", 5), ("c.txt", 3), ("d.txt", 2)] {
+            commit_file(&dir, file, &lines(length), file);
+        }
+        let lost = git(&dir, &["rev-parse", "HEAD~1^{tree}"]);
+        std::fs::remove_file(dir.join(".git/objects").join(&lost[..2]).join(&lost[2..])).unwrap();
+
+        let result = contributions(&[&dir]);
+        assert_eq!(result.errors, Vec::<String>::new());
+        assert_eq!(listed(&result, "b.txt").lines, Some((5, 0)));
+        assert_eq!(listed(&result, "c.txt").lines, None);
+        assert_eq!(listed(&result, "d.txt").lines, None);
+        assert_eq!((totals(&result), result.uncounted), ((4, 15, 0), 2));
     }
 
     #[test]
