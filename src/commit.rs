@@ -1095,9 +1095,32 @@ fn push(repo: &Path, armed: &PushPlan) -> Result<String, PushError> {
     // Ask again. The button was drawn from a page that sat open while a
     // terminal was one key away; what it promised is only sent if it is still
     // what the repository says.
-    let now = crate::git::open_here(repo).and_then(|repo| push_plan(&repo));
+    let opened = crate::git::open_here(repo);
+    let now = opened.as_ref().map_err(String::clone).and_then(push_plan);
     match now {
-        Ok(now) if now == *armed => {}
+        // Still the same plan. Whether there is still anything to send is not
+        // part of a plan: the button counted the commits ahead when the page
+        // was read, and a push from a terminal since leaves the branch where
+        // it was with nothing ahead. git answers a push of nothing with
+        // success, and "Pushed main to origin" was said of one that sent
+        // nothing at all.
+        Ok(now) if now == *armed => {
+            let there = opened
+                .as_ref()
+                .ok()
+                .filter(|_| !armed.publish)
+                .and_then(|repo| {
+                    let tracking = repo.branch_upstream_name(&format!("refs/heads/{}", armed.branch)).ok()?;
+                    repo.refname_to_id(tracking.as_str().ok()?).ok()
+                })
+                .map(|id| id.to_string());
+            if there.as_deref() == Some(armed.tip.as_str()) {
+                return Err(PushError::Stale(format!(
+                    "{} already has {} at this commit. Nothing was pushed.",
+                    armed.remote, armed.branch
+                )));
+            }
+        }
         Ok(now) if now.branch != armed.branch => {
             return Err(PushError::Stale(format!(
                 "HEAD is on {} now, not {}. Nothing was pushed.",
@@ -2327,6 +2350,24 @@ mod tests {
         let got = push(&f.work, &armed);
         assert!(matches!(got, Err(PushError::Stale(_))), "{got:?}");
         assert_eq!(f.remote_ref("refs/heads/main"), there);
+    }
+
+    /// The button said "Push 1", and the commit has since gone out from a
+    /// terminal. git answers a push of nothing with success, and the toast
+    /// said "Pushed main to origin" about it.
+    #[test]
+    fn a_push_with_nothing_left_to_send_is_not_reported_as_a_push() {
+        let _guard = isolate();
+        let f = fleet("cm-push-nothing");
+        commit_file(&f.work, "mine.txt", "mine\n", "ready");
+        let armed = plan(&f).unwrap();
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        assert_eq!(plan(&f).unwrap(), armed, "same branch, same commit, same place");
+
+        let got = push(&f.work, &armed);
+
+        let Err(PushError::Stale(why)) = &got else { panic!("{got:?}") };
+        assert!(why.contains("origin already has main"), "{why}");
     }
 
     #[test]
