@@ -525,9 +525,35 @@ fn upstream_tip(repo: &Repository) -> Result<Option<Oid>, git2::Error> {
     Ok(Some(upstream.get().peel_to_commit()?.id()))
 }
 
-/// Who wrote a commit and the second they wrote it. A rebase, an amend and a
-/// cherry-pick all make a new commit and all carry these two over.
-type Stamp = (Vec<u8>, i64);
+/// What a commit keeps when it is made again.
+struct Mark {
+    author: Vec<u8>,
+    written: i64,
+    subject: Vec<u8>,
+    parent: Option<Oid>,
+}
+
+impl Mark {
+    fn of(commit: &git2::Commit<'_>) -> Mark {
+        let author = commit.author();
+        Mark {
+            author: author.email_bytes().to_vec(),
+            written: author.when().seconds(),
+            subject: commit.summary_bytes().unwrap_or_default().to_vec(),
+            parent: commit.parent_id(0).ok(),
+        }
+    }
+
+    /// Whether the two are one piece of work committed twice. Every way of
+    /// making a commit again keeps who wrote it and the second they did. A
+    /// rebase and a cherry-pick keep what it is called as well and change what
+    /// it stands on; an amend keeps what it stands on and may change the rest.
+    fn is_copy_of(&self, other: &Mark) -> bool {
+        self.author == other.author
+            && self.written == other.written
+            && (self.subject == other.subject || self.parent == other.parent)
+    }
+}
 
 /// The commits on the upstream's side of a divergence that the local branch
 /// holds a newer copy of.
@@ -536,9 +562,8 @@ type Stamp = (Vec<u8>, i64);
 /// other. When neither does, there are two ways it came about. Somebody pushed
 /// while there was unpushed work here: two sets of commits, all to be counted.
 /// Or work was pushed and then amended or rebased here, and not yet pushed
-/// again: one set of commits, twice. The second is told from the first by a
-/// commit on each side with the same author and the same author date, and of
-/// such a pair the upstream's is the one about to be overwritten.
+/// again: one set of commits, twice, and of each pair the upstream's is the
+/// one about to be overwritten.
 fn rewritten_upstream(
     repo: &Repository,
     head: Oid,
@@ -549,13 +574,10 @@ fn rewritten_upstream(
     if ahead == 0 || behind == 0 {
         return Ok(HashSet::new());
     }
-    let ours: HashSet<Stamp> = only_on(repo, head, upstream, since)?
-        .into_iter()
-        .map(|(_, stamp)| stamp)
-        .collect();
+    let ours = only_on(repo, head, upstream, since)?;
     Ok(only_on(repo, upstream, head, since)?
         .into_iter()
-        .filter(|(_, stamp)| ours.contains(stamp))
+        .filter(|(_, theirs)| ours.iter().any(|(_, ours)| theirs.is_copy_of(ours)))
         .map(|(oid, _)| oid)
         .collect())
 }
@@ -568,7 +590,7 @@ fn only_on(
     tip: Oid,
     other: Oid,
     since: i64,
-) -> Result<Vec<(Oid, Stamp)>, git2::Error> {
+) -> Result<Vec<(Oid, Mark)>, git2::Error> {
     let mut walk = repo.revwalk()?;
     walk.set_sorting(Sort::TIME)?;
     walk.push(tip)?;
@@ -580,8 +602,7 @@ fn only_on(
         if commit.time().seconds() < since {
             break;
         }
-        let author = commit.author();
-        side.push((oid, (author.email_bytes().to_vec(), author.when().seconds())));
+        side.push((oid, Mark::of(&commit)));
     }
     Ok(side)
 }
@@ -878,6 +899,31 @@ mod tests {
         assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD", "@{u}"]));
         assert_eq!(totals(&result), git_totals(&f.work, &["HEAD", "@{u}"]));
         assert_eq!(totals(&result), (3, 11, 0));
+    }
+
+    /// One identity committing to two branches in the same second, which is a
+    /// release job and not a person. The two commits share an author and a
+    /// date and nothing else, and are two commits.
+    #[test]
+    fn the_same_second_on_both_sides_does_not_alone_make_a_copy() {
+        let _guard = isolate();
+        let f = fleet("stats-same-second");
+        let at = now() - 3600;
+        let commit_at = |repo: &Path, when: i64, file: &str, message: &str| {
+            write(&repo.join(file), "x\n");
+            git(repo, &["add", "."]);
+            git_at(repo, when, &["commit", "-q", "-m", message]);
+        };
+        commit_at(&f.seed, at - 20, "a.txt", "theirs");
+        commit_at(&f.seed, at, "version.txt", "bump to 1.2.3");
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        commit_at(&f.work, at - 10, "b.txt", "mine");
+        commit_at(&f.work, at, "next.txt", "bump to 1.3.0-dev");
+        git(&f.work, &["fetch", "--quiet"]);
+
+        let result = contributions(&[&f.work]);
+        assert_eq!(by_author(&result), shortlog(&f.work, &["HEAD", "@{u}"]));
+        assert_eq!(totals(&result), (5, 5, 0));
     }
 
     /// The seed loop only fell back to HEAD when there was no branch at all, so
