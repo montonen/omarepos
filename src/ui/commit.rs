@@ -187,6 +187,9 @@ pub fn pane(
     let showing: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
     let patching: Rc<RefCell<Option<Cancel>>> = Rc::new(RefCell::new(None));
     let patch_generation = Rc::new(RefCell::new(0u64));
+    // What the rows on screen were built from. A row carries its path and no
+    // more, and the diff for a renamed file needs to know where it came from.
+    let listed: Rc<RefCell<Option<Box<Detail>>>> = Rc::new(RefCell::new(None));
     let staged_count = Rc::new(std::cell::Cell::new(0usize));
     // One write at a time. git reads the index again after a pre-commit hook
     // has run, so a file staged while "Committing…" was on screen went into a
@@ -257,11 +260,19 @@ pub fn pane(
         let patching = Rc::clone(&patching);
         let patch_generation = Rc::clone(&patch_generation);
         let buffer = buffer.clone();
+        let listed = Rc::clone(&listed);
         files.connect_row_selected(move |_, row| {
             let Some(row) = row else { return };
             let Some((side, path)) = row_file(row) else { return };
             let path_for_render = path.clone();
             let Some((repo, target)) = showing.borrow().clone() else { return };
+            // Where the list says the file came from. Without it the diff of a
+            // renamed file is read as that of a new one, every line added.
+            let from = listed.borrow().as_ref().and_then(|detail| {
+                let group = side.unwrap_or(Group::Committed);
+                let file = detail.files.iter().find(|file| file.group == group && file.path == path)?;
+                file.from.clone()
+            });
 
             let mine = {
                 let mut counter = patch_generation.borrow_mut();
@@ -278,7 +289,7 @@ pub fn pane(
             let buffer = buffer.clone();
             glib::spawn_future_local(async move {
                 let path = path_for_render;
-                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone(), side);
+                let (rx, cancel) = commit::spawn_patch(repo, target, path.clone(), from, side);
                 *patching.borrow_mut() = Some(cancel);
                 let Ok(result) = rx.recv().await else { return };
                 if *patch_generation.borrow() != mine {
@@ -326,6 +337,7 @@ pub fn pane(
             let on_changed = Rc::clone(&on_changed);
             let busy = Rc::clone(&busy);
             let who = who.clone();
+            let listed = Rc::clone(&listed);
 
             glib::spawn_future_local(async move {
                 glib::timeout_future(std::time::Duration::from_millis(SETTLE_MS)).await;
@@ -341,6 +353,8 @@ pub fn pane(
                     return;
                 }
 
+                // Before the rows: selecting one, below, reads this.
+                *listed.borrow_mut() = result.as_ref().ok().cloned();
                 files.remove_all();
                 buffer.set_text("");
 
@@ -842,7 +856,9 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
         return;
     }
     if diff.lines.is_empty() {
-        buffer.set_text("No textual changes.");
+        // "No textual changes" is not all there is to say about a file that
+        // was moved, and the worker says the rest.
+        buffer.set_text(diff.note.as_deref().unwrap_or("No textual changes."));
         return;
     }
 

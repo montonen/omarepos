@@ -316,6 +316,9 @@ pub struct FileDiff {
     pub lines: Vec<Line>,
     pub truncated: bool,
     pub binary: bool,
+    /// What there is to say when there are no lines to show and "nothing
+    /// changed" would not be true: a file that was renamed and not edited.
+    pub note: Option<String>,
     /// How much text `lines` holds, counted as it is collected.
     bytes: usize,
 }
@@ -345,10 +348,14 @@ fn shown(content: &[u8]) -> String {
     format!("{} … {} more bytes on this line", &text[..cut], text.len() - cut)
 }
 
+/// Read one file's diff. `from` is where the list says the file came from, for
+/// a rename or a copy, and `side` is which half of a working-tree file the row
+/// stands for: both are what make the diff the one the row describes.
 pub fn spawn_patch(
     repo: PathBuf,
     target: Target,
     file: String,
+    from: Option<String>,
     side: Option<Group>,
 ) -> (async_channel::Receiver<Result<Box<FileDiff>, String>>, Cancel) {
     let (tx, rx) = async_channel::bounded(1);
@@ -357,7 +364,7 @@ pub fn spawn_patch(
         let cancel = cancel.clone();
         std::thread::spawn(move || {
             let result = match &target {
-                Target::Commit(id) => patch_for(&repo, id, &file),
+                Target::Commit(id) => patch_for(&repo, id, &file, from.as_deref()),
                 Target::Working => patch_working(&repo, &file, side),
             };
             if !cancel.stopped() {
@@ -540,7 +547,7 @@ fn collect(
     }
 }
 
-fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
+fn patch_for(path: &Path, id: &str, file: &str, from: Option<&str>) -> Result<FileDiff, String> {
     let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
     let oid = Oid::from_str(id).map_err(|e| e.message().to_string())?;
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
@@ -551,37 +558,26 @@ fn patch_for(path: &Path, id: &str, file: &str) -> Result<FileDiff, String> {
     // summary asks for counts, this asks to be read.
     let mut opts = DiffOptions::new();
     opts.context_lines(3).include_typechange(true).pathspec(file).disable_pathspec_match(true);
-    let diff = repo
+    // A renamed file is a delete and an add until the two are compared, and
+    // they can only be compared if both are in the diff. Narrowed to the new
+    // name alone, the old one never was: the list said `R +1 −1` and the diff
+    // beside it showed the whole file as added, with the one line that had
+    // changed somewhere in it.
+    if let Some(from) = from {
+        opts.pathspec(from);
+    }
+    let mut diff = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
+    if from.is_some() {
+        // The same detection the list ran, so the two cannot disagree.
+        let mut finds = DiffFindOptions::new();
+        finds.renames(true).copies(true);
+        let _ = diff.find_similar(Some(&mut finds));
+    }
 
     let mut out = FileDiff::default();
-    for index in 0..diff.deltas().len() {
-        let Ok(Some(patch)) = Patch::from_diff(&diff, index) else { continue };
-        if patch.num_hunks() == 0 {
-            out.binary = diff
-                .get_delta(index)
-                .map(|d| d.new_file().is_binary() || d.old_file().is_binary())
-                .unwrap_or(false);
-        }
-        for hunk_index in 0..patch.num_hunks() {
-            let Ok((hunk, lines_in_hunk)) = patch.hunk(hunk_index) else { continue };
-            out.lines.push(Line {
-                origin: '@',
-                text: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
-            });
-            for line_index in 0..lines_in_hunk {
-                if out.lines.len() >= MAX_LINES || out.bytes >= MAX_BYTES {
-                    out.truncated = true;
-                    return Ok(out);
-                }
-                let Ok(line) = patch.line_in_hunk(hunk_index, line_index) else { continue };
-                let text = shown(line.content());
-                out.bytes += text.len();
-                out.lines.push(Line { origin: line.origin(), text });
-            }
-        }
-    }
+    append_patch(&diff, Some(file), &mut out);
     Ok(out)
 }
 
@@ -623,25 +619,43 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
         if let Ok(diff) =
             repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
         {
-            append_patch(&diff, &mut out);
+            append_patch(&diff, None, &mut out);
         }
     }
     if unstaged {
         if let Ok(diff) = repo.diff_index_to_workdir(Some(&index), Some(&mut opts)) {
-            append_patch(&diff, &mut out);
+            append_patch(&diff, None, &mut out);
         }
     }
     Ok(out)
 }
 
-fn append_patch(diff: &Diff<'_>, out: &mut FileDiff) {
+/// Add what `diff` holds to `out`, as lines. `only` names the one file wanted
+/// from a diff that had to take in another: where a renamed or copied file
+/// came from, which is a delta of its own when it is still there.
+fn append_patch(diff: &Diff<'_>, only: Option<&str>, out: &mut FileDiff) {
     for index in 0..diff.deltas().len() {
+        let Some(delta) = diff.get_delta(index) else { continue };
+        let named = delta.new_file().path().or(delta.old_file().path());
+        if only.is_some_and(|only| !named.is_some_and(|path| path.to_string_lossy() == only)) {
+            continue;
+        }
         let Ok(Some(patch)) = Patch::from_diff(diff, index) else { continue };
         if patch.num_hunks() == 0 {
-            out.binary = diff
-                .get_delta(index)
-                .map(|d| d.new_file().is_binary() || d.old_file().is_binary())
-                .unwrap_or(out.binary);
+            // Read now that the patch exists: it is building the patch that
+            // tells libgit2 whether a file is binary.
+            let binary =
+                delta.flags().is_binary() || delta.new_file().is_binary() || delta.old_file().is_binary();
+            out.binary |= binary;
+            let moved = match delta.status() {
+                git2::Delta::Renamed => Some("Renamed"),
+                git2::Delta::Copied => Some("Copied"),
+                _ => None,
+            };
+            // No lines, and not nothing: the file is under another name.
+            if let (false, Some(moved), Some(from)) = (binary, moved, delta.old_file().path()) {
+                out.note = Some(format!("{moved} from {}. Its content is unchanged.", from.display()));
+            }
         }
         for hunk_index in 0..patch.num_hunks() {
             let Ok((hunk, lines_in_hunk)) = patch.hunk(hunk_index) else { continue };
@@ -1277,7 +1291,7 @@ mod tests {
         commit_file(&dir, "bundle.min.js", &format!("var a={};\n", "x+".repeat(300_000)), "bundle");
         let head = git(&dir, &["rev-parse", "HEAD"]);
 
-        let diff = patch_for(&dir, &head, "bundle.min.js").unwrap();
+        let diff = patch_for(&dir, &head, "bundle.min.js", None).unwrap();
 
         let longest = diff.lines.iter().map(|line| line.text.len()).max().unwrap();
         assert!(longest < MAX_LINE_BYTES + 100, "a line of {longest} bytes reached the view");
@@ -1303,7 +1317,7 @@ mod tests {
         commit_file(&dir, "wide.txt", &body, "wide");
         let head = git(&dir, &["rev-parse", "HEAD"]);
 
-        let diff = patch_for(&dir, &head, "wide.txt").unwrap();
+        let diff = patch_for(&dir, &head, "wide.txt", None).unwrap();
 
         assert!(diff.truncated);
         let total: usize = diff.lines.iter().map(|line| line.text.len()).sum();
@@ -1345,6 +1359,90 @@ mod tests {
         assert_eq!(binary("staged.bin"), Some(true), "staged");
         assert_eq!(binary("new.bin"), Some(true), "untracked");
         assert_eq!(binary("new.txt"), Some(false));
+    }
+
+    /// Forty lines, of which `edited` differ from the plain file.
+    fn forty_lines(edited: &[usize]) -> String {
+        (0..40)
+            .map(|i| if edited.contains(&i) { format!("line {i}, edited\n") } else { format!("line {i}\n") })
+            .collect()
+    }
+
+    fn marked(diff: &FileDiff, origin: char) -> usize {
+        diff.lines.iter().filter(|line| line.origin == origin).count()
+    }
+
+    /// The list said `R +1 −1` and the diff beside it showed forty added
+    /// lines: the one line that had changed could not be found in it.
+    #[test]
+    fn a_renamed_file_shows_its_edit_and_not_the_whole_file_as_added() {
+        let _guard = isolate();
+        let dir = scratch("cm-rename");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "old_name.txt", &forty_lines(&[]), "first");
+        git(&dir, &["mv", "old_name.txt", "new_name.txt"]);
+        write(&dir.join("new_name.txt"), &forty_lines(&[20]));
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "rename, and one edit"]);
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let listed = load(&dir, &head, &Cancel::default()).unwrap();
+        assert_eq!(listed.files.len(), 1);
+        let row = &listed.files[0];
+        assert_eq!(
+            (row.change, row.from.as_deref(), row.insertions, row.deletions),
+            (Change::Renamed, Some("old_name.txt"), 1, 1)
+        );
+
+        let diff = patch_for(&dir, &head, &row.path, row.from.as_deref()).unwrap();
+        assert_eq!((marked(&diff, '+'), marked(&diff, '-')), (1, 1), "the diff beside that row");
+        assert!(diff.lines[0].text.starts_with("@@ -18,7 +18,7 @@"), "{}", diff.lines[0].text);
+    }
+
+    /// Nothing to show is not nothing to say: the file is under another name.
+    #[test]
+    fn a_file_renamed_and_not_edited_says_where_it_came_from() {
+        let _guard = isolate();
+        let dir = scratch("cm-rename-only");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "docs/old.md", &forty_lines(&[]), "first");
+        git(&dir, &["mv", "docs/old.md", "docs/new.md"]);
+        git(&dir, &["commit", "-q", "-m", "rename"]);
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let listed = load(&dir, &head, &Cancel::default()).unwrap();
+        let row = &listed.files[0];
+        assert_eq!((row.change, row.insertions, row.deletions), (Change::Renamed, 0, 0));
+
+        let diff = patch_for(&dir, &head, &row.path, row.from.as_deref()).unwrap();
+        assert!(diff.lines.is_empty() && !diff.binary);
+        assert_eq!(diff.note.as_deref(), Some("Renamed from docs/old.md. Its content is unchanged."));
+    }
+
+    /// A copy leaves its source in the commit as a change of its own, and the
+    /// diff asked for is the copy's.
+    #[test]
+    fn a_copied_file_shows_its_own_diff_and_not_its_sources() {
+        let _guard = isolate();
+        let dir = scratch("cm-copy");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", &forty_lines(&[]), "first");
+        write(&dir.join("b.txt"), &forty_lines(&[30]));
+        write(&dir.join("a.txt"), &forty_lines(&[3, 4]));
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-q", "-m", "copy a to b, edit both"]);
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let listed = load(&dir, &head, &Cancel::default()).unwrap();
+        let row = |path: &str| listed.files.iter().find(|f| f.path == path).unwrap();
+        assert_eq!((row("b.txt").change, row("b.txt").from.as_deref()), (Change::Copied, Some("a.txt")));
+        assert_eq!((row("b.txt").insertions, row("b.txt").deletions), (1, 1));
+        assert_eq!((row("a.txt").change, row("a.txt").insertions), (Change::Modified, 2));
+
+        let copy = patch_for(&dir, &head, "b.txt", row("b.txt").from.as_deref()).unwrap();
+        assert_eq!((marked(&copy, '+'), marked(&copy, '-')), (1, 1));
+        let source = patch_for(&dir, &head, "a.txt", None).unwrap();
+        assert_eq!((marked(&source, '+'), marked(&source, '-')), (2, 2));
     }
 
     // ---- the commit box: nothing it cannot finish ---------------------------
