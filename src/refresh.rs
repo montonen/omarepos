@@ -53,9 +53,10 @@
 //!   it. After an update it is what makes `git reset --hard ORIG_HEAD` undo
 //!   the update, so it is left as git writes it rather than put back.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use git2::{BranchType, Repository, RepositoryState, StatusOptions};
@@ -402,7 +403,12 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(skip));
     }
 
-    if let Err(err) = options.pass.git(path, &FETCH, options.timeout) {
+    let fetch = {
+        let gate = gate(&repo);
+        let _alone_in_this_ref_store = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        options.pass.git(path, &FETCH, options.timeout)
+    };
+    if let Err(err) = fetch {
         return report(Outcome::Failed(err));
     }
     fetched.set(true);
@@ -502,6 +508,34 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
             }))
         }
     }
+}
+
+/// The lock to hold while fetching into the ref store `repo` uses.
+///
+/// A linked worktree is a repository of its own on the grid and to every pass,
+/// and it shares one set of remote-tracking refs with the checkout it was made
+/// from. Sorted by path the two sit side by side in the queue, so two workers
+/// fetched them at the same moment: both read the old value of `origin/main`,
+/// the quicker wrote the new one, and the other failed its check with "cannot
+/// lock ref". That was one "fetch failed" card and one update put off, on
+/// every pass that had something new to bring in.
+///
+/// One fetch at a time for each shared git directory, then. Each checkout
+/// still gets its own fetch, since two worktrees can track different remotes;
+/// the second usually finds nothing left to do. The locks are per process and
+/// shared by every pass in it, so `p` on one worktree waits for a fleet pass
+/// that is fetching the other.
+fn gate(repo: &Repository) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let common = repo.commondir();
+    let key = common.canonicalize().unwrap_or_else(|_| common.to_path_buf());
+    let mut gates = GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Nobody is holding or waiting on a gate that only this map refers to.
+    gates.retain(|_, gate| Arc::strong_count(gate) > 1);
+    Arc::clone(gates.entry(key).or_default())
 }
 
 /// Reasons to leave a repository alone before touching the network at all.
@@ -695,7 +729,7 @@ fn half_applied(repo: &Repository, at: &Tracking) -> Vec<String> {
     let Ok(pending) = repo.diff_tree_to_workdir(Some(&theirs), Some(&mut only)) else {
         return Vec::new();
     };
-    let pending: std::collections::HashSet<PathBuf> = pending
+    let pending: HashSet<PathBuf> = pending
         .deltas()
         .flat_map(|delta| [delta.old_file().path(), delta.new_file().path()])
         .flatten()
@@ -1472,6 +1506,46 @@ mod tests {
             assert!(matches!(got, Outcome::Behind(1)), "{pass:?}: {got:?}");
             assert_eq!(git(&f.work, &["rev-parse", "FETCH_HEAD"]), under_review, "{pass:?}");
         }
+    }
+
+    /// A linked worktree is a repository of its own on the grid, and shares
+    /// one set of `origin/*` with the checkout it was made from. Fetched at
+    /// the same moment, both read the old values, the quicker one writes the
+    /// new ones, and the other fails: "cannot lock ref", for a repository that
+    /// fetches fine by hand.
+    #[test]
+    fn a_repository_and_its_linked_worktree_do_not_fetch_over_each_other() {
+        let _guard = isolate();
+        let f = fleet("rf-worktree-pair");
+        let on_feat = |file: &str| {
+            git(&f.seed, &["checkout", "-q", "feat"]);
+            commit_file(&f.seed, file, "feat\n", file);
+            git(&f.seed, &["push", "-q", "-u", "origin", "feat"]);
+            git(&f.seed, &["checkout", "-q", "main"]);
+        };
+        git(&f.seed, &["branch", "feat"]);
+        on_feat("feat.txt");
+        git(&f.work, &["fetch", "-q"]);
+        let linked = f.root.join("work-feat");
+        git(&f.work, &["worktree", "add", "-q", linked.to_str().unwrap(), "feat"]);
+
+        let mut wrong = Vec::new();
+        for round in 0..6 {
+            // Both branches move upstream, so each fetch has both refs to write.
+            on_feat(&format!("feat-{round}.txt"));
+            f.remote_commits("main moves", |seed| {
+                write(&seed.join(format!("main-{round}.txt")), "main\n");
+            });
+
+            let both = vec![f.work.clone(), linked.clone()];
+            let rx = spawn(both, Options { max_parallel: 4, ..options(true, Pass::Fleet) });
+            while let Ok(Event::Repo(report)) = rx.recv_blocking() {
+                if !matches!(report.outcome, Outcome::FastForwarded(1)) {
+                    wrong.push(format!("round {round}, {}: {:?}", report.name, report.outcome));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A repository with a library vendored as a submodule at `vendor/lib`,
