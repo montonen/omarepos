@@ -153,7 +153,7 @@ pub fn page(
     repos: Vec<PathBuf>,
     scope: String,
     on_open: Rc<dyn Fn(PathBuf, String, Option<String>)>,
-) -> adw::NavigationPage {
+) -> (adw::NavigationPage, gtk::SearchEntry) {
     let title = adw::WindowTitle::new("Search commits", &scope);
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
@@ -395,13 +395,19 @@ pub fn page(
         });
     }
 
-    // The entry is the only thing worth typing into on this page.
+    // The entry is the only thing worth typing into on this page, and the
+    // caller puts the keyboard in it as soon as the page is pushed. It used
+    // to be done here on `shown`, which is the end of the slide: what was
+    // typed in the third of a second after Ctrl+Shift+F went nowhere. Coming
+    // back to the page from a result still lands here.
     let focus = entry.clone();
     page.connect_shown(move |_| {
-        focus.grab_focus();
+        if !focus.has_focus() {
+            focus.grab_focus();
+        }
     });
 
-    page
+    (page, entry)
 }
 
 /// One result. Activating it is handled by the list; the button copies the sha,

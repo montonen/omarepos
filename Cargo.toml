@@ -2,6 +2,7 @@
 name = "omarepos"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
 description = "Omarchy-styled overview of every git repo on your machine"
 license = "MIT"
 default-run = "omarepos"

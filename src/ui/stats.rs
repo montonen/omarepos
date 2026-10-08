@@ -320,7 +320,7 @@ fn overview(result: &Contributions) -> gtk::Widget {
         bar.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
             let h = height as f64;
-            let (r, g, b) = crate::theme::Palette::rgb(crate::ui::ACCENTS[0]);
+            let (r, g, b) = crate::theme::Palette::rgb(crate::ui::accent());
             // A faint track, so empty days are still legible as days.
             cr.set_source_rgba(r, g, b, 0.12);
             cr.rectangle(0.0, 0.0, w, h);

@@ -23,6 +23,12 @@ pub fn install(window: &adw::ApplicationWindow) {
     let window_weak = window.downgrade();
     action.connect_activate(move |_, _| {
         let Some(window) = window_weak.upgrade() else { return };
+        // A window nobody is looking at is sent no frames, and libadwaita
+        // finishes a change of breakpoint on the next frame, keeping the
+        // content off screen until then. Here that frame never comes.
+        if let Some(content) = window.content().filter(|content| !content.is_child_visible()) {
+            content.set_child_visible(true);
+        }
         let mut out = String::new();
         // Said outright as well, since the walk below only finds a focus that
         // is on screen, and "the keyboard is nowhere" is worth knowing.

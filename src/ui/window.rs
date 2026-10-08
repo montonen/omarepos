@@ -18,6 +18,20 @@ use crate::scan::{self, Event};
 use crate::theme::Palette;
 use crate::ui::{self, Action, card};
 
+/// Below this width the header gives up its labels and a third of the filter
+/// box. With everything showing it needs 1010 px.
+const NARROW_BELOW: f64 = 1040.0;
+/// Below this one, its sort order and tag chips as well. Without its labels
+/// it needs 780 px, and without these, 584. All three were measured with the
+/// debug dump under the built-in theme at the default font size; a larger
+/// font needs more, which is what the margin on each is for.
+const CRAMPED_BELOW: f64 = 820.0;
+/// The least the window claims to be usable at. A window with breakpoints has
+/// no minimum of its own: libadwaita drops the one its content would give it
+/// and expects to be told.
+const LEAST_WIDTH: i32 = 600;
+const LEAST_HEIGHT: i32 = 400;
+
 const SORT_LABELS: &[&str] = &[
     "Recent activity",
     "Name",
@@ -58,6 +72,12 @@ struct Ui {
     subtitle: gtk::Label,
     /// The name of the palette in use, as the subtitle shows it.
     theme_name: RefCell<String>,
+    /// Whether that palette is a light one.
+    light: Cell<bool>,
+    /// Whether the window is too narrow for the header's labels.
+    narrow: Cell<bool>,
+    /// Whether it is too narrow for the tag chips as well.
+    cramped: Cell<bool>,
     search: gtk::SearchEntry,
     sort: gtk::DropDown,
     dirty_only: gtk::ToggleButton,
@@ -156,6 +176,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .title("omarepos")
         .default_width(1180)
         .default_height(780)
+        .width_request(LEAST_WIDTH)
+        .height_request(LEAST_HEIGHT)
         .build();
     window.add_css_class("omarepos");
 
@@ -323,6 +345,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         provider,
         subtitle,
         theme_name: RefCell::new(String::new()),
+        light: Cell::new(false),
+        narrow: Cell::new(false),
+        cramped: Cell::new(false),
         search: search.clone(),
         sort: sort.clone(),
         dirty_only: dirty_only.clone(),
@@ -745,19 +770,66 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     // At narrow widths the two labelled header buttons crowd out the title,
     // so below this width they fall back to their icons and the filter box
-    // gives up a third of its width. The width is the one the header needs
-    // with everything showing, measured at 1010: the labels used to stay
-    // until 920, and for the ninety pixels between, which is where half of a
-    // 1920 screen falls, the window was narrower than its own header.
+    // gives up a third of its width. The labels used to stay until 920, and
+    // for the ninety pixels between that and what the header needs, which is
+    // where half of a 1920 screen falls, the window was narrower than its own
+    // header.
     let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
         adw::BreakpointConditionLengthType::MaxWidth,
-        1040.0,
+        NARROW_BELOW,
         adw::LengthUnit::Px,
     ));
-    breakpoint.add_setter(&ui.contrib_content, "label", Some(&"".to_value()));
-    breakpoint.add_setter(&ui.tags_content, "label", Some(&"".to_value()));
     breakpoint.add_setter(&ui.search, "width-request", Some(&160.to_value()));
+    {
+        // The labels are not given to the breakpoint as setters. The grid
+        // writes them itself on every rebuild ("Contributions (3)", "Tags
+        // (1)"), which put them straight back on a narrow window the first
+        // time anything was typed in the filter. They are written in one
+        // place, which is told how much room there is.
+        let ui_for_apply = Rc::clone(&ui);
+        breakpoint.connect_apply(move |_| {
+            ui_for_apply.narrow.set(true);
+            ui_for_apply.update_selection_label();
+            ui_for_apply.sync_tag_controls();
+        });
+        let ui_for_unapply = Rc::clone(&ui);
+        breakpoint.connect_unapply(move |_| {
+            ui_for_unapply.narrow.set(false);
+            ui_for_unapply.update_selection_label();
+            ui_for_unapply.sync_tag_controls();
+        });
+    }
     window.add_breakpoint(breakpoint);
+
+    // Narrower still, and the sort order and the tag chips go too: both are
+    // one click away elsewhere (the Tags menu filters), and with them the
+    // header fits a third of a screen. Only the last breakpoint that matches
+    // is applied, so this one says again what the wider one says.
+    let cramped = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        CRAMPED_BELOW,
+        adw::LengthUnit::Px,
+    ));
+    cramped.add_setter(&ui.search, "width-request", Some(&120.to_value()));
+    cramped.add_setter(&ui.sort, "visible", Some(&false.to_value()));
+    cramped.add_setter(&ui.tag_quick, "visible", Some(&false.to_value()));
+    {
+        let ui_for_apply = Rc::clone(&ui);
+        cramped.connect_apply(move |_| {
+            ui_for_apply.narrow.set(true);
+            ui_for_apply.cramped.set(true);
+            ui_for_apply.update_selection_label();
+            ui_for_apply.sync_tag_controls();
+        });
+        let ui_for_unapply = Rc::clone(&ui);
+        cramped.connect_unapply(move |_| {
+            ui_for_unapply.narrow.set(false);
+            ui_for_unapply.cramped.set(false);
+            ui_for_unapply.update_selection_label();
+            ui_for_unapply.sync_tag_controls();
+        });
+    }
+    window.add_breakpoint(cramped);
 
     let act_updated = gio::SimpleAction::new("updated-on-disk", None);
     {
@@ -829,6 +901,14 @@ impl Ui {
         });
         *self.theme_name.borrow_mut() = palette.name.clone();
         self.sync_subtitle();
+        // The lane and tag colours come in a set for each kind of background.
+        // The dots on the cards are drawn once, when the card is built, so
+        // the grid is built again when the kind has changed.
+        let was_light = self.light.replace(!palette.dark);
+        ui::accents_for(palette.dark);
+        if was_light == palette.dark && !self.repos.borrow().is_empty() {
+            self.rebuild();
+        }
     }
 
     /// The line under the title: where the grid comes from, and the theme. Its
@@ -1799,15 +1879,15 @@ impl Ui {
         }
         self.tag_syncing.set(false);
 
-        self.tag_quick.set_visible(quick);
+        self.tag_quick.set_visible(quick && !self.cramped.get());
         let active = self.tag_filter.borrow().len() + usize::from(self.untagged_only.get());
-        self.tags_content.set_label(&if quick {
+        self.tags_content.set_label(&match (quick, self.narrow.get(), active) {
             // The chips carry the filtering, so the button is only the menu.
-            String::new()
-        } else if active > 0 {
-            format!("Tags ({active})")
-        } else {
-            "Tags".to_string()
+            (true, _, _) => String::new(),
+            (false, true, 0) => String::new(),
+            (false, true, n) => n.to_string(),
+            (false, false, 0) => "Tags".to_string(),
+            (false, false, n) => format!("Tags ({n})"),
         });
         self.tags_button
             .set_tooltip_text(Some(if quick {
@@ -2266,10 +2346,11 @@ impl Ui {
         } else {
             self.flow.remove_css_class("om-has-selection");
         }
-        self.contrib_content.set_label(&if selected > 0 {
-            format!("Contributions ({selected})")
-        } else {
-            "Contributions".to_string()
+        self.contrib_content.set_label(&match (self.narrow.get(), selected) {
+            (true, 0) => String::new(),
+            (true, n) => n.to_string(),
+            (false, 0) => "Contributions".to_string(),
+            (false, n) => format!("Contributions ({n})"),
         });
     }
 
@@ -2347,7 +2428,10 @@ impl Ui {
                 ui.nav
                     .push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
             });
-        self.nav.push(&ui::search::page(repos, scope, on_open));
+        let (page, query) = ui::search::page(repos, scope, on_open);
+        self.nav.push(&page);
+        // Now, not when the slide has finished: see `ui::search::page`.
+        query.grab_focus();
     }
 
     /// What a graph page of the repository at `path` reaches the window with.

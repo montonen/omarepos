@@ -38,7 +38,8 @@ cargo run --release
 ```
 
 Runtime dependencies: GTK 4.12+, libadwaita 1.5+, and `git` itself, which
-makes every write. Build dependencies: a C toolchain and `pkg-config`. libgit2
+makes every write. Build dependencies: Rust 1.92 or newer, a C toolchain,
+`pkg-config`, and the GTK 4 and libadwaita development files. libgit2
 is linked from the system when it is installed, and built from the copy `git2`
 carries when it is not.
 
@@ -61,6 +62,7 @@ text, with where the keyboard is, and `press` clicks a button by what it says.
 
 ```bash
 cargo install --path .
+mkdir -p ~/.local/bin
 ln -sf ~/.cargo/bin/omarepos ~/.local/bin/omarepos
 install -Dm644 data/se.alphadev.Omarepos.desktop ~/.local/share/applications/se.alphadev.Omarepos.desktop
 install -Dm644 data/se.alphadev.Omarepos.svg ~/.local/share/icons/hicolor/scalable/apps/se.alphadev.Omarepos.svg
@@ -277,7 +279,13 @@ timeout_seconds = 60
 ```
 
 With `fetch` off it only re-reads local state. With `fetch` on, ahead/behind
-stops going stale. With `fast_forward` on it also moves the checked-out branch.
+stops going stale. With `fast_forward` on it also moves the checked-out branch,
+and fetches to do it whatever `fetch` says.
+
+It is a timer in the window, not a service: nothing is fetched while omarepos
+is closed. A pass that fell due in the meantime runs at the next launch, once
+the first scan has finished. Opened and closed like a launcher, that makes it a
+fetch at launch more than a fetch every fifteen minutes.
 
 `Ctrl+Shift+R` runs a pass immediately, whatever the schedule says. The pass
 never pushes. Changing a refresh setting, or the scan roots, calls off a pass
@@ -690,7 +698,9 @@ terminal = "alacritty"
 # Unset follows lazygit when it is installed; "" gives a plain shell.
 terminal_runs = "lazygit"
 
-# Defaults to $EDITOR, then nvim.
+# Defaults to $EDITOR, then nvim. Run as `<editor> .` in the repository, so
+# one that opens a directory is what works best; nano, pico, micro and ed are
+# started bare.
 editor = "nvim"
 
 # Follow the active Omarchy theme and restyle live when it changes.

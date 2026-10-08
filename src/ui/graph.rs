@@ -208,7 +208,23 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     // The detail goes *below* the graph rather than beside it: the window is
     // often half a tiled screen, where a vertical split leaves neither half
     // usable, and height is the one thing such a window has to spare.
-    let (detail, load_detail, focus_files) = crate::ui::commit::pane(on_changed);
+    let (detail, load_pane, focus_files) = crate::ui::commit::pane(on_changed);
+    // What the pane was last asked to show, whether or not it was open to be
+    // shown it. Closed, the pane was only hidden: every move of the cursor
+    // still read the commit, rebuilt the file list and highlighted the first
+    // file's diff, for nobody. Now it is told when it is open, and catches up
+    // when it is opened.
+    let wanted_detail: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
+    let load_detail: Rc<dyn Fn(PathBuf, Target)> = {
+        let detail = detail.clone();
+        let wanted = Rc::clone(&wanted_detail);
+        Rc::new(move |repo: PathBuf, target: Target| {
+            if detail.get_visible() {
+                load_pane(repo.clone(), target.clone());
+            }
+            *wanted.borrow_mut() = Some((repo, target));
+        })
+    };
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
         .start_child(&scroller)
@@ -348,6 +364,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     {
         let detail = detail.clone();
         let rows_box = rows_box.clone();
+        let load_detail = Rc::clone(&load_detail);
         detail_toggle.connect_toggled(move |button| {
             let open = button.is_active();
             // Out of the pane before it goes. Hidden with the keyboard still
@@ -361,6 +378,12 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 };
             }
             detail.set_visible(open);
+            if open {
+                let wanted = wanted_detail.borrow().clone();
+                if let Some((repo, target)) = wanted {
+                    load_detail(repo, target);
+                }
+            }
             on_detail_toggled(open);
         });
     }

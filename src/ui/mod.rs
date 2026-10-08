@@ -196,7 +196,24 @@ pub fn open_terminal(cfg: &Config, dir: &Path) {
 /// Open `$EDITOR` inside a terminal at `dir`.
 pub fn open_editor(cfg: &Config, dir: &Path) {
     let term = cfg.terminal_command();
-    run_in_terminal(&term, dir, &format!("{} .", cfg.editor_command()));
+    run_in_terminal(&term, dir, &editor_script(&cfg.editor_command()));
+}
+
+/// What to run for "open in editor". The repository is handed over as `.`,
+/// which is what makes nvim, helix, emacs or code open a project. An editor
+/// with no view of a directory answers that with an error and an empty
+/// buffer, so those are started bare, in the repository.
+fn editor_script(editor: &str) -> String {
+    let program = editor.split_whitespace().next().unwrap_or_default();
+    let name = Path::new(program)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if matches!(name.as_str(), "nano" | "pico" | "micro" | "ed") {
+        editor.to_string()
+    } else {
+        format!("{editor} .")
+    }
 }
 
 /// Run a shell command inside a terminal emulator, in `dir`. The flag that
@@ -239,14 +256,26 @@ pub fn open_folder(dir: &Path) {
     }
 }
 
+/// Start something that outlives the click that started it: a terminal, an
+/// editor. In a process group of its own, so that Ctrl+C in the terminal
+/// omarepos was started from does not take every terminal it opened with it,
+/// and waited for on a thread, so that it does not sit in the process table
+/// as a zombie from the moment it is closed until omarepos is.
 fn spawn(cmd: &mut Command, what: &str) {
+    use std::os::unix::process::CommandExt;
     let result = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn();
-    if let Err(err) = result {
-        eprintln!("omarepos: could not launch {what}: {err}");
+    match result {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(err) => eprintln!("omarepos: could not launch {what}: {err}"),
     }
 }
 
@@ -286,12 +315,43 @@ pub fn unmodified(state: gtk::gdk::ModifierType) -> bool {
 /// A fixed accent ramp for graph lanes and author colours. Deliberately not
 /// taken from the Omarchy palette: these have to stay distinguishable from each
 /// other in every theme, which a theme's own handful of hues cannot promise.
-pub const ACCENTS: [&str; 8] = [
+const ACCENTS: [&str; 8] = [
     "#7e9cd8", "#98bb6c", "#dca561", "#e46876", "#957fb8", "#7aa89f", "#d27e99", "#c0a36e",
 ];
 
+/// The same ramp for a light background. The one above is pastel, tuned for
+/// dark themes, and was used on light ones unchanged: six or seven of its
+/// eight colours sat under 3:1 against the page, as lines 1.6 px wide. These
+/// measure 4.49:1 or better on the five stock light backgrounds.
+const ACCENTS_ON_LIGHT: [&str; 8] = [
+    "#3b5fb0", "#4f7a1f", "#9a5b00", "#b3263a", "#6b46a8", "#1f7a6d", "#a8386a", "#5c6470",
+];
+
+/// Which of the two ramps is in use. Set when the theme is applied, and read
+/// where a colour is drawn: asking the palette there would read two files per
+/// stroke.
+static ON_LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the ramps what kind of background they are drawn on.
+pub fn accents_for(dark: bool) {
+    ON_LIGHT.store(!dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn accents() -> &'static [&'static str; 8] {
+    if ON_LIGHT.load(std::sync::atomic::Ordering::Relaxed) {
+        &ACCENTS_ON_LIGHT
+    } else {
+        &ACCENTS
+    }
+}
+
+/// The first colour of the ramp, for a mark that is not one of several.
+pub fn accent() -> &'static str {
+    accents()[0]
+}
+
 pub fn lane_color(lane: usize) -> &'static str {
-    ACCENTS[lane % ACCENTS.len()]
+    accents()[lane % ACCENTS.len()]
 }
 
 /// Stable colour per author, so the same person keeps their colour between runs.
@@ -301,7 +361,7 @@ pub fn key_color(key: &str) -> &'static str {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
-    ACCENTS[(hash % ACCENTS.len() as u64) as usize]
+    accents()[(hash % ACCENTS.len() as u64) as usize]
 }
 
 /// Absolute local timestamp, for tooltips.
@@ -383,6 +443,26 @@ mod tests {
         }
         // Let go, and pressed again a second later.
         assert!(presses.first_at(key, at + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn an_editor_is_handed_the_repository_only_if_it_can_show_one() {
+        assert_eq!(editor_script("nvim"), "nvim .");
+        assert_eq!(editor_script("code --wait"), "code --wait .");
+        assert_eq!(editor_script("nano"), "nano");
+        assert_eq!(editor_script("/usr/bin/micro -softwrap"), "/usr/bin/micro -softwrap");
+    }
+
+    #[test]
+    fn the_ramp_follows_the_background() {
+        accents_for(true);
+        assert_eq!(lane_color(0), "#7e9cd8");
+        assert_eq!(lane_color(8), lane_color(0), "it wraps");
+        accents_for(false);
+        assert_eq!(lane_color(0), "#3b5fb0");
+        assert_eq!(accent(), "#3b5fb0");
+        assert_ne!(key_color("fixture@example.invalid"), "");
+        accents_for(true);
     }
 
     #[test]

@@ -63,7 +63,10 @@ pub fn settings(
         .build();
     let refresh_group = adw::PreferencesGroup::builder()
         .title("Background refresh")
-        .description("Keeps the grid current, and optionally the code with it.")
+        .description(
+            "Runs while omarepos is open, and at launch when a pass is overdue. \
+             Keeps the grid current, and optionally the code with it.",
+        )
         .build();
     let look_group = adw::PreferencesGroup::builder().title("Appearance").build();
     page.add(&roots_group);
