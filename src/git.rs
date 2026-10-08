@@ -161,8 +161,15 @@ impl RepoInfo {
     /// that searching for a repository called `asc` returned half the fleet,
     /// because `javascript` contains `asc`. Languages have their own `lang:`
     /// term instead, where a match is something the user asked for.
+    ///
+    /// The path is the one the card shows, `~/code/thing`, for the same
+    /// reason. It was the absolute one, so the home directory was in every
+    /// repository's text and on no card: `home`, or any piece of the login
+    /// name, matched the whole fleet, and `~/code`, read off a card, matched
+    /// nothing.
     pub fn haystack(&self) -> String {
-        let mut s = format!("{} {} {}", self.name, self.path.display(), self.head);
+        let path = crate::config::tildify(&self.path);
+        let mut s = format!("{} {} {}", self.name, path, self.head);
         if let Some(remote) = &self.remote {
             s.push(' ');
             s.push_str(remote);
@@ -1433,6 +1440,30 @@ mod tests {
         let names: Vec<&str> = info.langs.iter().map(|lang| lang.name.as_str()).collect();
         assert_eq!(names[..6], ["TypeScript", "TSX", "JSON", "Markdown", "YAML", "CSS"]);
         assert_eq!(names.len(), 10);
+    }
+
+    #[test]
+    fn the_filter_matches_the_path_the_card_shows_and_not_the_home_directory() {
+        let _guard = isolate();
+        let home = crate::config::home();
+        let dir = home.join("code/inspect-haystack");
+        let _ = std::fs::remove_dir_all(&dir);
+        init(&dir);
+
+        let hay = inspect(&dir).haystack();
+        // What the card prints, so what a user would type.
+        assert!(hay.contains("~/code/inspect-haystack"), "{hay}");
+        // The home directory's own path was in every haystack and on no card:
+        // typing any piece of it, the login name included, kept the whole
+        // fleet on screen.
+        assert!(!hay.contains(&home.display().to_string().to_lowercase()), "{hay}");
+        assert!(!hay.contains("test-fixtures"), "{hay}");
+
+        // Outside the home directory the whole path is what the card shows.
+        let dir = scratch("inspect-haystack-outside");
+        init(&dir);
+        let hay = inspect(&dir).haystack();
+        assert!(hay.contains(&dir.display().to_string().to_lowercase()), "{hay}");
     }
 
     // ---- who commits here, as far as can be read without asking git --------
