@@ -222,39 +222,54 @@ fn pills(
 
     if info.bare {
         row.append(&pill("bare", ""));
-    } else if info.unborn {
-        row.append(&pill("no commits", ""));
-    } else if let Some(why) = &info.tree.unreadable {
-        // Its own pill. "clean" would be false, and the pill below, with every
-        // count at zero, would be drawn with nothing in it.
-        let p = pill("status unreadable", "danger");
-        p.set_tooltip_text(Some(&format!(
-            "What is uncommitted here is not known: the index could not be read.\n{why}\n\
-             git itself may read it without trouble; `git status` in a terminal will say."
-        )));
-        row.append(&p);
-    } else if info.tree.is_clean() {
-        row.append(&pill("clean", "clean"));
     } else {
+        // "no commits" used to end the matter, ahead of the counts. But a
+        // repository with no commits yet is the one where everything in it is
+        // uncommitted, and the first commit is when that is worth seeing: the
+        // card said nothing about the files staged and waiting for it.
+        if info.unborn {
+            row.append(&pill("no commits", ""));
+        }
         let t = &info.tree;
-        let mut parts = Vec::new();
-        if t.staged > 0 {
-            parts.push(format!("+{}", t.staged));
-        }
-        if t.unstaged > 0 {
-            parts.push(format!("~{}", t.unstaged));
-        }
-        if t.untracked > 0 {
-            parts.push(format!("?{}", t.untracked));
-        }
-        let p = pill(&parts.join(" "), "dirty");
-        p.set_tooltip_text(Some(&format!(
-            "{} staged · {} modified · {} untracked",
-            t.staged, t.unstaged, t.untracked
-        )));
-        row.append(&p);
-        if t.conflicted > 0 {
-            row.append(&pill(&format!("!{}", t.conflicted), "danger"));
+        if let Some(why) = &t.unreadable {
+            // Its own pill. "clean" would be false, and the pill below, with
+            // every count at zero, would be drawn with nothing in it.
+            let p = pill("status unreadable", "danger");
+            p.set_tooltip_text(Some(&format!(
+                "What is uncommitted here is not known: the index could not be read.\n{why}\n\
+                 git itself may read it without trouble; `git status` in a terminal will say."
+            )));
+            row.append(&p);
+        } else if t.is_clean() {
+            // Beside "no commits" it would only say that an empty directory
+            // is empty.
+            if !info.unborn {
+                row.append(&pill("clean", "clean"));
+            }
+        } else {
+            let mut parts = Vec::new();
+            if t.staged > 0 {
+                parts.push(format!("+{}", t.staged));
+            }
+            if t.unstaged > 0 {
+                parts.push(format!("~{}", t.unstaged));
+            }
+            if t.untracked > 0 {
+                parts.push(format!("?{}", t.untracked));
+            }
+            // Nothing but conflicts leaves all three at zero, and a pill was
+            // drawn all the same, with no text in it.
+            if !parts.is_empty() {
+                let p = pill(&parts.join(" "), "dirty");
+                p.set_tooltip_text(Some(&format!(
+                    "{} staged · {} modified · {} untracked",
+                    t.staged, t.unstaged, t.untracked
+                )));
+                row.append(&p);
+            }
+            if t.conflicted > 0 {
+                row.append(&pill(&format!("!{}", t.conflicted), "danger"));
+            }
         }
     }
 
