@@ -200,19 +200,80 @@ fn pill(text: &str, class: &str) -> gtk::Label {
     label
 }
 
+/// The most of a branch name a pill shows, in characters. Past that the
+/// middle gives way, and the whole name is in the tooltip.
+const BRANCH_CHARS: usize = 26;
+/// The room for pills across a card at the width it asks for: 320, less the
+/// card's padding and border on both sides.
+const PILL_ROOM: usize = 290;
+/// The space between two pills in a row.
+const PILL_GAP: usize = 5;
+
+/// About how wide a pill with this many characters in it is drawn: its text
+/// is 11px bold, which comes to a little under six pixels a character, and it
+/// has eight pixels of padding at each end. Nothing here can measure the text
+/// before the card is on screen, and all that hangs on the guess is where a
+/// row of pills is broken.
+fn pill_width(chars: usize) -> usize {
+    16 + 6 * chars.min(BRANCH_CHARS)
+}
+
+/// How many pills go on each row, for pills of these widths, filling a row
+/// before starting the next.
+fn pill_rows(widths: &[usize]) -> Vec<usize> {
+    let mut rows = Vec::new();
+    let (mut used, mut count) = (0, 0);
+    for &width in widths {
+        if count > 0 && used + PILL_GAP + width > PILL_ROOM {
+            rows.push(count);
+            (used, count) = (0, 0);
+        }
+        used += if count == 0 { width } else { PILL_GAP + width };
+        count += 1;
+    }
+    if count > 0 {
+        rows.push(count);
+    }
+    rows
+}
+
+/// The pills, in as many rows as they need.
+///
+/// They used to go in one row that could neither wrap nor clip, and a label's
+/// narrowest width is all of its text. So the pills decided how wide the card
+/// was, the widest card decided its column, and a repository that was merely
+/// ahead, behind and dirty at once pushed its whole column out past the 320
+/// pixels every card asks for.
+fn pill_box(pills: Vec<gtk::Label>) -> gtk::Box {
+    let widths: Vec<usize> = pills
+        .iter()
+        .map(|pill| pill_width(pill.text().chars().count()))
+        .collect();
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, PILL_GAP as i32);
+    let mut pills = pills.into_iter();
+    for count in pill_rows(&widths) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, PILL_GAP as i32);
+        for pill in pills.by_ref().take(count) {
+            row.append(&pill);
+        }
+        rows.append(&row);
+    }
+    rows
+}
+
 fn pills(
     info: &RepoInfo,
     auto_update: bool,
     trouble: Option<&Trouble>,
     unseen: bool,
 ) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let mut row: Vec<gtk::Label> = Vec::new();
 
     if let Some(err) = &info.error {
         let p = pill("unreadable", "danger");
         p.set_tooltip_text(Some(err));
-        row.append(&p);
-        return row;
+        row.push(p);
+        return pill_box(row);
     }
 
     let head = if info.detached {
@@ -221,24 +282,31 @@ fn pills(
         format!(" {}", info.head)
     };
     let branch = pill(&head, "branch");
+    // The one pill whose text is not ours to keep short. A ticket number and
+    // a description, or a dependency bot's path, is fifty characters and
+    // more, and the pill was as wide as the name. It gives way in the middle,
+    // where a prefix and a version number at the ends survive, and the
+    // tooltip starts with the name in full.
+    branch.set_ellipsize(pango::EllipsizeMode::Middle);
+    branch.set_max_width_chars(BRANCH_CHARS as i32);
     if info.detached {
-        branch.set_tooltip_text(Some("Detached HEAD"));
+        branch.set_tooltip_text(Some(&format!("{}\nDetached HEAD", info.head)));
     } else if let Some(upstream) = &info.upstream {
-        branch.set_tooltip_text(Some(&format!("tracks {upstream}")));
+        branch.set_tooltip_text(Some(&format!("{}\ntracks {upstream}", info.head)));
     } else {
-        branch.set_tooltip_text(Some("no upstream"));
+        branch.set_tooltip_text(Some(&format!("{}\nno upstream", info.head)));
     }
-    row.append(&branch);
+    row.push(branch);
 
     if info.bare {
-        row.append(&pill("bare", ""));
+        row.push(pill("bare", ""));
     } else {
         // "no commits" used to end the matter, ahead of the counts. But a
         // repository with no commits yet is the one where everything in it is
         // uncommitted, and the first commit is when that is worth seeing: the
         // card said nothing about the files staged and waiting for it.
         if info.unborn {
-            row.append(&pill("no commits", ""));
+            row.push(pill("no commits", ""));
         }
         let t = &info.tree;
         if let Some(why) = &t.unreadable {
@@ -249,12 +317,12 @@ fn pills(
                 "What is uncommitted here is not known: the index could not be read.\n{why}\n\
                  git itself may read it without trouble; `git status` in a terminal will say."
             )));
-            row.append(&p);
+            row.push(p);
         } else if t.is_clean() {
             // Beside "no commits" it would only say that an empty directory
             // is empty.
             if !info.unborn {
-                row.append(&pill("clean", "clean"));
+                row.push(pill("clean", "clean"));
             }
         } else {
             let mut parts = Vec::new();
@@ -275,10 +343,10 @@ fn pills(
                     "{} staged · {} modified · {} untracked",
                     t.staged, t.unstaged, t.untracked
                 )));
-                row.append(&p);
+                row.push(p);
             }
             if t.conflicted > 0 {
-                row.append(&pill(&format!("!{}", t.conflicted), "danger"));
+                row.push(pill(&format!("!{}", t.conflicted), "danger"));
             }
         }
     }
@@ -292,7 +360,7 @@ fn pills(
             info.ahead,
             info.upstream.as_deref().unwrap_or("the upstream")
         )));
-        row.append(&p);
+        row.push(p);
     }
     // `ahead` is measured against the upstream, and says nothing when there is
     // none. This is the rest of it: work on HEAD that is on no remote at all.
@@ -325,7 +393,7 @@ fn pills(
         };
         let p = pill(&label, "ahead");
         p.set_tooltip_text(Some(&why));
-        row.append(&p);
+        row.push(p);
     }
     if info.stray_branches > 0 {
         let p = pill(
@@ -341,7 +409,7 @@ fn pills(
             info.stray_branches,
             if info.stray_branches == 1 { "branch holds" } else { "branches hold" }
         )));
-        row.append(&p);
+        row.push(p);
     }
     // Without this, counts that could not be taken draw no pill at all, which
     // is exactly how "nothing to push" is drawn.
@@ -351,7 +419,7 @@ fn pills(
             "How far this is from its remotes is not known: the commits in between could not \
              be read.\n{why}"
         )));
-        row.append(&p);
+        row.push(p);
     }
     if info.behind > 0 {
         let p = pill(&format!("{} behind", info.behind), "behind");
@@ -360,7 +428,7 @@ fn pills(
             info.behind,
             info.upstream.as_deref().unwrap_or("the upstream")
         )));
-        row.append(&p);
+        row.push(p);
 
         // Behind and unable to catch up are very different situations, and
         // the grid showed them identically.
@@ -379,7 +447,7 @@ fn pills(
                 );
             }
             held.set_tooltip_text(Some(&tip));
-            row.append(&held);
+            row.push(held);
         } else if let Some(Trouble::Update { refused }) = trouble {
             // Nothing the card can see is in the way, and git still said no:
             // an untracked or ignored file where an incoming one wants to go,
@@ -389,7 +457,7 @@ fn pills(
                 "The last refresh fetched this repository, but git would not \
                  fast-forward it:\n{refused}\nNothing was changed."
             )));
-            row.append(&held);
+            row.push(held);
         }
     }
     // A fetch that failed leaves a repository looking merely out of date, and
@@ -399,7 +467,7 @@ fn pills(
         p.set_tooltip_text(Some(&format!(
             "The last refresh could not fetch this repository:\n{error}"
         )));
-        row.append(&p);
+        row.push(p);
     }
 
     if unseen {
@@ -409,16 +477,16 @@ fn pills(
              you have opened it, or pressed p or f on it: running git in a repository means \
              doing what its own config says, and nobody has looked at this one yet.",
         ));
-        row.append(&p);
+        row.push(p);
     }
 
     if info.stashes > 0 {
         let p = pill(&format!("⌸{}", info.stashes), "");
         p.set_tooltip_text(Some("stash entries"));
-        row.append(&p);
+        row.push(p);
     }
 
-    row
+    pill_box(row)
 }
 
 /// Proportional language bar, drawn with cairo so the segments can be exact.
@@ -546,4 +614,40 @@ fn footer(info: &RepoInfo) -> gtk::Box {
         }
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How the pills with these texts are divided into rows. No widget is
+    /// built: the arithmetic is the only part of a card a test can reach.
+    fn rows(pills: &[&str]) -> Vec<usize> {
+        let widths: Vec<usize> = pills
+            .iter()
+            .map(|text| pill_width(text.chars().count()))
+            .collect();
+        pill_rows(&widths)
+    }
+
+    #[test]
+    fn pills_that_do_not_fit_across_a_card_go_on_a_second_row() {
+        // The everyday case fits, and stays on one row.
+        assert_eq!(rows(&[" main", "~3 ?2", "2 behind", "held back"]), [4]);
+        // The same branch a little busier: 324 pixels of pills, measured, in
+        // a card with room for 290. It used to widen the card.
+        assert_eq!(rows(&[" main", "+1 ~3 ?2", "2 ahead", "25 behind", "held back"]), [4, 1]);
+
+        // A long name counts for no more than the pill draws of it.
+        let long = " dependabot/npm_and_yarn/typescript-eslint/eslint-plugin-6.21.0";
+        assert_eq!(rows(&[long, "clean"]), [2]);
+        assert_eq!(
+            rows(&[long, "+1 ~3 ?2", "4 ahead", "3 behind", "held back", "⌸1"]),
+            [2, 4]
+        );
+
+        assert_eq!(rows(&[]), Vec::<usize>::new());
+        // Every pill lands on a row, in order, whatever the widths.
+        assert_eq!(pill_rows(&[400, 10, 400, 90, 90, 90, 90]), [1, 1, 1, 3, 1]);
+    }
 }
