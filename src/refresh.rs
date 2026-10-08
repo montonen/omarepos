@@ -437,6 +437,14 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
     };
     let behind = at.behind;
 
+    // Before "up to date" or "has commits of its own" is said about a branch
+    // that is ahead: whose commits are they?
+    if at.ahead > 0 {
+        if let Some(why) = withdrawn(&repo) {
+            return report(Outcome::Refused(why));
+        }
+    }
+
     // A pass that only fetches reports the fetch. The reasons below are why a
     // branch would not be *updated*, and were given for one that nobody had
     // asked to update: "left alone: has unpushed commits" after a fetch that
@@ -590,6 +598,8 @@ fn disqualify(repo: &Repository, updating: bool) -> Option<Skip> {
 struct Tracking {
     /// The branch's short name: `main`.
     branch: String,
+    /// The upstream's full name: `refs/remotes/origin/main`.
+    upstream_ref: String,
     local: git2::Oid,
     upstream: git2::Oid,
     ahead: usize,
@@ -603,16 +613,69 @@ fn tracking(repo: &Repository) -> Result<Tracking, Skip> {
         .find_branch(&branch_name, BranchType::Local)
         .map_err(|_| Skip::NoUpstream)?;
     let upstream = branch.upstream().map_err(|_| Skip::NoUpstream)?;
+    let upstream_ref = upstream.get().name().map_err(|_| Skip::NoUpstream)?.to_string();
     let local = branch.get().target().ok_or(Skip::NoUpstream)?;
     let remote = upstream.get().target().ok_or(Skip::NoUpstream)?;
     let (ahead, behind) = repo
         .graph_ahead_behind(local, remote)
         .map_err(|_| Skip::NoUpstream)?;
-    Ok(Tracking { branch: branch_name, local, upstream: remote, ahead, behind })
+    Ok(Tracking { branch: branch_name, upstream_ref, local, upstream: remote, ahead, behind })
 }
 
 pub(crate) fn divergence(repo: &Repository) -> Result<(usize, usize), Skip> {
     tracking(repo).map(|at| (at.ahead, at.behind))
+}
+
+/// What to say when the checked-out branch still holds commits that its
+/// upstream had and no longer has: the remote's branch was moved back, or
+/// rewritten, since this clone was level with it. `None` when it does not.
+///
+/// Counting cannot see this. A branch moved back on the remote leaves a clone
+/// that had kept up "1 ahead, 0 behind", exactly like a clone with a commit of
+/// its owner's waiting to be pushed, and it was reported the same way: "up to
+/// date", then "Push 1" on the graph, one click from putting back what a
+/// teammate had just taken off the remote (a leaked key, in the review's
+/// example). A commit replaced instead of removed left the clone "1 ahead, 1
+/// behind", and its owner, who had committed nothing, was told it "has
+/// unpushed commits".
+///
+/// git keeps what is needed to tell the two apart: the log of the upstream
+/// ref records every value it has had. A commit by which the branch is ahead
+/// that the upstream once *pointed at* was on the remote and has been taken
+/// off it. A commit of the user's own was never there. Nothing is remembered
+/// here, so a rewrite fetched from a terminal is seen as well, and it goes on
+/// being seen for as long as the state lasts and the log reaches back.
+///
+/// Public within the crate because the place this matters most is the push,
+/// which is not this module's.
+pub(crate) fn withdrawn(repo: &Repository) -> Option<String> {
+    let at = tracking(repo).ok()?;
+    // A branch that tracks another local branch has that branch's own log to
+    // answer to, and its owner rewrites it at will.
+    let upstream = at.upstream_ref.strip_prefix("refs/remotes/")?;
+    if at.ahead == 0 {
+        return None;
+    }
+    let mut walk = repo.revwalk().ok()?;
+    walk.push(at.local).ok()?;
+    walk.hide(at.upstream).ok()?;
+    let ahead: HashSet<git2::Oid> = walk.filter_map(Result::ok).collect();
+
+    // Newest first: the most recent tip the remote gave up.
+    let log = repo.reflog(&at.upstream_ref).ok()?;
+    let was = log.iter().map(|entry| entry.id_old()).find(|old| ahead.contains(old))?;
+    let (gone, _) = repo.graph_ahead_behind(was, at.upstream).ok()?;
+    let tip = repo.find_commit(was).ok()?;
+    let short = &was.to_string()[..7];
+    let summary = tip.summary().ok().flatten().unwrap_or("no message");
+    let (them, were) = if gone == 1 { ("it", "it was") } else { ("them", "they were") };
+    Some(format!(
+        "{upstream} was moved back or rewritten on the remote. It used to end at {short} \
+         (\"{summary}\"); that is no longer on the remote and is still in this branch, {} taken \
+         off it in all. Pushing this branch would put {them} back: find out why {were} removed \
+         before pushing or building on {them}.",
+        if gone == 1 { "1 commit".to_string() } else { format!("{gone} commits") }
+    ))
 }
 
 /// Whether the branch is where a fast-forward to `meant` puts it.
@@ -1495,6 +1558,89 @@ mod tests {
             );
             assert!(report.fetched, "{pass:?}");
         }
+    }
+
+    // ---- an upstream that was rewritten ----------------------------------
+
+    /// Somebody pushes a commit that should not have been pushed, and a
+    /// teammate takes it off the remote again. A clone that had been level
+    /// with it is now "1 ahead", with a commit its owner never wrote; the pass
+    /// called that up to date, and the graph offered to push it back.
+    #[test]
+    fn a_commit_taken_off_the_remote_is_not_reported_as_up_to_date() {
+        let _guard = isolate();
+        for (fast_forward, pass) in
+            [(true, Pass::Fleet), (false, Pass::Fleet), (true, Pass::One), (false, Pass::One)]
+        {
+            let which = format!("{fast_forward}-{pass:?}");
+            let f = fleet(&format!("rf-rewound-{which}"));
+            f.remote_commits("add the deploy key", |seed| {
+                write(&seed.join("deploy.env"), "KEY=should not be here\n");
+            });
+            assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(1)));
+            let level = f.head();
+            git(&f.seed, &["reset", "-q", "--hard", "HEAD~1"]);
+            git(&f.seed, &["push", "-q", "--force", "origin", "main"]);
+
+            let report = refresh_one(&f.work, &options(fast_forward, pass));
+
+            let Outcome::Refused(why) = &report.outcome else { panic!("{which}: {report:?}") };
+            assert!(why.contains(&level[..7]), "{which}: it should name the commit: {why}");
+            assert!(why.contains("add the deploy key"), "{which}: {why}");
+            assert!(why.contains("origin/main"), "{which}: {why}");
+            assert!(report.fetched, "{which}");
+            assert_eq!(f.head(), level, "{which}");
+
+            // Not only on the pass that fetched the rewrite: the state is the
+            // same on the next one, and so is what is said about it.
+            let again = refresh_one(&f.work, &options(fast_forward, pass)).outcome;
+            let Outcome::Refused(still) = &again else { panic!("{which}: {again:?}") };
+            assert_eq!(still, why, "{which}");
+        }
+    }
+
+    /// Replaced instead of removed: the last commit amended and force-pushed.
+    /// A follower who had never committed was told it "has unpushed commits".
+    #[test]
+    fn a_commit_replaced_on_the_remote_is_not_called_the_users_own() {
+        let _guard = isolate();
+        let f = fleet("rf-rewritten");
+        f.remote_moves(1);
+        assert!(matches!(fleet_pass(&f), Outcome::FastForwarded(1)));
+        let level = f.head();
+        git(&f.seed, &["commit", "-q", "--amend", "-m", "upstream 0, reworded"]);
+        git(&f.seed, &["push", "-q", "--force", "origin", "main"]);
+
+        let got = fleet_pass(&f);
+
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains(&level[..7]), "{why}");
+        assert_eq!(f.head(), level);
+    }
+
+    /// Commits the user made are theirs, however they got ahead, and a remote
+    /// they rewrote themselves is not news to them.
+    #[test]
+    fn commits_of_the_users_own_are_still_only_ahead() {
+        let _guard = isolate();
+        let f = fleet("rf-rewound-not");
+        commit_file(&f.work, "mine.txt", "mine\n", "local work");
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::UpToDate), "{got:?}");
+        f.remote_moves(1);
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Diverged)), "{got:?}");
+
+        // Pushed, amended, force-pushed, and then one more commit on top.
+        let f = fleet("rf-rewound-own-push");
+        commit_file(&f.work, "mine.txt", "mine\n", "local work");
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["commit", "-q", "--amend", "-m", "local work, reworded"]);
+        git(&f.work, &["push", "-q", "--force", "origin", "main"]);
+        commit_file(&f.work, "more.txt", "more\n", "more local work");
+        let got = fleet_pass(&f);
+        assert!(matches!(got, Outcome::UpToDate), "{got:?}");
+        assert!(withdrawn(&Repository::open(&f.work).unwrap()).is_none());
     }
 
     // ---- an update that stops part-way -----------------------------------
