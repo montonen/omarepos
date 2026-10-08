@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::config::Root;
-use crate::git::{self, Found, RepoInfo, Seed};
+use crate::git::{self, Found, RepoInfo, RootReport, Seed};
 
 pub enum Event {
     /// Discovery finished: this many repositories are on their way.
@@ -29,10 +29,31 @@ pub fn spawn(
     extras: Vec<PathBuf>,
     max_depth: usize,
 ) -> async_channel::Receiver<Event> {
+    spawn_reporting(roots, extras, max_depth).0
+}
+
+/// As [`spawn`], and also what each root came to: one report per root, in
+/// the order the roots were given.
+///
+/// The events could only ever speak of repositories that were found, so a
+/// root that found none had no way to say so: its repositories were simply
+/// not on the grid. The reports come on a channel of their own, because the
+/// events are matched in full by the window and a new kind of event would not
+/// compile there. They are sent once, before `Discovered`, so by the time
+/// that event is handled a `try_recv` on the second receiver has them.
+pub fn spawn_reporting(
+    roots: Vec<Root>,
+    extras: Vec<PathBuf>,
+    max_depth: usize,
+) -> (async_channel::Receiver<Event>, async_channel::Receiver<Vec<RootReport>>) {
     let (tx, rx) = async_channel::unbounded();
+    let (reports_tx, reports_rx) = async_channel::bounded(1);
 
     std::thread::spawn(move || {
-        let mut paths = git::discover(&roots, max_depth);
+        let survey = git::survey(&roots, max_depth);
+        // Nobody listening is not a reason to stop: `spawn` does not listen.
+        let _ = reports_tx.send_blocking(survey.roots);
+        let mut paths = survey.found;
         let known: std::collections::HashSet<PathBuf> = paths
             .iter()
             .map(|found| {
@@ -90,5 +111,58 @@ pub fn spawn(
         let _ = tx.send_blocking(Event::Done);
     });
 
-    rx
+    (rx, reports_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::*;
+
+    fn root(path: &std::path::Path) -> Root {
+        Root { path: path.to_path_buf(), nested: false, tag: None, include_self: true }
+    }
+
+    /// Read a scan to its end: how many repositories it announced, and the
+    /// names of the ones that came.
+    fn drain(events: &async_channel::Receiver<Event>) -> (Option<usize>, Vec<String>) {
+        let (mut announced, mut names) = (None, Vec::new());
+        loop {
+            match events.recv_blocking().expect("a scan ends with Done") {
+                Event::Discovered(count) => announced = Some(count),
+                Event::Repo { info, .. } => names.push(info.name),
+                Event::Done => break,
+            }
+        }
+        names.sort();
+        (announced, names)
+    }
+
+    #[test]
+    fn a_scan_says_what_each_root_came_to_before_it_says_how_many_were_found() {
+        let _guard = isolate();
+        let base = scratch("disc-scan");
+        for repo in ["code/one", "code/two"] {
+            let dir = base.join(repo);
+            std::fs::create_dir_all(&dir).unwrap();
+            git(&dir, &["init", "-q", "-b", "main"]);
+        }
+        let roots = vec![root(&base.join("code")), root(&base.join("moved-away"))];
+
+        let (events, reports) = spawn_reporting(roots.clone(), Vec::new(), 3);
+        // The window takes the reports when it is told how many repositories
+        // are coming, without waiting: they have to be there by then.
+        let first = events.recv_blocking().unwrap();
+        assert!(matches!(first, Event::Discovered(2)));
+        let reports = reports.try_recv().expect("the reports are sent first");
+        assert_eq!(reports.len(), 2);
+        assert_eq!((reports[0].found, reports[0].says()), (2, None));
+        assert_eq!(reports[1].says().as_deref(), Some("does not exist"));
+        assert_eq!(drain(&events), (None, vec!["one".to_string(), "two".to_string()]));
+
+        // And a scan nobody takes the reports from runs to its end all the
+        // same, which is every scan until the window asks for them.
+        let events = spawn(roots, Vec::new(), 3);
+        assert_eq!(drain(&events), (Some(2), vec!["one".to_string(), "two".to_string()]));
+    }
 }

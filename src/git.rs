@@ -1,6 +1,7 @@
 //! Repository discovery and inspection via libgit2.
 
 use std::collections::{HashMap, HashSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository, StatusOptions};
@@ -306,50 +307,289 @@ fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> Result<usize,
     Ok(count)
 }
 
+/// What became of one configured root.
+///
+/// Discovery used to return a list of repositories and nothing else, so a
+/// root that contributed none was indistinguishable from one that was not
+/// configured: a folder that had been moved, a workspace whose own repository
+/// stopped opening, an ignore rule that did not cover the clones. Each of
+/// those takes repositories off the grid, and out of every fetch, without a
+/// word anywhere. This is the word; [`RootReport::says`] puts it in a phrase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootReport {
+    /// The root's path as configured: the key a [`Seed`] carries.
+    pub root: String,
+    /// Repositories this root put on the grid.
+    pub found: usize,
+    /// Repositories it reached that another root had already put there: a
+    /// narrower root inside it, or the same folder listed twice. A root with
+    /// none of its own and some of these has not come up empty.
+    pub shared: usize,
+    /// What went wrong, as a phrase to follow the root's name. `None` when
+    /// nothing did, which is not the same as having found something.
+    pub problem: Option<String>,
+    /// Repositories inside a workspace that its own repository neither
+    /// ignores nor holds as a submodule. The rule for a workspace follows
+    /// only what is ignored, so these are not on the grid.
+    pub left_out: Vec<PathBuf>,
+}
+
+impl RootReport {
+    fn new(root: &Root) -> Self {
+        RootReport {
+            root: root.path.display().to_string(),
+            found: 0,
+            shared: 0,
+            problem: None,
+            left_out: Vec::new(),
+        }
+    }
+
+    /// What there is to tell the user about this root, as a phrase to follow
+    /// its name, or `None` when it found repositories and nothing is amiss.
+    //
+    // Nothing outside the tests calls it yet: the status bar and the Settings
+    // row that are to show it are in other files.
+    #[allow(dead_code)]
+    pub fn says(&self) -> Option<String> {
+        if let Some(problem) = &self.problem {
+            return Some(problem.clone());
+        }
+        let nothing = self.found == 0 && self.shared == 0;
+        if self.left_out.is_empty() {
+            return nothing.then(|| "no repositories found".to_string());
+        }
+        const NAMED: usize = 3;
+        let mut names: Vec<String> = self
+            .left_out
+            .iter()
+            .take(NAMED)
+            .map(|path| match path.file_name() {
+                Some(name) => name.to_string_lossy().to_string(),
+                None => path.display().to_string(),
+            })
+            .collect();
+        if self.left_out.len() > NAMED {
+            names.push(format!("{} more", self.left_out.len() - NAMED));
+        }
+        let count = self.left_out.len();
+        let (repositories, are) = if count == 1 { ("repository", "is") } else { ("repositories", "are") };
+        Some(format!(
+            "{}{count} {repositories} in it {are} not ignored by its own repository, and so \
+             {are} left out ({})",
+            if nothing { "no repositories found: " } else { "" },
+            names.join(", ")
+        ))
+    }
+}
+
+/// Everything discovery has to say: the repositories, and a report for each
+/// root in the order the roots were given.
+pub struct Survey {
+    pub found: Vec<Found>,
+    pub roots: Vec<RootReport>,
+}
+
 /// Walk `roots` looking for repositories, at most `max_depth` levels down.
+/// See [`survey`], which this is without the reports.
+//
+// The scan asks for the reports as well, so outside the tests nothing calls
+// this any more. It stays for a caller that only wants the list.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn discover(roots: &[Root], max_depth: usize) -> Vec<Found> {
+    survey(roots, max_depth).found
+}
+
+/// Walk `roots` looking for repositories, at most `max_depth` levels down, and
+/// say what each root came to.
 ///
 /// A repository normally ends the descent, so vendored checkouts and
 /// submodules inside a project stay out of sight. A root marked `nested` lifts
-/// that for its own directory only: the repository there is opened and the
-/// subdirectories it *ignores* are followed, which is exactly the shape of a
-/// workspace full of independent clones. Submodules are tracked rather than
-/// ignored, so they are still skipped. Below that first level the normal rule
-/// applies again.
-pub fn discover(roots: &[Root], max_depth: usize) -> Vec<Found> {
+/// that for the repository at the root itself: it is opened, and the
+/// directories it *ignores* are followed, which is exactly the shape of a
+/// workspace full of independent clones. Its submodules are never followed.
+/// Inside a clone found that way the normal rule applies again.
+///
+/// A repository under two roots belongs to the narrower one. The roots used
+/// to be walked in the order they were listed, and a repository went to
+/// whichever reached it first: add `~/code/clients` with a tag to a
+/// configuration that already had `~/code`, which is the only order Settings
+/// can produce, and the wider root had claimed every repository before the
+/// tagged one was looked at. The tag was shown on the root's row and applied
+/// to nothing.
+pub fn survey(roots: &[Root], max_depth: usize) -> Survey {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
+    let mut reports: Vec<RootReport> = roots.iter().map(RootReport::new).collect();
 
-    for root in roots {
-        let base = root.path.canonicalize().unwrap_or_else(|_| root.path.clone());
+    let bases: Vec<PathBuf> = roots
+        .iter()
+        .map(|root| root.path.canonicalize().unwrap_or_else(|_| root.path.clone()))
+        .collect();
+    // Deepest first. Two roots that hold the same repository lie on one line
+    // of ancestors, so the one with more components is the narrower; the sort
+    // is stable, so roots that do not overlap keep the order they were given.
+    let mut order: Vec<usize> = (0..roots.len()).collect();
+    order.sort_by_key(|&at| std::cmp::Reverse(bases[at].components().count()));
 
-        if !is_git_dir(&base) {
-            walk(&base, 1, max_depth, root, &mut found, &mut seen);
+    for at in order {
+        let (root, base) = (&roots[at], &bases[at]);
+        let mut search = Search {
+            root,
+            max_depth,
+            found: &mut found,
+            seen: &mut seen,
+            report: &mut reports[at],
+            owned: HashSet::new(),
+        };
+
+        if !is_git_dir(base) {
+            // Only here, for the root itself. A folder further down that
+            // cannot be read is an ordinary thing to come across, and not
+            // what the user pointed at.
+            match std::fs::read_dir(base) {
+                Ok(_) => search.walk(base, 1),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    search.report.problem = Some("does not exist".to_string());
+                }
+                Err(err) => search.report.problem = Some(format!("cannot be read ({err})")),
+            }
             continue;
         }
 
         if !root.nested {
-            record(base, root, &mut found, &mut seen);
+            search.record(base.clone());
             continue;
         }
 
         if root.include_self {
-            record(base.clone(), root, &mut found, &mut seen);
+            search.record(base.clone());
         }
-        descend_workspace(&base, root, max_depth, &mut found, &mut seen);
+        match Repository::open(base) {
+            Ok(repo) => search.workspace(&repo, base),
+            // Without its repository there are no ignore rules to follow and
+            // no list of submodules to leave alone. This used to find nothing
+            // at all, silently, which took a whole workspace off the grid the
+            // day its wrapper stopped opening. So it is searched as the plain
+            // folder it has become, and the wrapper gets a card whether or not
+            // one was asked for, because a card is where the reason is shown.
+            Err(err) => {
+                search.report.problem = Some(format!(
+                    "its own repository cannot be opened ({}), so it is searched as a plain \
+                     folder: a submodule of it would be shown as a clone",
+                    err.message()
+                ));
+                if search.seen.insert(base.clone()) {
+                    search.found.push(Found { path: base.clone(), seed: None });
+                }
+                search.walk(base, 1);
+            }
+        }
     }
 
     found.sort_by(|a, b| a.path.cmp(&b.path));
-    found
+    Survey { found, roots: reports }
 }
 
-fn record(path: PathBuf, root: &Root, found: &mut Vec<Found>, seen: &mut HashSet<PathBuf>) {
-    let key = path.canonicalize().unwrap_or_else(|_| path.clone());
-    if seen.insert(key) {
-        let seed = Seed {
-            root: root.path.display().to_string(),
-            tag: root.tag.clone(),
-        };
-        found.push(Found { path, seed: Some(seed) });
+/// The search of one root.
+struct Search<'a> {
+    root: &'a Root,
+    max_depth: usize,
+    found: &'a mut Vec<Found>,
+    seen: &'a mut HashSet<PathBuf>,
+    report: &'a mut RootReport,
+    /// The submodules of a workspace, as absolute paths. Empty for any other
+    /// root.
+    owned: HashSet<PathBuf>,
+}
+
+impl Search<'_> {
+    fn record(&mut self, path: PathBuf) {
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if self.seen.insert(key) {
+            let seed = Seed {
+                root: self.root.path.display().to_string(),
+                tag: self.root.tag.clone(),
+            };
+            self.found.push(Found { path, seed: Some(seed) });
+            self.report.found += 1;
+        } else {
+            self.report.shared += 1;
+        }
+    }
+
+    /// The normal rule: look in `dir`, whose children are `depth` levels below
+    /// the root, and stop at the first repository on the way down.
+    fn walk(&mut self, dir: &Path, depth: usize) {
+        if depth > self.max_depth {
+            return;
+        }
+        for path in child_dirs(dir) {
+            // At every depth. The list was only held against the first level
+            // of a workspace, so a submodule at `libs/shared` came through a
+            // grouping folder and onto the grid as a clone: tagged, and
+            // fast-forwarded off the commit its workspace pins it to.
+            if self.owned.contains(&path) {
+                continue;
+            }
+            if is_git_dir(&path) {
+                self.record(path);
+                continue;
+            }
+            self.walk(&path, depth + 1);
+        }
+    }
+
+    /// A workspace: follow what `repo`, the repository at `base`, ignores.
+    fn workspace(&mut self, repo: &Repository, base: &Path) {
+        match submodule_paths(repo) {
+            Ok(paths) => self.owned = paths.into_iter().map(|path| base.join(path)).collect(),
+            Err(err) => {
+                self.report.problem = Some(format!(
+                    "its submodules cannot be listed ({}), so one may be shown as a clone",
+                    err.message()
+                ));
+            }
+        }
+        self.own_folder(repo, base, base, 1);
+    }
+
+    /// One of the workspace repository's own directories: `base` itself, or a
+    /// folder below it that it does not ignore. Its children are `depth`
+    /// levels below the root.
+    ///
+    /// Only `base` was ever looked in. A rule of `repos/*` ignores everything
+    /// in `repos` and not `repos` itself, so the folder was passed over as the
+    /// workspace's own and the clones in it were never asked about: an empty
+    /// grid from a root set up the way its switch in Settings describes.
+    fn own_folder(&mut self, repo: &Repository, base: &Path, dir: &Path, depth: usize) {
+        if depth > self.max_depth {
+            return;
+        }
+        for child in child_dirs(dir) {
+            if self.owned.contains(&child) {
+                continue;
+            }
+            let ignored = match ignores(repo, base, &child) {
+                Ok(ignored) => ignored,
+                Err(err) => {
+                    self.report.problem.get_or_insert_with(|| {
+                        format!("its ignore rules cannot be read ({})", err.message())
+                    });
+                    false
+                }
+            };
+            match (ignored, is_git_dir(&child)) {
+                (true, true) => self.record(child),
+                // Not a repository itself, but the workspace does not own it
+                // either: a grouping folder. Carry on under the normal rule.
+                (true, false) => self.walk(&child, depth + 1),
+                // A clone the workspace has no rule for, or a repository
+                // somebody put inside it. Not followed, and said.
+                (false, true) => self.report.left_out.push(child),
+                (false, false) => self.own_folder(repo, base, &child, depth + 1),
+            }
+        }
     }
 }
 
@@ -373,75 +613,48 @@ fn child_dirs(dir: &Path) -> Vec<PathBuf> {
     children
 }
 
-/// Follow the children a workspace repository disclaims.
-fn descend_workspace(
-    base: &Path,
-    root: &Root,
-    max_depth: usize,
-    found: &mut Vec<Found>,
-    seen: &mut HashSet<PathBuf>,
-) {
-    let repo = Repository::open(base).ok();
-    let submodules = submodule_paths(repo.as_ref());
-    for child in child_dirs(base) {
-        if !disclaimed(repo.as_ref(), base, &child, &submodules) {
-            continue;
-        }
-        if is_git_dir(&child) {
-            record(child, root, found, seen);
-        } else {
-            // Not a repository itself, but the workspace does not own it
-            // either — a grouping folder. Carry on under the normal rule.
-            walk(&child, 2, max_depth, root, found, seen);
-        }
-    }
-}
-
-/// Does `repo` ignore `child`? A directory it ignores is not part of it, which
-/// is what separates a parked clone from a submodule.
+/// Do `repo`'s ignore rules match `child`? A directory it ignores is not part
+/// of it, which is what makes a parked clone something to follow.
 ///
-/// The path is tested exactly as it is, with no trailing separator: a
-/// `.gitignore` of `*` matches `sub/` on the rules alone, and only the
-/// slash-free form makes libgit2 consult the index and report a tracked
-/// submodule as not ignored. Submodule paths are then excluded outright, so an
-/// unusual ignore configuration cannot let one through either.
-fn disclaimed(
-    repo: Option<&Repository>,
-    base: &Path,
-    child: &Path,
-    submodules: &HashSet<PathBuf>,
-) -> bool {
-    let Some(repo) = repo else { return false };
-    let Ok(relative) = child.strip_prefix(base) else { return false };
-    if submodules.contains(relative) {
-        return false;
-    }
-    repo.is_path_ignored(relative).unwrap_or(false)
+/// That is all this says. libgit2 answers from the ignore rules alone: it
+/// never looks in the index, with or without a trailing separator on the
+/// path, so under a blanket rule such as `*` every directory is "ignored",
+/// the workspace's own tracked folders and its submodules included. The
+/// comment here used to say that the slash-free form made libgit2 consult the
+/// index and report a tracked submodule as not ignored. It does not, and the
+/// list of submodules, which that comment called a second safeguard, is the
+/// only thing that keeps one out. Hence [`submodule_paths`], and why
+/// [`Search::walk`] holds every directory against it.
+fn ignores(repo: &Repository, base: &Path, child: &Path) -> Result<bool, git2::Error> {
+    let Ok(relative) = child.strip_prefix(base) else { return Ok(false) };
+    repo.is_path_ignored(relative)
 }
 
-fn submodule_paths(repo: Option<&Repository>) -> HashSet<PathBuf> {
-    repo.and_then(|repo| repo.submodules().ok())
-        .map(|modules| modules.iter().map(|m| m.path().to_path_buf()).collect())
-        .unwrap_or_default()
-}
-
-fn walk(
-    dir: &Path,
-    depth: usize,
-    max_depth: usize,
-    root: &Root,
-    found: &mut Vec<Found>,
-    seen: &mut HashSet<PathBuf>,
-) {
-    if depth > max_depth {
-        return;
-    }
-    for path in child_dirs(dir) {
-        if is_git_dir(&path) {
-            record(path, root, found, seen);
-            continue;
-        }
-        walk(&path, depth + 1, max_depth, root, found, seen);
+/// Every path at which `repo` holds another repository as its own, relative
+/// to its work tree: what `.gitmodules` and HEAD list, and every gitlink in
+/// the index. The second covers a submodule added by hand with no entry in
+/// `.gitmodules`, and a `.gitmodules` that does not parse, which used to
+/// empty the list and let every submodule through. An error only when
+/// neither could be read.
+fn submodule_paths(repo: &Repository) -> Result<HashSet<PathBuf>, git2::Error> {
+    const GITLINK: u32 = 0o160000;
+    let listed = repo
+        .submodules()
+        .map(|modules| modules.iter().map(|m| m.path().to_path_buf()).collect::<Vec<_>>());
+    let linked = repo.index().map(|index| {
+        index
+            .iter()
+            .filter(|entry| entry.mode == GITLINK)
+            .map(|entry| PathBuf::from(std::ffi::OsStr::from_bytes(&entry.path)))
+            .collect::<Vec<_>>()
+    });
+    match (listed, linked) {
+        (Err(err), Err(_)) => Err(err),
+        (listed, linked) => Ok(listed
+            .into_iter()
+            .flatten()
+            .chain(linked.into_iter().flatten())
+            .collect()),
     }
 }
 
@@ -879,6 +1092,210 @@ mod tests {
         git(&f.work, &["submodule", "add", "-q", lib.remote.to_str().unwrap(), "lib"]);
         assert_eq!(inspect(&f.work.join("lib")).error, None, "a submodule");
         assert_eq!(inspect(&f.work).error, None, "and the repository it lives in");
+    }
+
+    // ---- where repositories come from --------------------------------------
+
+    fn plain(path: &Path) -> Root {
+        Root { path: path.to_path_buf(), nested: false, tag: None, include_self: true }
+    }
+
+    /// A workspace as Settings makes one: followed into, its own card hidden.
+    fn workspace(path: &Path) -> Root {
+        Root { nested: true, include_self: false, ..plain(path) }
+    }
+
+    fn tagged(root: Root, tag: &str) -> Root {
+        Root { tag: Some(tag.to_string()), ..root }
+    }
+
+    /// An empty repository at `dir`: all discovery looks for is the `.git`.
+    fn init(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "-b", "main"]);
+    }
+
+    /// A workspace repository at `dir` with these ignore rules committed.
+    fn wrapper(dir: &Path, ignore: &str) {
+        init(dir);
+        write(&dir.join(".gitignore"), ignore);
+        git(dir, &["add", "-f", ".gitignore"]);
+        git(dir, &["commit", "-q", "-m", "a workspace"]);
+    }
+
+    /// What was found, as paths below `base`.
+    fn below(found: &[Found], base: &Path) -> Vec<String> {
+        let base = base.canonicalize().unwrap();
+        found
+            .iter()
+            .map(|found| match found.path.strip_prefix(&base) {
+                Ok(rest) if rest.as_os_str().is_empty() => ".".to_string(),
+                Ok(rest) => rest.display().to_string(),
+                Err(_) => found.path.display().to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_narrower_root_tags_what_is_under_it_wherever_it_is_listed() {
+        let _guard = isolate();
+        let code = scratch("disc-narrower-root");
+        for repo in ["app", "clients/api", "clients/web"] {
+            init(&code.join(repo));
+        }
+        // The order Settings leaves them in: the root that was there first,
+        // then the folder inside it that was added to be tagged.
+        let roots = [plain(&code), tagged(plain(&code.join("clients")), "acme")];
+
+        let found = discover(&roots, 3);
+        assert_eq!(below(&found, &code), ["app", "clients/api", "clients/web"]);
+        let tags: Vec<Option<&str>> = found
+            .iter()
+            .map(|found| found.seed.as_ref().and_then(|seed| seed.tag.as_deref()))
+            .collect();
+        assert_eq!(tags, [None, Some("acme"), Some("acme")]);
+
+        // Each root is told apart by what it put on the grid, and the wider
+        // one is not said to have missed what the narrower one took.
+        let reports = survey(&roots, 3).roots;
+        assert_eq!((reports[0].found, reports[0].shared), (1, 2));
+        assert_eq!((reports[1].found, reports[1].shared), (2, 0));
+        // A root with nothing left to itself has still not come up empty.
+        let roots = [plain(&code.join("clients")), plain(&code.join("clients"))];
+        let reports = survey(&roots, 3).roots;
+        assert_eq!((reports[1].found, reports[1].shared), (0, 2));
+        assert_eq!(reports[1].says(), None);
+    }
+
+    #[test]
+    fn a_root_that_finds_nothing_says_so_and_why() {
+        let _guard = isolate();
+        let base = scratch("disc-reports");
+        init(&base.join("code/app"));
+        std::fs::create_dir_all(base.join("empty")).unwrap();
+        write(&base.join("file"), "not a folder\n");
+        // Clones named one by one, and one that was cloned since.
+        let named = base.join("named");
+        wrapper(&named, "/a/\n/b/\n");
+        for clone in ["a", "b", "c-new"] {
+            init(&named.join(clone));
+        }
+        // No rule for any of them.
+        let bare_rules = base.join("no-rules");
+        wrapper(&bare_rules, "*.log\n");
+        for clone in ["x", "y"] {
+            init(&bare_rules.join(clone));
+        }
+
+        let roots = [
+            plain(&base.join("code")),
+            plain(&base.join("empty")),
+            plain(&base.join("gone")),
+            plain(&base.join("file")),
+            workspace(&named),
+            workspace(&bare_rules),
+        ];
+        let survey = survey(&roots, 3);
+        assert_eq!(below(&survey.found, &base), ["code/app", "named/a", "named/b"]);
+
+        // One report for each root, in the order they were given, whatever
+        // order they were searched in.
+        let reports = survey.roots;
+        let keys: Vec<&str> = reports.iter().map(|report| report.root.as_str()).collect();
+        let given: Vec<String> = roots.iter().map(|root| root.path.display().to_string()).collect();
+        assert_eq!(keys, given);
+
+        assert_eq!((reports[0].found, reports[0].says()), (1, None));
+        assert_eq!(reports[1].says().as_deref(), Some("no repositories found"));
+        assert_eq!(reports[2].says().as_deref(), Some("does not exist"));
+        let file = reports[3].says().unwrap();
+        assert!(file.starts_with("cannot be read ("), "{file}");
+
+        assert_eq!(reports[4].found, 2);
+        assert_eq!(reports[4].left_out, [named.canonicalize().unwrap().join("c-new")]);
+        assert_eq!(
+            reports[4].says().as_deref(),
+            Some(
+                "1 repository in it is not ignored by its own repository, and so is left out \
+                 (c-new)"
+            )
+        );
+        assert_eq!(
+            reports[5].says().as_deref(),
+            Some(
+                "no repositories found: 2 repositories in it are not ignored by its own \
+                 repository, and so are left out (x, y)"
+            )
+        );
+    }
+
+    #[test]
+    fn a_workspace_that_ignores_everything_shows_its_clones_and_not_its_submodules() {
+        let _guard = isolate();
+        let lib = fleet("disc-star-lib");
+        let ws = scratch("disc-star-workspace").join("ws");
+        // The ignore rule the README gives for a workspace.
+        wrapper(&ws, "*\n!.gitignore\n");
+        let url = lib.remote.to_str().unwrap();
+        // git wants `-f` to add anything under a blanket ignore.
+        git(&ws, &["submodule", "add", "-q", "-f", url, "tools"]);
+        git(&ws, &["submodule", "add", "-q", "-f", url, "libs/shared"]);
+        git(&ws, &["commit", "-q", "-m", "two submodules"]);
+        for clone in ["api", "team/jobs", "libs/parked"] {
+            init(&ws.join(clone));
+        }
+
+        // `libs/shared` used to be found: under `*` libgit2 calls every child
+        // ignored, tracked or not, and the list of submodules was only held
+        // against the first level.
+        let found = discover(&[workspace(&ws)], 3);
+        assert_eq!(below(&found, &ws), ["api", "libs/parked", "team/jobs"]);
+
+        // A `.gitmodules` that does not parse used to empty the list, and
+        // then the one at the first level came through as well. The index
+        // still says which paths are another repository's.
+        write(&ws.join(".gitmodules"), "[submodule \"tools\n\tpath = \n");
+        assert!(Repository::open(&ws).unwrap().submodules().is_err());
+        let found = discover(&[workspace(&ws)], 3);
+        assert_eq!(below(&found, &ws), ["api", "libs/parked", "team/jobs"]);
+    }
+
+    #[test]
+    fn a_workspace_follows_what_it_ignores_below_its_first_level_too() {
+        let _guard = isolate();
+        let ws = scratch("disc-ignored-below").join("ws");
+        // Common, and git itself reports `repos/` as ignored for it.
+        wrapper(&ws, "repos/*\n");
+        for clone in ["repos/a", "repos/b"] {
+            init(&ws.join(clone));
+        }
+        let found = discover(&[workspace(&ws)], 3);
+        assert_eq!(below(&found, &ws), ["repos/a", "repos/b"]);
+    }
+
+    #[test]
+    fn a_workspace_whose_own_repository_will_not_open_keeps_its_clones() {
+        let _guard = isolate();
+        let ws = scratch("disc-broken-wrapper").join("ws");
+        wrapper(&ws, "*\n!.gitignore\n");
+        for clone in ["a", "b"] {
+            init(&ws.join(clone));
+        }
+        std::fs::remove_file(ws.join(".git/HEAD")).unwrap();
+        assert!(Repository::open(&ws).is_err());
+
+        // Thirty repositories used to leave the grid here in one scan, with
+        // nothing anywhere to say why. The wrapper is shown as well, hidden
+        // or not: its card is where the reason can be read.
+        let root = tagged(workspace(&ws), "acme");
+        let survey = survey(std::slice::from_ref(&root), 3);
+        let found = survey.found;
+        assert_eq!(below(&found, &ws), [".", "a", "b"]);
+        assert!(inspect(&found[0].path).error.is_some());
+        assert!(found[0].seed.is_none(), "a card nobody asked for takes no tag");
+        assert!(found[1].seed.is_some());
+        let said = survey.roots[0].says().expect("and the root says what happened to it");
+        assert!(said.starts_with("its own repository cannot be opened ("), "{said}");
     }
 
     // ---- a read that fails is not a reading of zero ------------------------
