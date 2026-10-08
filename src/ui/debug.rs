@@ -2,10 +2,11 @@
 //!
 //! Started with `OMAREPOS_DUMP=<file>`, the window gains a `dump` action that
 //! writes what is on screen to that file as text: every mapped widget that
-//! says something, with where the keyboard is and what is selected, and a
-//! `press` action that clicks a button by what it says. It is how a change to
-//! a page gets checked from a script, with the window on a workspace nobody
-//! is looking at:
+//! says something, with where the keyboard is and what is selected; a `press`
+//! action that clicks a button by what it says; and a `key` action that hands
+//! a key to the application's own handlers. It is how a change to a page gets
+//! checked from a script, with the window on a workspace nobody is looking
+//! at, and without a single event passing through the compositor:
 //!
 //! ```text
 //! gdbus call --session --dest <bus name> \
@@ -80,6 +81,92 @@ pub fn install(window: &adw::ApplicationWindow) {
         }
     });
     window.add_action(&press);
+
+    // And a key, handed straight to the application's own key handlers: the
+    // controller on the widget with the keyboard, then on each widget above
+    // it, until one takes it. `key` takes the key's name with any modifiers
+    // in front: "p", "Tab", "shift+question", "ctrl+d". Nothing goes through
+    // the compositor, which matters: keys injected there take the keyboard
+    // away from whatever the person at the desk is typing in. What this does
+    // not reach is GTK's own handling (arrow keys in a list) and the window's
+    // accelerators, which are actions and can be activated as such.
+    let key = gio::SimpleAction::new("key", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    key.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (mods, name) = match wanted.rsplit_once('+') {
+            Some((mods, name)) => (mods, name),
+            None => ("", wanted),
+        };
+        let Some(keyval) = gtk::gdk::Key::from_name(name) else {
+            eprintln!("omarepos: no key is called {name:?}");
+            return;
+        };
+        let mut state = gtk::gdk::ModifierType::empty();
+        for held in mods.split('+').filter(|held| !held.is_empty()) {
+            state |= match held {
+                "shift" => gtk::gdk::ModifierType::SHIFT_MASK,
+                "ctrl" => gtk::gdk::ModifierType::CONTROL_MASK,
+                "alt" => gtk::gdk::ModifierType::ALT_MASK,
+                _ => gtk::gdk::ModifierType::empty(),
+            };
+        }
+        let focus = gtk::prelude::GtkWindowExt::focus(&window);
+        let mut at = focus.clone();
+        while let Some(widget) = at {
+            let controllers = widget.observe_controllers();
+            for index in 0..controllers.n_items() {
+                let Some(keys) = controllers.item(index).and_downcast::<gtk::EventControllerKey>()
+                else {
+                    continue;
+                };
+                let taken = keys.emit_by_name::<bool>(
+                    "key-pressed",
+                    &[&gtk::glib::translate::IntoGlib::into_glib(keyval), &0u32, &state],
+                );
+                if taken {
+                    return;
+                }
+            }
+            at = widget.parent();
+        }
+        // Enter, where no handler of ours wanted it, is what GTK would make
+        // of it: the widget's own activation (a card, an entry, a button).
+        if matches!(name, "Return" | "KP_Enter") {
+            let mut at = focus;
+            while let Some(widget) = at {
+                // A text field's Enter is a signal of its own.
+                if widget.is::<gtk::SearchEntry>() || widget.is::<gtk::Entry>() {
+                    widget.emit_by_name::<()>("activate", &[]);
+                    return;
+                }
+                if widget.activate() {
+                    return;
+                }
+                at = widget.parent().filter(|_| widget.is::<gtk::Text>());
+            }
+        }
+        eprintln!("omarepos: nothing took {wanted:?}");
+    });
+    window.add_action(&key);
+
+    // Text, into the field the keyboard is in.
+    let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    type_.connect_activate(move |_, text| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(text) = text.and_then(|text| text.str()) else { return };
+        match gtk::prelude::GtkWindowExt::focus(&window).and_downcast::<gtk::Editable>() {
+            Some(field) => {
+                let mut at = field.position();
+                field.insert_text(text, &mut at);
+                field.set_position(at);
+            }
+            None => eprintln!("omarepos: the keyboard is not in a text field"),
+        }
+    });
+    window.add_action(&type_);
 }
 
 fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {
