@@ -157,16 +157,38 @@ pub fn install(window: &adw::ApplicationWindow) {
     type_.connect_activate(move |_, text| {
         let Some(window) = window_weak.upgrade() else { return };
         let Some(text) = text.and_then(|text| text.str()) else { return };
-        match gtk::prelude::GtkWindowExt::focus(&window).and_downcast::<gtk::Editable>() {
+        // The field the keyboard is in, or failing that the first entry on
+        // screen that is not a filter: a page has at most one of those.
+        let field = gtk::prelude::GtkWindowExt::focus(&window)
+            .and_downcast::<gtk::Editable>()
+            .or_else(|| first_entry(window.upcast_ref()).map(|entry| entry.upcast()));
+        match field {
             Some(field) => {
                 let mut at = field.position();
                 field.insert_text(text, &mut at);
                 field.set_position(at);
             }
-            None => eprintln!("omarepos: the keyboard is not in a text field"),
+            None => eprintln!("omarepos: there is no text field to type into"),
         }
     });
     window.add_action(&type_);
+}
+
+fn first_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
+    if !widget.is_mapped() {
+        return None;
+    }
+    if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
+        return Some(entry.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = first_entry(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
 }
 
 fn find_button(widget: &gtk::Widget, wanted: &str) -> Option<gtk::Button> {

@@ -775,6 +775,38 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     window.add_action(&act_updated);
 
     ui.sync_trouble();
+    // A new window means the application is not closing after all.
+    crate::gitcmd::wind_down(false);
+    {
+        // Closing the window does not cut git off. The window goes at once;
+        // the application stays, without one, until a fast-forward, a commit
+        // or a push that is under way has finished. It used to exit there and
+        // then: a fast-forward was stopped between two files, and a commit
+        // whose hook was still running was abandoned or finished unseen.
+        // Fetches are stopped, and the pass across the fleet called off:
+        // neither loses anything, and either could keep a closed application
+        // alive for an hour.
+        let ui = Rc::clone(&ui);
+        let app = app.clone();
+        window.connect_close_request(move |_| {
+            ui.cancel_refresh();
+            if crate::gitcmd::busy() {
+                crate::gitcmd::wind_down(true);
+                let mut held = Some(app.hold());
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    if crate::gitcmd::busy() {
+                        return glib::ControlFlow::Continue;
+                    }
+                    // Letting go of the hold is what ends the application,
+                    // unless a window has been opened meanwhile.
+                    held.take();
+                    glib::ControlFlow::Break
+                });
+            }
+            glib::Propagation::Proceed
+        });
+    }
+
     #[cfg(debug_assertions)]
     ui::debug::install(&window);
 

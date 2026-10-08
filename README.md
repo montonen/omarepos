@@ -401,6 +401,12 @@ cut off at the limit on every pass and leave a partial pack behind each time.
 There is a ceiling of an hour. A repository and its linked worktrees share one
 store of refs, and are fetched one at a time.
 
+Closing the window, or `Ctrl+Q`, does not cut git off. The window goes at once
+and the application stays, without one, until a fast-forward, a commit or a
+push that is under way has finished; a fetch is stopped, and a pass across the
+fleet called off, since neither loses anything by it. Start omarepos again in
+the meantime and you get a window from the same process.
+
 The fast-forward does not share that timeout. It is a local write to your
 working tree, and a checkout stopped half-way is worse than one waited for, so
 it gets half an hour. When any git command is given up on, git is asked to stop

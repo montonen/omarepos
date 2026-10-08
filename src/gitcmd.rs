@@ -26,9 +26,54 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// How much is under way that the process must not exit in the middle of:
+/// every git command, and a refresh of one repository from its fetch to its
+/// fast-forward.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+/// Set while the last window is closing with git still at work.
+static WINDING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Held for as long as something is running that must be let finish. The
+/// application used to exit the moment its window closed, whatever git was in
+/// the middle of: a fast-forward cut off between files, a commit whose hook
+/// was still running, a push nobody then heard the end of. The window still
+/// goes at once. The process now stays until [`busy`] says no.
+pub struct Hold(());
+
+impl Hold {
+    pub fn take() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Hold(())
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether git is in the middle of anything.
+pub fn busy() -> bool {
+    IN_FLIGHT.load(Ordering::SeqCst) > 0
+}
+
+/// Say that the application is closing, or has stopped closing. While it is,
+/// a fetch under way is stopped and no fast-forward is begun: a fetch is not
+/// worth keeping a closed application alive for, up to an hour, and loses
+/// nothing by being stopped. Every write is left to finish.
+pub fn wind_down(closing: bool) {
+    WINDING_DOWN.store(closing, Ordering::SeqCst);
+}
+
+pub fn winding_down() -> bool {
+    WINDING_DOWN.load(Ordering::SeqCst)
+}
 
 /// How long git gets to stop after being asked to, before it is made to.
 const GRACE: Duration = Duration::from_secs(5);
@@ -212,20 +257,26 @@ fn ssh_command(dir: &Path, args: &[&str], attended: bool) -> Option<String> {
     }
 }
 
-/// Whether this is `fetch` or `push`, looking past any leading `-c key=value`.
-fn talks_to_a_remote(args: &[&str]) -> bool {
+/// The git command being run, looking past any leading `-c key=value`.
+fn verb<'a>(args: &[&'a str]) -> &'a str {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if *arg == "-c" {
             rest.next();
             continue;
         }
-        return matches!(*arg, "fetch" | "push");
+        return arg;
     }
-    false
+    ""
+}
+
+/// Whether this is `fetch` or `push`.
+fn talks_to_a_remote(args: &[&str]) -> bool {
+    matches!(verb(args), "fetch" | "push")
 }
 
 fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<String, String> {
+    let _hold = Hold::take();
     let mut command = Command::new("git");
     command.current_dir(dir);
     if !attended {
@@ -262,6 +313,10 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
                 if let Some(why) = limit.passed(started, heard) {
                     stop(&mut child);
                     return Err(why);
+                }
+                if winding_down() && verb(args) == "fetch" {
+                    stop(&mut child);
+                    return Err("stopped: omarepos was closing".to_string());
                 }
                 // Short commands are the common case; do not make each one
                 // wait out a fixed nap.
@@ -788,5 +843,52 @@ mod tests {
         hook(&f.work, "pre-push", "echo 'pre-push: 3 tests failing, fix them before pushing'\nexit 1");
         let said = run(&f.work, &["push", "origin", "main"], PATIENT).unwrap_err();
         assert_eq!(said, "pre-push: 3 tests failing, fix them before pushing");
+    }
+    /// What the window's close handler relies on: `busy` is true for exactly
+    /// as long as a command runs, a commit with a slow hook is let finish
+    /// while the application winds down, and a fetch is not.
+    #[test]
+    fn closing_waits_for_a_write_and_stops_a_fetch() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-closing");
+        hook(&dir, "pre-commit", "sleep 1");
+        write(&dir.join("README.md"), "two\n");
+        git(&dir, &["add", "README.md"]);
+        assert!(!busy());
+
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || run(&dir, &["commit", "-m", "second"], PATIENT))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(busy(), "the commit's hook is still running");
+        wind_down(true);
+        let committed = worker.join().unwrap();
+        wind_down(false);
+        assert!(committed.is_ok(), "a write is let finish: {committed:?}");
+        assert!(!busy());
+        assert_eq!(git(&dir, &["log", "-1", "--format=%s"]), "second");
+
+        // A fetch from a remote that takes its time answering.
+        let remote = scratch("gitcmd-closing-remote");
+        git(&remote, &["init", "-q", "--bare", "."]);
+        let slow = dir.join("slow-upload-pack");
+        write(&slow, "#!/bin/sh\nsleep 6\nexec git upload-pack \"$@\"\n");
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&dir, &["config", "remote.origin.uploadpack", slow.to_str().unwrap()]);
+
+        let started = Instant::now();
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || run(&dir, &["fetch", "--quiet"], PATIENT))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        wind_down(true);
+        let fetched = worker.join().unwrap();
+        wind_down(false);
+        assert_eq!(fetched, Err("stopped: omarepos was closing".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(4), "it was stopped, not waited for");
+        assert!(!busy());
     }
 }

@@ -403,6 +403,9 @@ pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<E
                         guard.next()
                     };
                     let Some(path) = next else { return };
+                    // From the fetch to the fast-forward: the application
+                    // does not exit in the gap between the two.
+                    let _hold = crate::gitcmd::Hold::take();
                     let report = refresh_one(&path, &options);
                     if tx.send_blocking(Event::Repo(Box::new(report))).is_err() {
                         return;
@@ -545,7 +548,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
 
     // Called off while this repository was being fetched: it stays fetched,
     // and where it was.
-    if options.cancel.stopped() {
+    if options.cancel.stopped() || crate::gitcmd::winding_down() {
         return report(Outcome::Behind(behind));
     }
 
