@@ -193,14 +193,17 @@ impl Palette {
         let fb = Self::fallback();
 
         let background = colour(&["background", "bg", "color0"]);
-        let dark = match ["mode", "theme_type"]
-            .into_iter()
-            .filter_map(word)
-            .find(|mode| !mode.is_empty())
-        {
-            Some(mode) => mode != "light",
-            None if marked_light => false,
-            None => !background.as_deref().is_some_and(is_light),
+        let declared =
+            ["mode", "theme_type"].into_iter().filter_map(word).find(|mode| !mode.is_empty());
+        let dark = match (background.as_deref(), declared) {
+            // Nothing of the theme's is behind the text, then: the window
+            // gets the built-in background, which is dark whatever the theme
+            // says of itself. A colors.toml that cannot be parsed ends up
+            // here too, and may well have a `light.mode` beside it.
+            (None, _) => true,
+            (Some(_), Some(mode)) => mode != "light",
+            (Some(_), None) if marked_light => false,
+            (Some(background), None) => !is_light(background),
         };
 
         let bg = background.unwrap_or_else(|| fb.bg.clone());
@@ -1394,9 +1397,28 @@ color15 = "#bcc0cc"
             "mode outranks theme_type"
         );
         assert!(
-            !Palette::resolve("mode = \"\"\ntheme_type = \"light\"\n", false).dark,
+            !Palette::resolve(&format!("mode = \"\"\ntheme_type = \"light\"\n{night}"), false)
+                .dark,
             "an empty mode is no answer"
         );
+    }
+
+    /// The flag picks the colour scheme and the syntax colours that go on the
+    /// window's background. When the theme supplies no background, because
+    /// its colors.toml names none or cannot be parsed at all, that
+    /// background is the built-in dark one, and a `light.mode` file or a
+    /// `mode` saying otherwise would put light-theme text on it.
+    #[test]
+    fn a_theme_with_no_background_of_its_own_is_dark() {
+        let _guard = isolate();
+        let dir = install("background = #eff1f5 and this is not TOML\n");
+        write(&dir.join("theme/light.mode"), "");
+
+        let palette = Palette::load();
+        assert_eq!(palette.bg, Palette::fallback().bg);
+        assert!(palette.dark);
+
+        assert!(Palette::resolve("mode = \"light\"\nforeground = \"#4c4f69\"\n", true).dark);
     }
 
     #[test]
