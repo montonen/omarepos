@@ -129,11 +129,11 @@ step "tag editor: type and save" "X row 'Tags=one, extra'; X respond save; sleep
 step "tag editor again, cancel" 'X press "!Tags…"; sleep 0.5; X respond cancel; sleep 0.4'
 step "tag editor: empty and save" 'X press "!Tags…"; sleep 0.5; X row "Tags="; X respond save; sleep 0.6'
 step "tag the selection" 'X keys ctrl+a; X press "Tags"; X press "!selected…"; sleep 0.5; X row "Tags=open source, a,b"; X respond save; sleep 0.6; X keys ctrl+shift+a'
-tags "JM HM"; step "two tags: chips" "X keys ctrl+r; sleep 1.2"
+tags "JM ACME"; step "two tags: chips" "X keys ctrl+r; sleep 1.2"
 step "chip on" 'X press "JM"'
-step "second chip on" 'X press "HM"'
-step "chips off" 'X press "JM"; X press "HM"'
-step "filter by a tag, then lose the tag" 'X press "HM"; sleep 0.3'
+step "second chip on" 'X press "ACME"'
+step "chips off" 'X press "JM"; X press "ACME"'
+step "filter by a tag, then lose the tag" 'X press "ACME"; sleep 0.3'
 tags "JM"; step "rescan with the tag gone" "X keys ctrl+r; sleep 1.2"
 
 # ---- themes: light, broken, odd, dark, none
