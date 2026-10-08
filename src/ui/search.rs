@@ -42,6 +42,8 @@ struct Tally {
     at_matches: usize,
     /// Repositories read only `search::MAX_COMMITS_PER_REPO` commits back.
     at_depth: usize,
+    /// Repositories that could not be read at all.
+    unreadable: usize,
 }
 
 impl Tally {
@@ -49,7 +51,7 @@ impl Tally {
         let commits = plural(self.found, "commit", "commits");
         // With a repository that stopped, what arrived is a floor and not a
         // count.
-        let partial = self.at_matches + self.at_depth > 0;
+        let partial = self.at_matches + self.at_depth + self.unreadable > 0;
         let mut parts = vec![
             if partial && self.found > 0 {
                 format!("at least {} {commits}", thousands(self.found))
@@ -74,6 +76,13 @@ impl Tally {
                 thousands(search::MAX_COMMITS_PER_REPO),
             ));
         }
+        if self.unreadable > 0 {
+            parts.push(format!(
+                "{} {} could not be read",
+                self.unreadable,
+                plural(self.unreadable, "repo", "repos"),
+            ));
+        }
         if self.found > MAX_ROWS {
             // Each repository hands over its newest matches, and as many as
             // are listed here, so the rows are the newest there are. Unless
@@ -92,17 +101,26 @@ impl Tally {
     /// For the page shown when no match arrived.
     fn nothing(&self, query: &str) -> String {
         let repositories = plural(self.repos, "repository", "repositories");
-        if self.at_depth == 0 {
+        if self.at_depth == 0 && self.unreadable == 0 {
             return format!("Nothing in {} {repositories} matches “{query}”.", self.repos);
         }
-        format!(
-            "Nothing found for “{query}” in {} {repositories}. {} of them {} read only {} \
-             commits back, so an older match would not have been found.",
-            self.repos,
-            self.at_depth,
-            plural(self.at_depth, "was", "were"),
-            thousands(search::MAX_COMMITS_PER_REPO),
-        )
+        let mut said = format!("Nothing found for “{query}” in {} {repositories}.", self.repos);
+        if self.at_depth > 0 {
+            said.push_str(&format!(
+                " {} of them {} read only {} commits back, so an older match would not have \
+                 been found.",
+                self.at_depth,
+                plural(self.at_depth, "was", "were"),
+                thousands(search::MAX_COMMITS_PER_REPO),
+            ));
+        }
+        if self.unreadable > 0 {
+            said.push_str(&format!(
+                " {} could not be read at all.",
+                self.unreadable
+            ));
+        }
+        said
     }
 }
 
@@ -336,6 +354,7 @@ pub fn page(
                         search::Event::Hits(found) => hits.extend(found),
                         search::Event::Stopped(Stopped::Matches) => tally.at_matches += 1,
                         search::Event::Stopped(Stopped::Depth) => tally.at_depth += 1,
+                        search::Event::Stopped(Stopped::Unreadable) => tally.unreadable += 1,
                         search::Event::Done => break,
                     }
                 }
@@ -503,14 +522,14 @@ mod tests {
     /// a count, over rows that were not the newest.
     #[test]
     fn a_repository_that_stopped_at_its_matches_turns_the_count_into_a_floor() {
-        let tally = Tally { found: 1037, repos_hit: 12, repos: 44, at_matches: 2, at_depth: 0 };
+        let tally = Tally { found: 1037, repos_hit: 12, repos: 44, at_matches: 2, at_depth: 0, unreadable: 0 };
         assert_eq!(
             plain(tally.status()),
             "at least 1,037 commits  ·  in 12 of 44 repos  ·  \
              2 repos stopped at 500 matches, narrow the query  ·  newest 500 shown"
         );
         // Few enough to list them all: still not all there are.
-        let listed = Tally { found: 500, repos_hit: 1, repos: 1, at_matches: 1, at_depth: 0 };
+        let listed = Tally { found: 500, repos_hit: 1, repos: 1, at_matches: 1, at_depth: 0, unreadable: 0 };
         assert_eq!(
             plain(listed.status()),
             "at least 500 commits  ·  in 1 of 1 repos  ·  \
@@ -534,11 +553,24 @@ mod tests {
         );
 
         // With rows to cut, they are no longer known to be the newest.
-        let cut = Tally { found: 620, repos_hit: 5, repos: 9, at_matches: 0, at_depth: 2 };
+        let cut = Tally { found: 620, repos_hit: 5, repos: 9, at_matches: 0, at_depth: 2, unreadable: 0 };
         assert_eq!(
             plain(cut.status()),
             "at least 620 commits  ·  in 5 of 9 repos  ·  \
              2 repos read only 50,000 commits back  ·  500 shown"
+        );
+    }
+    #[test]
+    fn a_repository_that_could_not_be_read_is_said_in_both_places() {
+        let tally = Tally { found: 3, repos_hit: 1, repos: 4, unreadable: 1, ..Tally::default() };
+        assert_eq!(
+            tally.status(),
+            "at least 3 commits  ·  in 1 of 4 repos  ·  1 repo could not be read"
+        );
+        let nothing = Tally { repos: 4, unreadable: 2, ..Tally::default() };
+        assert_eq!(
+            nothing.nothing("fix"),
+            "Nothing found for “fix” in 4 repositories. 2 could not be read at all."
         );
     }
 }

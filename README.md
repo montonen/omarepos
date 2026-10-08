@@ -312,13 +312,27 @@ repository is left alone, with the reason reported, when any of these hold:
 | No upstream | Nothing to move it to |
 | Merge or rebase in progress | You are in the middle of something |
 | Bare, or no commits yet | Nothing to do |
+| The update would move a checked-out submodule | The submodule's own checkout would be left behind it. Pull that one yourself |
+| The branch was moved back by hand | You undid an update (`git reset --hard ORIG_HEAD`); a pass across the fleet does not put it back. `p` does |
+| The upstream was wound back | Commits you have were taken off the remote. That is not "ahead", and nothing here will push them back |
+
+These are about *updating*. A pass that only fetches (`f`, or the refresh with
+`fast_forward` off) fetches a detached, mid-merge or diverged repository like
+any other, and reports what it found: `fetched, 3 behind`.
 
 Cleanliness is checked after the fetch, immediately before the fast-forward,
 because the fetch takes time and you may have started editing during it. The
-update then runs `git merge --ff-only`, which refuses anything that is not a
-fast-forward even if that check was wrong. It never merges, rebases, stashes,
-resets, forces, or touches submodules, and it only moves the branch you have
-checked out.
+update then runs `git merge --ff-only` with the settings that could make it
+something else overridden for that one command (`branch.<name>.mergeoptions`,
+`pull.twohead`, squash, autostash), and afterwards the branch is read back:
+only "now at its upstream" counts as updated. It never merges, rebases,
+stashes, resets or forces, never goes into submodules, and only moves the
+branch you have checked out.
+
+A fast-forward that fails part-way (a full disk, a file held open) leaves some
+files already rewritten under a branch that has not moved. The card says "held
+back", and its tooltip names those files and how to put them right, and goes
+on saying it on later passes until it is.
 
 Untracked files do not block an update: a fast-forward cannot silently
 overwrite one, because git refuses rather than clobbering it. Ignored files are
@@ -377,8 +391,15 @@ worker on a prompt nobody can answer. The batch options are added to the ssh
 command you have configured, not put in its place: a `core.sshCommand` that
 picks a key per client, set globally or through `includeIf`, is still what
 runs. A repository's *own* `core.sshCommand` is believed when you act on that
-repository, and not on a pass across the fleet. The fetch has `timeout_seconds` as a
-backstop.
+repository, and not on a pass across the fleet. On such a pass askpass is off
+as well (`GIT_ASKPASS`, `SSH_ASKPASS`, `core.askPass`), so the timer cannot
+open a password dialog on a desktop nobody is at; `p`, `f` and a push can.
+
+`timeout_seconds` is how long a fetch may go without anything arriving, not how
+long it may take: a large fetch over a slow link finishes, where it used to be
+cut off at the limit on every pass and leave a partial pack behind each time.
+There is a ceiling of an hour. A repository and its linked worktrees share one
+store of refs, and are fetched one at a time.
 
 The fast-forward does not share that timeout. It is a local write to your
 working tree, and a checkout stopped half-way is worse than one waited for, so
@@ -390,6 +411,14 @@ included — because git removes its lock files when asked and leaves an
 ### Worth knowing
 
 - It does not pause on battery or a metered connection.
+- A fetch moves `origin/*`, here as in a terminal. A bare
+  `git push --force-with-lease` trusts those refs to say what you last saw, so
+  a scheduled fetch weakens it to a plain force. `git config --global
+  push.useForceIfIncludes true` restores the check, and is worth having with
+  any tool that fetches for you.
+- A fast-forward sets `ORIG_HEAD`, and so does an attempt git refuses.
+  `FETCH_HEAD` is left alone: fetches here do not write it.
+- git 2.29 or later is needed, for `--no-write-fetch-head`.
 - Fetching on a schedule is still traffic to your remotes, and on a work
   machine that traffic is visible to whoever runs them.
 - Scope is the whole grid, or the tags in `only_tags` — deliberately not what
@@ -585,8 +614,22 @@ the filter box doubles as the repo picker.
 Default window is the last 7 days, with 14 and 30 in the header dropdown. Days are
 local calendar days, bucketed at local midnight.
 
+- What is counted is each repository's checked-out branch and the branch it
+  tracks, as `git shortlog HEAD @{u}` would. Other branches are left out: with
+  every branch counted, a change that was squashed, rebased or amended was
+  counted once for each copy of it. A commit held by several checkouts of the
+  same repository counts once, and two repositories with the same folder name
+  stay two.
+- A commit belongs to the day its author wrote it, not the day it was rebased
+  or merged. One dated later than today is left out, and the page says how many.
 - Authors are keyed by e-mail, so one person with two spellings of their name
-  still lands in one row.
+  still lands in one row, and a mailmap is honoured (`.mailmap`,
+  `mailmap.blob`, `mailmap.file`).
+- Line counts detect renames, as `git log --shortstat` does: a moved file is a
+  move, not its whole length removed and added. A commit whose lines cannot be
+  read (the edge of a shallow clone, a partial clone) shows `?`, not zero.
+- A repository that could not be read is listed with the reason, and is not
+  counted as one with no activity.
 - Merge commits count as commits but not as lines — their diffs are their parents'
   work, already counted. The per-author tooltip breaks out how many were merges.
 - Per-day strips are scaled against the busiest author-day, so rows are comparable.
@@ -595,8 +638,10 @@ local calendar days, bucketed at local midnight.
   group says how many older ones there were.
 
 Line counts come from diffing each commit against its first parent, which is the
-expensive part; a week across a dozen repos takes well under a second, but a
-30-day window over a large fleet will visibly chew.
+expensive part. Only the paths a commit changed are diffed, so the cost follows
+the size of the change and not of the repository; a week across a dozen repos
+takes well under a second, and a 30-day window over a large fleet is the case
+that can still be felt.
 
 ## Configuration
 
@@ -650,6 +695,10 @@ follow_omarchy_theme = true
 
 Everything shown comes from libgit2 against the on-disk repository. Reading
 never runs `git`, never writes to a repository and never talks to a remote.
+Where libgit2 cannot read what git can (an index written with
+`core.splitIndex`, a sparse index, a damaged one) the card says `status
+unreadable`, in red, and not `clean`; a history it cannot walk is said the same
+way. Neither is taken for a repository with nothing in it.
 
 Writing is narrow and deliberate. omarepos can stage a file, unstage a file,
 commit what is staged, push the branch, and fast-forward a clean branch. It
@@ -657,7 +706,8 @@ cannot discard an edit: there is no checkout, no reset, no clean, no amend.
 Everything it does is recoverable.
 
 Pushing happens on a button press and never on the timer. Fetching is inward —
-a mistake costs you your own time. Publishing is outward, cannot be taken back
+a mistake costs you your own time, with the one exception about
+`--force-with-lease` under *Worth knowing*. Publishing is outward, cannot be taken back
 without a force push, and on a work remote is visible to everyone. A timer must
 not decide that something is ready to be seen.
 Ahead/behind counts compare your local branch to the *last fetched* state of its

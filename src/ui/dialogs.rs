@@ -327,7 +327,7 @@ pub fn settings(
 
     let fetch = adw::SwitchRow::builder()
         .title("Fetch from the remote")
-        .subtitle("Updates what the remote has. Never touches your files.")
+        .subtitle("Moves origin/* as git fetch does. Never touches your files or branches.")
         .active(cfg.borrow().refresh.fetch)
         .build();
     refresh_group.add(&fetch);

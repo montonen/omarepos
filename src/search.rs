@@ -46,6 +46,10 @@ pub enum Stopped {
     /// It had read as many commits as one repository is read for. Whatever is
     /// older was not looked at.
     Depth,
+    /// It could not be read at all: it would not open, or its history could
+    /// not be walked. That used to count as a repository searched in which
+    /// nothing matched.
+    Unreadable,
 }
 
 #[derive(Debug, Clone)]
@@ -196,15 +200,16 @@ fn search_one(
     limits: Limits,
 ) -> (Vec<Hit>, Option<Stopped>) {
     let nothing = (Vec::new(), None);
-    let Ok(repo) = Repository::open(path) else { return nothing };
+    let unreadable = (Vec::new(), Some(Stopped::Unreadable));
+    let Ok(repo) = Repository::open(path) else { return unreadable };
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
 
-    let Ok(mut walk) = repo.revwalk() else { return nothing };
+    let Ok(mut walk) = repo.revwalk() else { return unreadable };
     if walk.set_sorting(Sort::TIME).is_err() {
-        return nothing;
+        return unreadable;
     }
 
     let mut pushed = 0usize;
@@ -222,7 +227,13 @@ fn search_one(
         }
     }
     if pushed == 0 && walk.push_head().is_err() {
-        return nothing;
+        // No branch and no HEAD to start from. A repository with no commits
+        // yet is that, and has been read to its end; anything else has not
+        // been read.
+        return match repo.head() {
+            Err(err) if err.code() == git2::ErrorCode::UnbornBranch => nothing,
+            _ => unreadable,
+        };
     }
 
     let mut hits = Vec::new();
@@ -416,6 +427,24 @@ mod tests {
             newest(Limits { commits: 1000, hits: rows - 1 }),
             ["hotfix b5", "hotfix b4", "hotfix q3"],
             "the hole this test is about has moved"
+        );
+    }
+    /// A folder that is not a repository, a repository with no commits yet,
+    /// and one that reads: only the first is one the search could not read.
+    #[test]
+    fn a_repository_that_cannot_be_read_is_not_one_where_nothing_matched() {
+        let _guard = isolate();
+        let gone = scratch("search-not-a-repository");
+        let unborn = scratch("search-unborn");
+        git(&unborn, &["init", "-q", "."]);
+        let fine = history("search-readable", THEN, &["fix the build"]);
+
+        let (heard, hits) = run(&[&gone, &unborn, &fine], "fix", Limits::default());
+        assert_eq!(summaries(&hits), ["fix the build"]);
+        assert_eq!(
+            heard,
+            ["stopped at Unreadable", "1/3", "2/3", "1 hits", "3/3"],
+            "the unreadable one says so, and the empty one is simply empty"
         );
     }
 }

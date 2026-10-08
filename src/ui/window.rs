@@ -2221,8 +2221,15 @@ impl Ui {
     }
 
     fn update_selection_label(&self) {
+        // The rest of the grid steps back only when a ticked card is on it to
+        // stand out from. With every ticked repository filtered out of sight
+        // the whole grid went dim, for no reason anyone could see.
+        let on_show = {
+            let selected = self.selected.borrow();
+            self.shown.borrow().iter().any(|repo| selected.contains(&repo.path))
+        };
         let selected = self.selected.borrow().len();
-        if selected > 0 {
+        if on_show {
             self.flow.add_css_class("om-has-selection");
         } else {
             self.flow.remove_css_class("om-has-selection");

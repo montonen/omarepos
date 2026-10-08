@@ -5,9 +5,9 @@ roots = [
   "~/code",
 
   # A "workspace": a repository that holds nothing but other clones. `nested`
-  # follows the subdirectories this folder's own repository ignores — which
-  # admits parked clones and excludes submodules, since those are tracked.
-  # `tag` tags what is found, once, so you can filter it back out of the grid.
+  # finds the clones this folder's own repository ignores, at any depth, and
+  # leaves its submodules out. `tag` is one word, put on what is found, so you
+  # can filter it back out of the grid.
   # { path = "~/work/acme", nested = true, tag = "acme", include_self = false },
 ]
 

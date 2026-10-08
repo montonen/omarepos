@@ -54,8 +54,8 @@ pub enum RootSpec {
 pub struct RootEntry {
     pub path: String,
     /// Look inside repositories found here, rather than stopping at the first
-    /// `.git`. Only the subdirectories the containing repository *ignores* are
-    /// followed, which admits a workspace full of clones but not submodules.
+    /// `.git`. The clones the containing repository *ignores* are found, at
+    /// any depth; its own submodules are left out by path.
     #[serde(default)]
     pub nested: bool,
     /// Tag applied to repositories discovered here, the first time each is seen.
@@ -473,16 +473,25 @@ impl Config {
             Err(err) => return Self::unusable(&path, &err.to_string()),
         };
         let mut cfg = match toml::from_str::<Config>(&text) {
-            Ok(mut cfg) => {
-                if cfg.roots.is_empty() {
-                    cfg.roots = Self::default().roots;
-                }
-                cfg
-            }
+            Ok(cfg) => cfg.as_read(),
             Err(err) => Self::unusable(&path, &err.to_string()),
         };
         cfg.on_disk = RefCell::new(Some(text));
         cfg
+    }
+
+    /// What a file that parsed means, where it leaves something unsaid.
+    fn as_read(mut self) -> Self {
+        if self.roots.is_empty() {
+            self.roots = Self::default().roots;
+        }
+        // Fast-forwarding fetches first; there is nothing else for it to
+        // move to. A file with `fast_forward` on and `fetch` off ran exactly
+        // that way, while Settings drew the two switches as off and greyed.
+        if self.refresh.fast_forward {
+            self.refresh.fetch = true;
+        }
+        self
     }
 
     /// Read the file again if it is not what was last read or written. The
@@ -500,10 +509,8 @@ impl Config {
             Some(text) => toml::from_str::<Config>(text).map_err(|err| err.to_string()),
         };
         match parsed {
-            Ok(mut fresh) => {
-                if fresh.roots.is_empty() {
-                    fresh.roots = Self::default().roots;
-                }
+            Ok(fresh) => {
+                let mut fresh = fresh.as_read();
                 fresh.roots_override = self.roots_override.take();
                 fresh.depth_override = self.depth_override;
                 fresh.on_disk = RefCell::new(disk);

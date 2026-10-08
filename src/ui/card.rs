@@ -430,6 +430,20 @@ fn pills(
         )));
         row.push(p);
 
+    }
+    // What git said the last time an update was tried here and did not
+    // happen. Ahead of anything the card can work out for itself, and
+    // whatever the counts are now: this pill used to be tied to being behind,
+    // and the two states most worth reading (a fast-forward that stopped
+    // part-way, an upstream that was wound back) leave a repository that is
+    // not behind at all.
+    if let Some(Trouble::Update { refused }) = trouble {
+        let held = pill("held back", "danger");
+        held.set_tooltip_text(Some(&format!(
+            "The last refresh fetched this repository and did not update it:\n{refused}"
+        )));
+        row.push(held);
+    } else if info.behind > 0 {
         // Behind and unable to catch up are very different situations, and
         // the grid showed them identically.
         let blocked = if auto_update { info.update_blocked_by() } else { None };
@@ -447,16 +461,6 @@ fn pills(
                 );
             }
             held.set_tooltip_text(Some(&tip));
-            row.push(held);
-        } else if let Some(Trouble::Update { refused }) = trouble {
-            // Nothing the card can see is in the way, and git still said no:
-            // an untracked or ignored file where an incoming one wants to go,
-            // most often. Only git knows, so quote it.
-            let held = pill("held back", "danger");
-            held.set_tooltip_text(Some(&format!(
-                "The last refresh fetched this repository, but git would not \
-                 fast-forward it:\n{refused}\nNothing was changed."
-            )));
             row.push(held);
         }
     }
