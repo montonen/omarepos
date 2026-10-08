@@ -49,14 +49,27 @@ pub fn pane(
 
     let body = gtk::Label::builder()
         .xalign(0.0)
+        .yalign(0.0)
         .wrap(true)
         .wrap_mode(pango::WrapMode::WordChar)
-        .lines(6)
-        .ellipsize(pango::EllipsizeMode::End)
+        .selectable(true)
         .build();
     body.add_css_class("om-summary");
-    body.set_margin_top(4);
-    header.append(&body);
+    // The message is held to a height, in a scroller, and not to a number of
+    // lines. A label's line limit is per paragraph, and a message wrapped at
+    // 72 columns is one paragraph to a line: the limit never applied, a long
+    // message made the pane as tall as itself, and the split moved to make
+    // room and stayed there. Where the limit did apply, the rest of the
+    // message could not be reached at all.
+    let body_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(120)
+        .visible(false)
+        .child(&body)
+        .build();
+    body_scroller.set_margin_top(4);
+    header.append(&body_scroller);
 
     let files = gtk::ListBox::new();
     let files_for_focus = files.clone();
@@ -279,6 +292,7 @@ pub fn pane(
             let subject = subject.clone();
             let meta = meta.clone();
             let body = body.clone();
+            let body_scroller = body_scroller.clone();
             let files = files.clone();
             let totals = totals.clone();
             let showing = Rc::clone(&showing);
@@ -345,8 +359,10 @@ pub fn pane(
                             detail.summary, detail.author, detail.email, detail.id
                         )));
                         meta.set_label(&describe(&detail));
-                        body.set_visible(!detail.body.is_empty());
+                        body_scroller.set_visible(!detail.body.is_empty());
                         body.set_label(&detail.body);
+                        // A new commit's message starts at its top.
+                        body_scroller.vadjustment().set_value(0.0);
                         let mut position = 0i32;
                         for group in [
                             Group::Committed,
@@ -415,7 +431,7 @@ pub fn pane(
                     Err(err) => {
                         subject.set_label("Could not read this commit");
                         meta.set_label(&err);
-                        body.set_visible(false);
+                        body_scroller.set_visible(false);
                         totals.set_label("");
                     }
                 }
