@@ -428,7 +428,11 @@ const MAX_BYTES: usize = 2 << 20;
 /// A diff line as it will be shown: decoded, without its line ending, and cut
 /// if it is too long to be worth showing whole.
 fn shown(content: &[u8]) -> String {
-    let text = String::from_utf8_lossy(content);
+    // A NUL is shown as the symbol for one. A file is only called binary for
+    // a NUL in its first 8000 bytes, so a later one arrives here as text, and
+    // text with a NUL in it cannot be handed to GTK: the line went missing
+    // from the diff, and a debug build stopped altogether.
+    let text = String::from_utf8_lossy(content).replace('\0', "\u{2400}");
     let text = text.trim_end_matches('\n').trim_end_matches('\r');
     if text.len() <= MAX_LINE_BYTES {
         return text.to_string();
@@ -2583,5 +2587,22 @@ mod tests {
             diff.lines.iter().filter(|line| matches!(line.origin, '=' | '>' | '<')).collect();
         assert_eq!(remark.len(), 1, "{:?}", diff.lines);
         assert!(remark[0].text.contains("No newline at end of file"), "{:?}", remark[0].text);
+    }
+    /// libgit2 calls a file binary for a NUL in its first 8000 bytes. One
+    /// further in arrives as a line of text, and has to be text GTK will take.
+    #[test]
+    fn a_nul_late_in_a_text_file_is_shown_and_not_passed_on() {
+        let _guard = isolate();
+        let dir = scratch("cm-late-nul");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "README.md", "one\n", "first");
+        let mut body = "a line of ordinary text\n".repeat(500);
+        body.push_str("before\0after\n");
+        write(&dir.join("log.txt"), &body);
+
+        let diff = patch_working(&dir, "log.txt", None).unwrap();
+        assert!(diff.lines.len() > 400, "it is read as text: {} lines", diff.lines.len());
+        assert!(diff.lines.iter().all(|line| !line.text.contains('\0')));
+        assert!(diff.lines.iter().any(|line| line.text == "before\u{2400}after"));
     }
 }

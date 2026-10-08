@@ -401,7 +401,10 @@ fn collect((kept, handle): Reader, until: Instant) -> String {
         std::thread::sleep(Duration::from_millis(2));
     }
     let kept = kept.lock().map(|kept| kept.clone()).unwrap_or_default();
-    String::from_utf8_lossy(&kept).into_owned()
+    // NULs are made visible. A hook that lists files with `-z` prints them,
+    // and what git said goes into a label, which takes no NUL: the message
+    // was cut short at the first one.
+    String::from_utf8_lossy(&kept).replace('\0', "\u{2400}")
 }
 
 /// Ask git and everything it started to stop, and insist only if they do not.
@@ -921,5 +924,17 @@ mod tests {
         assert_eq!(fetched, Err("stopped: omarepos was closing".to_string()));
         assert!(started.elapsed() < Duration::from_secs(4), "it was stopped, not waited for");
         assert!(!busy());
+    }
+    /// A hook that lists what it objects to with `-z`.
+    #[test]
+    fn a_nul_in_what_a_hook_printed_is_made_visible() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-nul");
+        hook(&dir, "pre-commit", "printf 'refused: a.txt\\0b.txt\\n' >&2; exit 1");
+        write(&dir.join("README.md"), "two\n");
+        git(&dir, &["add", "README.md"]);
+        let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
+        assert!(!said.contains('\0'), "{said:?}");
+        assert!(said.contains("a.txt\u{2400}b.txt"), "{said:?}");
     }
 }

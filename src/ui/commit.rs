@@ -1594,9 +1594,19 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
             }
             highlighted += line.text.len();
             let owned = format!("{}\n", line.text);
-            highlighter
-                .as_mut()
-                .and_then(|h| h.highlight_line(&owned, syntaxes).ok())
+            // The highlighter is somebody else's parser run over whatever is
+            // in the file, inside a callback, where a panic ends the program.
+            // Caught here, a line it cannot take costs the colours for the
+            // rest of this diff and nothing else.
+            let coloured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                highlighter.as_mut().and_then(|h| h.highlight_line(&owned, syntaxes).ok())
+            }));
+            if coloured.is_err() {
+                highlighter = None;
+            }
+            coloured
+                .ok()
+                .flatten()
                 // The pieces borrow from `owned`, which does not outlive this
                 // block; keep them as text of their own.
                 .map(|spans| {

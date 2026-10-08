@@ -149,7 +149,9 @@ pub fn relative_time(when: i64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(when);
-    let delta = now - when;
+    // Saturating: a commit can carry any date at all, and one from the far
+    // side of the calendar must not be what stops a page from drawing.
+    let delta = now.saturating_sub(when);
     if delta < 0 {
         return "in the future".into();
     }
@@ -474,6 +476,13 @@ mod tests {
         assert_eq!(accent(), "#3b5fb0");
         assert_ne!(key_color("fixture@example.invalid"), "");
         accents_for(true);
+    }
+
+    #[test]
+    fn any_date_at_all_has_an_age() {
+        assert_eq!(relative_time(i64::MIN), relative_time(i64::MIN + 1));
+        assert_eq!(relative_time(i64::MAX), "in the future");
+        assert_eq!(relative_time(0).split(' ').last(), Some("ago"));
     }
 
     #[test]
