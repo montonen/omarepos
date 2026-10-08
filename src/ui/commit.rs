@@ -108,21 +108,9 @@ pub fn pane(
     // paid on each line.
     buffer.set_enable_undo(false);
     // Text tags are styled through properties rather than CSS, so the line
-    // backgrounds are mixed from the theme's own colours here.
-    let palette = crate::theme::Palette::load();
-    let dark = palette.dark;
-    for (name, colour, weight) in [
-        ("added", palette.green.as_str(), 0.20),
-        ("removed", palette.red.as_str(), 0.20),
-        ("hunk", palette.accent.as_str(), 0.14),
-    ] {
-        let tag = gtk::TextTag::builder().name(name).build();
-        tag.set_paragraph_background_rgba(Some(&blend(&palette.bg, colour, weight)));
-        if name == "hunk" {
-            tag.set_foreground_rgba(Some(&rgba(&palette.fg_dim)));
-        }
-        buffer.tag_table().add(&tag);
-    }
+    // backgrounds are mixed from the theme's own colours: here, so that the
+    // tags exist, and again each time a diff is drawn.
+    Tints::of(&crate::theme::Palette::load()).apply(&buffer);
     let diff_scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
@@ -205,7 +193,6 @@ pub fn pane(
     let showing: Rc<RefCell<Option<(PathBuf, Target)>>> = Rc::new(RefCell::new(None));
     let viewer = Rc::new(Viewer {
         buffer: buffer.clone(),
-        dark,
         listed: RefCell::new(None),
         rendered: RefCell::new(None),
         reading: RefCell::new(None),
@@ -891,7 +878,6 @@ struct Rendered {
 /// The diff view, and the reading of what goes into it.
 struct Viewer {
     buffer: gtk::TextBuffer,
-    dark: bool,
     listed: RefCell<Option<Listed>>,
     rendered: RefCell<Option<Rendered>>,
     /// The read in flight, so that it can be abandoned.
@@ -965,7 +951,11 @@ impl Viewer {
                     if same {
                         return;
                     }
-                    render_diff(&viewer.buffer, &diff, &path, viewer.dark);
+                    // The palette as it is now, and not as it was when the
+                    // pane was built: the theme can be changed while a graph
+                    // page is open, and the view's own background follows it.
+                    let tints = Tints::of(&crate::theme::Palette::load());
+                    render_diff(&viewer.buffer, &diff, &path, &tints);
                     *viewer.rendered.borrow_mut() = Some(Rendered { key, diff });
                 }
                 Err(err) => {
@@ -1236,34 +1226,143 @@ fn highlighter() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting
     })
 }
 
-fn rgba(hex: &str) -> gtk::gdk::RGBA {
-    let (r, g, b) = crate::theme::Palette::rgb(hex);
+/// Red, green and blue, each from 0 to 1.
+type Rgb = (f64, f64, f64);
+
+/// How much of the theme's green and red is mixed into the background behind
+/// an added and a removed line. It was 0.20. The band is what the lines a
+/// diff is read for are drawn on, and the text on it is coloured by a syntax
+/// theme made for one background of its own: at 0.20 the review measured a
+/// comment on an added line at under 3 to 1 on all but one of the twenty-two
+/// themes installed. Fainter than this and the band stops marking the line;
+/// the `+` and `-` in the margin say the same thing either way.
+const BAND: f64 = 0.12;
+/// The same, for the theme's accent behind a hunk header.
+const HUNK_BAND: f64 = 0.14;
+/// The contrast every piece of text in a diff is brought up to against what it
+/// is drawn on. 3 to 1 and not the 4.5 asked of body text: the syntax themes
+/// do not manage 3 for a comment on their own backgrounds, and at 4.5 a
+/// comment on the paler themes comes out the colour of the code around it.
+const LEGIBLE: f64 = 3.0;
+
+/// The colours a diff is drawn in, worked out from the theme's palette.
+///
+/// The view has the theme's background and the bands are mixed from the
+/// theme's green and red, but the colour of each token comes from one of two
+/// syntax themes, each drawn for a single background that is not this one.
+/// Laid over twenty-two themes as they were, comments, which are a fifth of
+/// the characters in this repository's own diffs, were measured at 1.7 to 1
+/// on the worst of them. So a token keeps its colour where that can be read,
+/// and is moved towards the theme's own text colour by as little as makes it
+/// readable where it cannot.
+struct Tints {
+    dark: bool,
+    fg: Rgb,
+    added: Rgb,
+    removed: Rgb,
+    hunk: Rgb,
+    hunk_text: Rgb,
+    /// Everything a token may be drawn on: the view itself and the two bands.
+    /// One answer for all three, so that a word is the same colour on a line
+    /// that was added as on the line above it.
+    surfaces: [Rgb; 3],
+}
+
+impl Tints {
+    fn of(palette: &crate::theme::Palette) -> Self {
+        let rgb = crate::theme::Palette::rgb;
+        let (bg, fg) = (rgb(&palette.bg), rgb(&palette.fg));
+        let added = mix(bg, rgb(&palette.green), BAND);
+        let removed = mix(bg, rgb(&palette.red), BAND);
+        let hunk = mix(bg, rgb(&palette.accent), HUNK_BAND);
+        Tints {
+            dark: palette.dark,
+            fg,
+            added,
+            removed,
+            hunk,
+            hunk_text: legible(rgb(&palette.fg_dim), &[hunk], fg, LEGIBLE),
+            surfaces: [bg, added, removed],
+        }
+    }
+
+    /// Give the buffer's line tags these colours, making the tags the first
+    /// time. Text tag backgrounds ignore alpha, which is why each band is a
+    /// colour mixed beforehand and not the theme's colour laid on thinly.
+    fn apply(&self, buffer: &gtk::TextBuffer) {
+        for (name, band) in [("added", self.added), ("removed", self.removed), ("hunk", self.hunk)] {
+            let tag = buffer.tag_table().lookup(name).unwrap_or_else(|| {
+                let tag = gtk::TextTag::builder().name(name).build();
+                buffer.tag_table().add(&tag);
+                tag
+            });
+            tag.set_paragraph_background_rgba(Some(&rgba(band)));
+            if name == "hunk" {
+                tag.set_foreground_rgba(Some(&rgba(self.hunk_text)));
+            }
+        }
+    }
+
+    /// A syntax theme's colour for a token, as it is drawn here.
+    fn token(&self, colour: syntect::highlighting::Color) -> Rgb {
+        let channel = |value: u8| f64::from(value) / 255.0;
+        legible(
+            (channel(colour.r), channel(colour.g), channel(colour.b)),
+            &self.surfaces,
+            self.fg,
+            LEGIBLE,
+        )
+    }
+}
+
+fn rgba((r, g, b): Rgb) -> gtk::gdk::RGBA {
     gtk::gdk::RGBA::new(r as f32, g as f32, b as f32, 1.0)
 }
 
-/// Mix `over` into `base`. Text tag backgrounds ignore alpha, so the blend has
-/// to be done rather than layered.
-fn blend(base: &str, over: &str, amount: f64) -> gtk::gdk::RGBA {
-    let (br, bg, bb) = crate::theme::Palette::rgb(base);
-    let (or, og, ob) = crate::theme::Palette::rgb(over);
-    let mix = |a: f64, b: f64| (a + (b - a) * amount) as f32;
-    gtk::gdk::RGBA::new(mix(br, or), mix(bg, og), mix(bb, ob), 1.0)
+/// `amount` of `over` mixed into `base`.
+fn mix(base: Rgb, over: Rgb, amount: f64) -> Rgb {
+    let part = |a: f64, b: f64| a + (b - a) * amount;
+    (part(base.0, over.0), part(base.1, over.1), part(base.2, over.2))
 }
 
-/// A foreground tag for one syntect colour, created once per colour and reused
-/// — a diff can mention the same colour thousands of times.
-fn colour_tag(buffer: &gtk::TextBuffer, colour: syntect::highlighting::Color) -> gtk::TextTag {
-    let name = format!("fg{:02x}{:02x}{:02x}", colour.r, colour.g, colour.b);
+/// How light a colour is, as the eye weighs it: WCAG's relative luminance.
+fn luminance((r, g, b): Rgb) -> f64 {
+    let linear = |c: f64| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG's contrast ratio between two colours: 1 for the same colour, 21 for
+/// black on white.
+fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// `colour`, moved towards `fg` by as little as gives it a contrast of `floor`
+/// against every one of `surfaces`. Left alone when it has that already. When
+/// not even `fg` has it, `fg` is the answer: nothing drawn here should be
+/// harder to read than the theme's own text.
+fn legible(colour: Rgb, surfaces: &[Rgb], fg: Rgb, floor: f64) -> Rgb {
+    const STEPS: u32 = 16;
+    let least = |colour: Rgb| {
+        surfaces.iter().map(|surface| contrast(colour, *surface)).fold(f64::INFINITY, f64::min)
+    };
+    (0..STEPS)
+        .map(|step| mix(colour, fg, f64::from(step) / f64::from(STEPS)))
+        .find(|mixed| least(*mixed) >= floor)
+        .unwrap_or(fg)
+}
+
+/// A foreground tag for one colour, created once per colour and reused — a
+/// diff can mention the same colour thousands of times.
+fn colour_tag(buffer: &gtk::TextBuffer, colour: Rgb) -> gtk::TextTag {
+    let byte = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let name = format!("fg{:02x}{:02x}{:02x}", byte(colour.0), byte(colour.1), byte(colour.2));
     if let Some(existing) = buffer.tag_table().lookup(&name) {
         return existing;
     }
     let tag = gtk::TextTag::builder().name(&name).build();
-    tag.set_foreground_rgba(Some(&gtk::gdk::RGBA::new(
-        colour.r as f32 / 255.0,
-        colour.g as f32 / 255.0,
-        colour.b as f32 / 255.0,
-        1.0,
-    )));
+    tag.set_foreground_rgba(Some(&rgba(colour)));
     buffer.tag_table().add(&tag);
     tag
 }
@@ -1325,8 +1424,9 @@ const HIGHLIGHT_MAX_LINE: usize = 2_000;
 /// thousand lines each just under the limit above are still millions of spans.
 const HIGHLIGHT_BUDGET: usize = 256 * 1024;
 
-fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, dark: bool) {
+fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, tints: &Tints) {
     buffer.set_text("");
+    tints.apply(buffer);
     if diff.binary {
         buffer.set_text("Binary file.");
         return;
@@ -1341,9 +1441,12 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
     let (syntaxes, themes) = highlighter();
     let theme = themes
         .themes
-        .get(if dark { "base16-ocean.dark" } else { "InspiredGitHub" })
+        .get(if tints.dark { "base16-ocean.dark" } else { "InspiredGitHub" })
         .or_else(|| themes.themes.values().next());
     let syntax = syntax_for(syntaxes, path);
+    // A syntax theme has a dozen colours and a diff has thousands of tokens:
+    // each colour is worked out and looked up once.
+    let mut tags: HashMap<(u8, u8, u8), gtk::TextTag> = HashMap::new();
 
     // A diff skips between hunks, so highlighting state cannot carry across
     // one. Restarting per hunk is approximate at the top of each — the honest
@@ -1421,9 +1524,12 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, da
                     if theme.and_then(|theme| theme.settings.background) == Some(style.foreground) {
                         continue;
                     }
-                    let tag = colour_tag(buffer, style.foreground);
+                    let colour = style.foreground;
+                    let tag = tags
+                        .entry((colour.r, colour.g, colour.b))
+                        .or_insert_with(|| colour_tag(buffer, tints.token(colour)));
                     buffer.apply_tag(
-                        &tag,
+                        &*tag,
                         &buffer.iter_at_offset(at),
                         &buffer.end_iter(),
                     );
@@ -1673,5 +1779,98 @@ mod tests {
         let rows = list(&["group:u", "file:u:a.rs"]);
         assert_eq!(way_back(&rows, 0, |name| name == "file:u:a.rs").as_deref(), Some("file:u:a.rs"));
         assert_eq!(way_back(&rows, 5, |_| true), None, "no such row to start from");
+    }
+
+    // ---- colours that have to be read on a background they were not made for
+
+    fn hex(colour: &str) -> Rgb {
+        crate::theme::Palette::rgb(colour)
+    }
+
+    fn token(colour: &str) -> syntect::highlighting::Color {
+        let (r, g, b) = hex(colour);
+        let byte = |value: f64| (value * 255.0).round() as u8;
+        syntect::highlighting::Color { r: byte(r), g: byte(g), b: byte(b), a: 255 }
+    }
+
+    /// A palette with these four colours and the built-in one's for the rest.
+    fn palette(dark: bool, bg: &str, fg: &str, green: &str, red: &str) -> crate::theme::Palette {
+        crate::theme::Palette {
+            dark,
+            bg: bg.into(),
+            fg: fg.into(),
+            green: green.into(),
+            red: red.into(),
+            ..crate::theme::Palette::fallback()
+        }
+    }
+
+    /// The comment colours of the two syntax themes the diff is highlighted
+    /// with: the dark one's and the light one's.
+    const COMMENT_ON_DARK: &str = "#65737e";
+    const COMMENT_ON_LIGHT: &str = "#969896";
+
+    #[test]
+    fn contrast_is_the_ratio_wcag_defines() {
+        let (black, white) = (hex("#000000"), hex("#ffffff"));
+        assert!((contrast(black, white) - 21.0).abs() < 1e-9);
+        assert!((contrast(white, black) - 21.0).abs() < 1e-9, "either way round");
+        assert!((contrast(white, white) - 1.0).abs() < 1e-9);
+        // A pair with a published figure: #767676 is the grey that just makes
+        // 4.5 to 1 on white.
+        assert!((contrast(hex("#767676"), white) - 4.54).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_colour_that_can_be_read_is_left_as_it_is() {
+        let tints = Tints::of(&palette(true, "#14161b", "#dcd7ba", "#98bb6c", "#e46876"));
+        let string = token("#a3be8c");
+        assert_eq!(tints.token(string), hex("#a3be8c"));
+    }
+
+    /// Two of the themes on which a comment on an added line could not be
+    /// read: a dark one of low contrast and a light one.
+    #[test]
+    fn a_comment_can_be_read_on_every_line_of_a_diff() {
+        let cases = [
+            ("a muted dark theme", palette(true, "#2e3440", "#d8dee9", "#a3be8c", "#bf616a"), COMMENT_ON_DARK),
+            ("a pale light theme", palette(false, "#eff1f5", "#4c4f69", "#40a02b", "#d20f39"), COMMENT_ON_LIGHT),
+        ];
+        for (name, palette, comment) in cases {
+            let tints = Tints::of(&palette);
+            let least = |colour: Rgb| {
+                tints.surfaces.iter().map(|surface| contrast(colour, *surface)).fold(f64::INFINITY, f64::min)
+            };
+            let before = least(hex(comment));
+            let drawn = tints.token(token(comment));
+            assert!(before < LEGIBLE, "{name}: the fixture has to start unreadable, and is {before:.2}");
+            assert!(least(drawn) >= LEGIBLE, "{name}: {:.2}", least(drawn));
+            // By moving it part of the way, not by making it body text.
+            assert!(drawn != tints.fg, "{name}");
+            assert!(contrast(drawn, tints.fg) > 1.5, "{name}: a comment still reads as one");
+        }
+    }
+
+    #[test]
+    fn the_band_is_drawn_from_the_theme_and_weaker_than_it_was() {
+        let tints = Tints::of(&palette(true, "#2e3440", "#d8dee9", "#a3be8c", "#bf616a"));
+        let bg = hex("#2e3440");
+        assert_eq!(tints.surfaces[0], bg);
+        assert_eq!(tints.added, mix(bg, hex("#a3be8c"), BAND));
+        assert_eq!(tints.removed, mix(bg, hex("#bf616a"), BAND));
+        let comment = hex(COMMENT_ON_DARK);
+        assert!(
+            contrast(comment, tints.added) > contrast(comment, mix(bg, hex("#a3be8c"), 0.20)),
+            "what lowering the band was for"
+        );
+    }
+
+    /// A theme whose own text does not reach the floor: its text colour is
+    /// the best there is, and the loop ends there.
+    #[test]
+    fn nothing_is_asked_to_be_clearer_than_the_themes_own_text() {
+        let (bg, fg) = (hex("#808080"), hex("#909090"));
+        assert!(contrast(fg, bg) < LEGIBLE);
+        assert_eq!(legible(hex("#858585"), &[bg], fg, LEGIBLE), fg);
     }
 }
