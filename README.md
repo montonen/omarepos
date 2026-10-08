@@ -704,7 +704,9 @@ extra_repos = ["~/.config/omarchy"]
 # first repository found, so nested checkouts stay out of the grid.
 max_depth = 3
 
-# Defaults to $TERMINAL, then the first of alacritty/ghostty/kitty/foot/wezterm.
+# Defaults to $TERMINAL, then the first of alacritty, ghostty, kitty, foot,
+# wezterm, gnome-terminal, ptyxis and konsole that is installed. When none
+# can be started the window says so.
 terminal = "alacritty"
 
 # Run in the terminal by "Open in terminal", before the shell takes over.

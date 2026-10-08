@@ -2659,7 +2659,9 @@ impl Ui {
         let path = path.to_path_buf();
         Rc::new(move || {
             ui.handed.borrow_mut().insert(path.clone());
-            ui::open_terminal(&ui.cfg.borrow(), &path)
+            if let Err(why) = ui::open_terminal(&ui.cfg.borrow(), &path) {
+                ui::complain(&ui.toasts, &why);
+            }
         })
     }
 
@@ -2668,7 +2670,9 @@ impl Ui {
         let path = path.to_path_buf();
         Rc::new(move || {
             ui.handed.borrow_mut().insert(path.clone());
-            ui::open_editor(&ui.cfg.borrow(), &path)
+            if let Err(why) = ui::open_editor(&ui.cfg.borrow(), &path) {
+                ui::complain(&ui.toasts, &why);
+            }
         })
     }
 

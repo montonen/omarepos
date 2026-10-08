@@ -183,7 +183,11 @@ pub fn relative_time(when: i64) -> String {
 ///
 /// The shell is left behind when that command exits, so the terminal is still
 /// a terminal afterwards rather than closing out from under you.
-pub fn open_terminal(cfg: &Config, dir: &Path) {
+///
+/// An error is a sentence for the window to show. A terminal that could not
+/// be started used to be said on stderr only, which under a desktop launcher
+/// is nowhere: the key or the menu item did nothing, and said nothing.
+pub fn open_terminal(cfg: &Config, dir: &Path) -> Result<(), String> {
     let term = cfg.terminal_command();
     match cfg.terminal_runs_command() {
         Some(command) => run_in_terminal(&term, dir, &format!("{command}; exec \"$SHELL\"")),
@@ -194,9 +198,9 @@ pub fn open_terminal(cfg: &Config, dir: &Path) {
 }
 
 /// Open `$EDITOR` inside a terminal at `dir`.
-pub fn open_editor(cfg: &Config, dir: &Path) {
+pub fn open_editor(cfg: &Config, dir: &Path) -> Result<(), String> {
     let term = cfg.terminal_command();
-    run_in_terminal(&term, dir, &editor_script(&cfg.editor_command()));
+    run_in_terminal(&term, dir, &editor_script(&cfg.editor_command()))
 }
 
 /// What to run for "open in editor". The repository is handed over as `.`,
@@ -218,7 +222,7 @@ fn editor_script(editor: &str) -> String {
 
 /// Run a shell command inside a terminal emulator, in `dir`. The flag that
 /// takes a command differs per emulator, hence the arms.
-fn run_in_terminal(term: &str, dir: &Path, script: &str) {
+fn run_in_terminal(term: &str, dir: &Path, script: &str) -> Result<(), String> {
     let base = Path::new(term)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -239,11 +243,15 @@ fn run_in_terminal(term: &str, dir: &Path, script: &str) {
         "wezterm" => {
             cmd.args(["start", "--", "sh", "-c", script]);
         }
+        // These two take the command after `--`, and take `-e` for one word.
+        "gnome-terminal" | "ptyxis" => {
+            cmd.args(["--", "sh", "-c", script]);
+        }
         _ => {
             cmd.args(["-e", "sh", "-c", script]);
         }
     }
-    spawn(&mut cmd, term);
+    spawn(&mut cmd, term)
 }
 
 pub fn open_folder(dir: &Path) {
@@ -261,7 +269,7 @@ pub fn open_folder(dir: &Path) {
 /// omarepos was started from does not take every terminal it opened with it,
 /// and waited for on a thread, so that it does not sit in the process table
 /// as a zombie from the moment it is closed until omarepos is.
-fn spawn(cmd: &mut Command, what: &str) {
+fn spawn(cmd: &mut Command, what: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let result = cmd
         .stdin(Stdio::null())
@@ -274,8 +282,11 @@ fn spawn(cmd: &mut Command, what: &str) {
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
+            Ok(())
         }
-        Err(err) => eprintln!("omarepos: could not launch {what}: {err}"),
+        Err(err) => Err(format!(
+            "Could not start {what}: {err}. Set a terminal in Settings (Ctrl+,)."
+        )),
     }
 }
 

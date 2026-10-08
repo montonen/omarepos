@@ -698,7 +698,16 @@ impl Config {
                 return term;
             }
         }
-        for candidate in ["alacritty", "ghostty", "kitty", "foot", "wezterm"] {
+        for candidate in [
+            "alacritty",
+            "ghostty",
+            "kitty",
+            "foot",
+            "wezterm",
+            "gnome-terminal",
+            "ptyxis",
+            "konsole",
+        ] {
             if which(candidate) {
                 return candidate.to_string();
             }
