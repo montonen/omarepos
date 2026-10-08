@@ -513,10 +513,20 @@ pub fn pane(
                 match &result {
                     Ok(detail) => {
                         subject.set_label(&detail.summary);
-                        subject.set_tooltip_text(Some(&format!(
-                            "{}\n{} <{}>\n{}",
-                            detail.summary, detail.author, detail.email, detail.id
-                        )));
+                        // Who wrote it and its whole id, for a commit. The
+                        // working tree has neither, and its tooltip read
+                        // "Local changes", an empty pair of brackets, and a
+                        // blank line.
+                        subject.set_tooltip_text(
+                            (!detail.id.is_empty())
+                                .then(|| {
+                                    format!(
+                                        "{}\n{} <{}>\n{}",
+                                        detail.summary, detail.author, detail.email, detail.id
+                                    )
+                                })
+                                .as_deref(),
+                        );
                         meta.set_label(&describe(detail));
                         meta.set_tooltip_text(None);
                         // A commit has its message here. The working tree has
@@ -559,6 +569,13 @@ pub fn pane(
                             let mut members = Vec::new();
                             for node in commit::tree(&in_group) {
                                 let row = row(&node, group, writer.as_ref());
+                                // The files of a group that holds nothing
+                                // back step back with its heading. Only the
+                                // heading did, which left the untracked files
+                                // drawn as loudly as the changes that matter.
+                                if group != Group::Committed && !group.blocks_update() {
+                                    row.add_css_class("om-aside");
+                                }
                                 members.push(row.clone());
                                 files.append(&row);
                             }
@@ -1501,6 +1518,22 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
             if let Some(theme) = theme {
                 highlighter = Some(syntect::easy::HighlightLines::new(syntax, theme));
             }
+            continue;
+        }
+
+        // "\ No newline at end of file". libgit2 hands it over as a line of
+        // its own, with one of these three origins and a newline in front of
+        // the words. It is a remark about the line above, not a line of the
+        // file: drawn as one, it was a blank context line and then a line of
+        // source reading "\ No newline…", coloured as code.
+        if matches!(line.origin, '=' | '>' | '<') {
+            let mut end = buffer.end_iter();
+            buffer.insert(&mut end, &format!("{}\n", line.text.trim_start_matches('\n')));
+            buffer.apply_tag_by_name(
+                "hunk",
+                &buffer.iter_at_offset(start),
+                &buffer.end_iter(),
+            );
             continue;
         }
 

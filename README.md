@@ -524,6 +524,18 @@ git's own default refuses that push too, and for the same reason: it would put
 (`remote.pushDefault`, `pushRemote`), a remote configured as a mirror, and a
 branch that tracks a local branch. Those want a terminal. A `pre-push` hook's refusal is quoted back as git wrote it.
 
+"No upstream" is not taken to mean "never published". A branch whose upstream
+is configured and gone (deleted on the remote when its pull request merged,
+or never fetched by a single-branch clone) is not offered **Publish**: a push
+would create the branch again, and whether to is not a button. Neither is a
+branch with no upstream whose name the remote already has.
+
+And commits that were on the remote and have been taken off it are not pushed
+back. When the remote's branch is wound back or rewritten, the commits you
+still have count as "ahead" like any others; the button used to read "Push 2".
+It now says what happened, names the commit the remote used to end at, and
+leaves putting them back to a terminal.
+
 ### What is uncommitted
 
 A **Local changes** row sits above the history whenever the working tree has

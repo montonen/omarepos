@@ -1045,6 +1045,17 @@ pub fn push_plan(repo: &Repository) -> Result<PushPlan, String> {
         Ok("on-demand") | Ok("only")
     );
 
+    // Commits that were on the remote and have been taken off it: the branch
+    // was wound back there, or rewritten. They count as "ahead" like any
+    // others, so the button read "Push 2", and one click put back what
+    // somebody had removed. Whether to do that is a decision, and this button
+    // does not make it.
+    if !publish {
+        if let Some(removed) = crate::refresh::withdrawn(repo) {
+            return Err(format!("{removed} Putting them back is for a terminal, not this button."));
+        }
+    }
+
     Ok(PushPlan { branch, tip: tip.to_string(), remote, destination, publish, check_submodules })
 }
 
@@ -1057,7 +1068,8 @@ pub fn why_not_push(plan: &PushPlan, ahead: usize, behind: usize) -> Option<Stri
     }
     if behind > 0 {
         return Some(format!(
-            "{behind} commits are waiting on the upstream. Fast-forward first — a push would be rejected."
+            "{behind} {} waiting on the upstream. Fast-forward first — a push would be rejected.",
+            if behind == 1 { "commit is" } else { "commits are" }
         ));
     }
     if ahead == 0 {
@@ -2524,5 +2536,48 @@ mod tests {
         assert_eq!(why_not_push(&armed, 2, 0), None);
         let behind = why_not_push(&armed, 1, 3).unwrap();
         assert!(behind.starts_with("3 commits are waiting"), "{behind}");
+    }
+    /// The remote's branch is wound back to before a commit this clone still
+    /// has. That commit counts as "ahead", and the button read "Push 1".
+    #[test]
+    fn commits_taken_off_the_remote_are_not_pushed_back() {
+        let _guard = isolate();
+        let f = fleet("cm-push-withdrawn");
+        let before = f.remote_ref("main");
+        commit_file(&f.work, "x.txt", "x\n", "to be withdrawn");
+        git(&f.work, &["push", "-q", "origin", "main"]);
+
+        // Somebody removes it on the remote, and this clone hears of it.
+        git(&f.remote, &["update-ref", "refs/heads/main", &before]);
+        git(&f.work, &["fetch", "-q"]);
+
+        let repo = Repository::open(&f.work).unwrap();
+        let why = push_plan(&repo).expect_err("the commit was taken off the remote");
+        assert!(why.contains("moved back or rewritten"), "{why}");
+        assert!(why.contains("to be withdrawn"), "it names the commit: {why}");
+
+        // A commit of the user's own, never pushed, is still just ahead.
+        let g = fleet("cm-push-own");
+        commit_file(&g.work, "y.txt", "y\n", "mine");
+        let repo = Repository::open(&g.work).unwrap();
+        assert!(push_plan(&repo).is_ok());
+    }
+
+    /// git's remark about a missing final newline comes through as a line of
+    /// its own, with an origin that is none of `+`, `-` and space. The pane
+    /// tells it from a line of the file by that.
+    #[test]
+    fn the_no_newline_remark_is_not_a_line_of_the_file() {
+        let _guard = isolate();
+        let dir = scratch("cm-no-newline");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_file(&dir, "a.txt", "one\n", "first");
+        write(&dir.join("a.txt"), "one\ntwo");
+
+        let diff = patch_working(&dir, "a.txt", None).unwrap();
+        let remark: Vec<&Line> =
+            diff.lines.iter().filter(|line| matches!(line.origin, '=' | '>' | '<')).collect();
+        assert_eq!(remark.len(), 1, "{:?}", diff.lines);
+        assert!(remark[0].text.contains("No newline at end of file"), "{:?}", remark[0].text);
     }
 }
