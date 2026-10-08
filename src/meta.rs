@@ -91,6 +91,37 @@ pub fn parse_list(raw: &str) -> Vec<String> {
     )
 }
 
+/// Split what a tag editor holds when it is saved. As `parse_list`, except
+/// that a tag already in use (`known`) is kept whole when it stands alone
+/// between commas.
+///
+/// The editor shows tags joined by commas, and a space separates as well. A
+/// tag with a space in it, which a root's tag field used to accept, was
+/// therefore taken apart by opening the editor and pressing Save: `open
+/// source` came back as `open` and `source`.
+pub fn parse_edited(raw: &str, known: &[String]) -> Vec<String> {
+    normalize(raw.split([',', '\n']).flat_map(|part| {
+        let part = part.trim();
+        match known.iter().find(|tag| tag.eq_ignore_ascii_case(part)) {
+            Some(tag) => vec![tag.clone()],
+            None => part.split_whitespace().map(str::to_string).collect(),
+        }
+    }))
+}
+
+/// Whether a tag editor can show `tag` and read the same tag back. One with a
+/// comma in it cannot be told from two, so the editor leaves it alone.
+pub fn editable(tag: &str) -> bool {
+    !tag.contains([',', '\n'])
+}
+
+/// Whether `tag` is a single tag to everything that asks for tags by name:
+/// the editor, `tag:` in the filter and the refresh scope all split on spaces
+/// and commas. This is what a root's tag is held to.
+pub fn is_one_tag(tag: &str) -> bool {
+    parse_list(tag) == [tag]
+}
+
 impl Meta {
     pub fn load() -> Self {
         let path = path();
@@ -138,6 +169,38 @@ impl Meta {
             if meta.is_empty() {
                 self.repos.remove(&key);
             }
+        }
+    }
+
+    /// The tags every one of `repos` carries, which is what a tag editor
+    /// opened on them starts from. A tag the editor could not read back is
+    /// left out, and so is not among the ones a save replaces.
+    pub fn shared_tags(&self, repos: &[PathBuf]) -> Vec<String> {
+        let mut iter = repos.iter();
+        let Some(first) = iter.next() else { return Vec::new() };
+        let mut shared: Vec<String> = self.tags_for(first).to_vec();
+        for repo in iter {
+            let theirs = self.tags_for(repo);
+            shared.retain(|tag| theirs.iter().any(|t| t.eq_ignore_ascii_case(tag)));
+        }
+        shared.retain(|tag| editable(tag));
+        shared
+    }
+
+    /// Save a tag editor: on each of `repos`, `wanted` takes the place of the
+    /// tags the editor opened with (`shared`). Anything else a repository
+    /// carries is kept, so editing several at once cannot silently drop their
+    /// own tags.
+    pub fn replace_shared(&mut self, repos: &[PathBuf], shared: &[String], wanted: &[String]) {
+        for repo in repos {
+            let mut tags: Vec<String> = self
+                .tags_for(repo)
+                .iter()
+                .filter(|t| !shared.iter().any(|s| s.eq_ignore_ascii_case(t)))
+                .cloned()
+                .collect();
+            tags.extend(wanted.iter().cloned());
+            self.set_tags(repo, tags);
         }
     }
 
@@ -498,6 +561,85 @@ mod tests {
         meta.apply_root_tag(&api, wider, None);
         assert!(meta.tags_for(&api).is_empty());
         assert!(meta.repos.is_empty(), "{:?}", meta.repos);
+    }
+
+    /// What the tag editor does between opening and Save, without the dialog.
+    fn edit(meta: &mut Meta, repos: &[PathBuf], typing: impl FnOnce(String) -> String) {
+        let shared = meta.shared_tags(repos);
+        let typed = typing(shared.join(", "));
+        let wanted = parse_edited(&typed, &shared);
+        meta.replace_shared(repos, &shared, &wanted);
+    }
+
+    /// A root's tag field took any text, and the editor shows tags joined by
+    /// commas and reads them back split on spaces as well. So a root tagged
+    /// `open source` gave every repository one tag, and the first visit to the
+    /// editor, with nothing changed, left it with `open` and `source`. The
+    /// root's record still said `open source`, so no scan put it right.
+    #[test]
+    fn opening_the_tag_editor_and_pressing_save_changes_nothing() {
+        let api = repo("api");
+        let mut meta = Meta::default();
+        meta.apply_root_tag(&api, ROOT, Some("open source"));
+        // The last one is what a file edited by hand can hold.
+        let by_hand = ["open source", "rust", "a,b"].map(str::to_string).to_vec();
+        meta.set_tags(&api, by_hand);
+        let before = meta.tags_for(&api).to_vec();
+        assert_eq!(before, ["a,b", "open source", "rust"]);
+
+        edit(&mut meta, &[api.clone()], |shown| shown);
+        assert_eq!(meta.tags_for(&api), before);
+
+        // An edit made beside them leaves them whole as well...
+        edit(&mut meta, &[api.clone()], |shown| format!("{shown}, cli"));
+        assert_eq!(meta.tags_for(&api), ["a,b", "cli", "open source", "rust"]);
+        assert!(!meta.apply_root_tag(&api, ROOT, Some("open source")));
+
+        // ...and a tag of two words comes off the way any other does.
+        edit(&mut meta, &[api.clone()], |shown| shown.replace("open source", ""));
+        assert_eq!(meta.tags_for(&api), ["a,b", "cli", "rust"]);
+    }
+
+    #[test]
+    fn a_space_still_separates_tags_nobody_has_used_as_one() {
+        let known = ["open source".to_string()];
+        assert_eq!(
+            parse_edited("side projects, Open Source,rust", &known),
+            ["open source", "projects", "rust", "side"]
+        );
+        assert_eq!(parse_edited("side projects", &[]), parse_list("side projects"));
+    }
+
+    /// Editing several repositories at once only replaces what they share.
+    #[test]
+    fn editing_several_repositories_keeps_what_only_one_of_them_has() {
+        let (api, web) = (repo("api"), repo("web"));
+        let mut meta = Meta::default();
+        meta.set_tags(&api, vec!["acme".to_string(), "rust".to_string()]);
+        meta.set_tags(&web, vec!["Acme".to_string(), "ruby".to_string()]);
+
+        let both = [api.clone(), web.clone()];
+        assert_eq!(meta.shared_tags(&both), ["acme"]);
+        edit(&mut meta, &both, |_| "client-x".to_string());
+        assert_eq!(meta.tags_for(&api), ["client-x", "rust"]);
+        assert_eq!(meta.tags_for(&web), ["client-x", "ruby"]);
+    }
+
+    /// What the root's tag field in Settings holds a value to. Everything
+    /// that names a tag (the editor, `tag:` in the filter, the refresh scope)
+    /// splits on spaces and commas, so a tag with either in it can be shown
+    /// and never asked for.
+    #[test]
+    fn a_root_tag_is_one_word() {
+        for tag in ["acme", "client-x", "r&d", "Größe", "a.b_c"] {
+            assert!(is_one_tag(tag), "{tag:?}");
+            // ...which is what makes it survive being shown and read back.
+            let pair = [tag, "other"];
+            assert_eq!(parse_list(&pair.join(", ")), normalize(pair.map(str::to_string)));
+        }
+        for tag in ["open source", "a,b", "a, b", " acme", "acme,", "tab\tbed", "", ","] {
+            assert!(!is_one_tag(tag), "{tag:?}");
+        }
     }
 
     /// The unmounted disk the doc comment is about. A mount point from fstab

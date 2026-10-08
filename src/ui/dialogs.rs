@@ -481,6 +481,16 @@ fn root_row(
         let row = row.clone();
         tag.connect_apply(move |entry| {
             let value = entry.text().trim().to_string();
+            // Everything that asks for a tag by name splits on spaces and
+            // commas: the tag editor, `tag:` in the filter, the refresh scope.
+            // This field took any text, so a root could apply a tag that
+            // could be shown and never named, and that the editor took apart.
+            if !value.is_empty() && !meta::is_one_tag(&value) {
+                entry.add_css_class("error");
+                toast(entry, "A tag is one word, with no spaces or commas. Nothing was changed.");
+                return;
+            }
+            entry.remove_css_class("error");
             cfg.borrow_mut().update_root(&path, |root| {
                 root.tag = if value.is_empty() { None } else { Some(value.clone()) };
             });
@@ -614,7 +624,7 @@ pub fn edit_tags(
         format!("Tags for {} repositories", repos.len())
     };
 
-    let shared = common_tags(&meta.borrow(), &repos);
+    let shared = meta.borrow().shared_tags(&repos);
     let entry = adw::EntryRow::builder().title("Tags").build();
     entry.set_text(&shared.join(", "));
 
@@ -624,8 +634,22 @@ pub fn edit_tags(
     let body = gtk::Box::new(gtk::Orientation::Vertical, 10);
     body.append(&group);
 
-    // Existing tags as one-click chips, so spelling stays consistent.
-    let known = meta.borrow().all_tags();
+    // Existing tags as one-click chips, so spelling stays consistent. One the
+    // entry could not hold is not offered.
+    let known: Vec<(String, usize)> = meta
+        .borrow()
+        .all_tags()
+        .into_iter()
+        .filter(|(tag, _)| meta::editable(tag))
+        .collect();
+    // What the entry may be holding as a single tag: see `parse_edited`.
+    let whole: Rc<Vec<String>> = Rc::new(
+        shared
+            .iter()
+            .cloned()
+            .chain(known.iter().map(|(tag, _)| tag.clone()))
+            .collect(),
+    );
     if !known.is_empty() {
         let flow = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -639,8 +663,9 @@ pub fn edit_tags(
                 .build();
             button.add_css_class("om-tag-chip");
             let entry = entry.clone();
+            let whole = Rc::clone(&whole);
             button.connect_clicked(move |_| {
-                let mut tags = meta::parse_list(&entry.text());
+                let mut tags = meta::parse_edited(&entry.text(), &whole);
                 if tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
                     tags.retain(|t| !t.eq_ignore_ascii_case(&tag));
                 } else {
@@ -673,21 +698,10 @@ pub fn edit_tags(
         if response != "save" {
             return;
         }
-        let wanted = meta::parse_list(&entry_for_save.text());
+        let wanted = meta::parse_edited(&entry_for_save.text(), &whole);
         {
             let mut meta = meta.borrow_mut();
-            for repo in &repos {
-                // Keep anything that was not part of the shared set, so editing
-                // several repos at once cannot silently drop their own tags.
-                let mut tags: Vec<String> = meta
-                    .tags_for(repo)
-                    .iter()
-                    .filter(|t| !shared.iter().any(|s| s.eq_ignore_ascii_case(t)))
-                    .cloned()
-                    .collect();
-                tags.extend(wanted.iter().cloned());
-                meta.set_tags(repo, tags);
-            }
+            meta.replace_shared(&repos, &shared, &wanted);
             if let Err(err) = meta.save() {
                 eprintln!("omarepos: could not write the tag file: {err}");
             }
@@ -696,15 +710,4 @@ pub fn edit_tags(
     });
 
     dialog.present(Some(parent.as_ref()));
-}
-
-fn common_tags(meta: &Meta, repos: &[PathBuf]) -> Vec<String> {
-    let mut iter = repos.iter();
-    let Some(first) = iter.next() else { return Vec::new() };
-    let mut shared: Vec<String> = meta.tags_for(first).to_vec();
-    for repo in iter {
-        let theirs = meta.tags_for(repo);
-        shared.retain(|tag| theirs.iter().any(|t| t.eq_ignore_ascii_case(tag)));
-    }
-    shared
 }
