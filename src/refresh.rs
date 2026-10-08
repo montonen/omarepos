@@ -80,6 +80,10 @@ pub enum Skip {
     /// Found since the user last looked, and not yet opened or asked for. A
     /// pass across the fleet does not enter a repository nobody has seen.
     Unseen,
+    /// The incoming commits move the pointer of a submodule that is checked
+    /// out here. `git merge` moves the pointer and leaves the checkout where
+    /// it was, and this module does not update submodules.
+    Submodule,
 }
 
 impl Skip {
@@ -94,6 +98,7 @@ impl Skip {
             Skip::Busy => "merge or rebase in progress",
             Skip::Elsewhere => "its work tree is not this directory",
             Skip::Unseen => "new here, open it once",
+            Skip::Submodule => "update moves a submodule",
         }
     }
 }
@@ -460,6 +465,12 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         });
     }
 
+    // On either kind of pass: this is not a question git answers. It moves
+    // the pointer, leaves the checkout, and exits 0.
+    if strands_a_submodule(&repo, &at) {
+        return report(Outcome::Skipped(Skip::Submodule));
+    }
+
     // Called off while this repository was being fetched: it stays fetched,
     // and where it was.
     if options.cancel.stopped() {
@@ -601,6 +612,37 @@ fn is_dirty(repo: &Repository) -> bool {
         // Unreadable status is not a licence to proceed.
         Err(_) => true,
     }
+}
+
+/// Whether fast-forwarding would move the pointer of a submodule that is
+/// checked out here.
+///
+/// `git merge` does not update submodules, with or without
+/// `submodule.recurse`. It records the new pointer and leaves the checkout on
+/// the old commit, so the repository's code is new and the library's is not.
+/// The pass reported that as "updated", the card showed "clean" because its
+/// status leaves submodules out, and a build that broke overnight had no
+/// visible cause. Bringing the submodule along is `git submodule update`,
+/// which this module does not run; so the update is left for the user to
+/// pull, and the reason says why.
+///
+/// A submodule that was never checked out has nothing to be left behind, and
+/// does not hold anything back.
+fn strands_a_submodule(repo: &Repository, at: &Tracking) -> bool {
+    let tree = |commit| repo.find_commit(commit).and_then(|commit| commit.tree());
+    let incoming = match (tree(at.local), tree(at.upstream)) {
+        (Ok(ours), Ok(theirs)) => repo.diff_tree_to_tree(Some(&ours), Some(&theirs), None),
+        (Err(err), _) | (_, Err(err)) => Err(err),
+    };
+    // Unreadable is not a licence to proceed.
+    let Ok(incoming) = incoming else { return true };
+    let Some(workdir) = repo.workdir() else { return false };
+    incoming.deltas().any(|delta| {
+        [delta.old_file(), delta.new_file()].iter().any(|file| {
+            file.mode() == git2::FileMode::Commit
+                && file.path().is_some_and(|path| workdir.join(path).join(".git").exists())
+        })
+    })
 }
 
 /// The paths where the working tree already holds what the upstream commit
@@ -1503,5 +1545,44 @@ mod tests {
 
         assert!(matches!(report.outcome, Outcome::Behind(1)), "{:?}", report.outcome);
         assert!(report.fetched);
+    }
+
+    /// `git merge` moves a submodule's pointer and leaves its checkout where
+    /// it was. The pass said "updated", the card said "clean", `git status`
+    /// said modified, and the build ran new code against the old library.
+    #[test]
+    fn an_update_that_moves_a_checked_out_submodule_is_left_to_the_user() {
+        let _guard = isolate();
+        for pass in [Pass::Fleet, Pass::One] {
+            let v = vendored(&format!("rf-submodule-update-{pass:?}"));
+            let before = v.f.head();
+            v.pointer_moves();
+
+            let got = refresh_one(&v.f.work, &options(true, pass)).outcome;
+
+            assert_eq!(git(&v.f.work, &["status", "--porcelain"]), "", "{pass:?}: {got:?}");
+            assert!(matches!(got, Outcome::Skipped(Skip::Submodule)), "{pass:?}: {got:?}");
+            assert_eq!(v.f.head(), before, "{pass:?}");
+        }
+    }
+
+    /// Only that. An update that leaves the pointer alone goes through, and
+    /// so does one that moves it where the submodule was never checked out:
+    /// there is no checkout to leave behind.
+    #[test]
+    fn a_submodule_holds_back_only_the_update_that_would_strand_it() {
+        let _guard = isolate();
+        let v = vendored("rf-submodule-bystander");
+        v.f.remote_moves(1);
+        let got = fleet_pass(&v.f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+
+        let v = vendored("rf-submodule-absent");
+        git(&v.f.work, &["submodule", "--quiet", "deinit", "-f", "vendor/lib"]);
+        v.pointer_moves();
+        let got = fleet_pass(&v.f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(v.f.head(), v.f.remote_ref("refs/heads/main"));
+        assert_eq!(git(&v.f.work, &["status", "--porcelain"]), "");
     }
 }
