@@ -4,8 +4,11 @@
 //! holding the id of the commit expected next in that column. When a commit is
 //! emitted it takes the lane that was waiting for it (allocating one if it is a
 //! tip), hands that lane to its first parent, and parks any further parents in
-//! lanes of their own. Every row records the lane state above and below it, so
-//! a renderer can draw one row at a time without looking at its neighbours.
+//! lanes of their own. The one exception: a first parent already expected in a
+//! lane further left is joined there, so a branch bends into the line it came
+//! from and never the other way round. Every row records the lane state above
+//! and below it, so a renderer can draw one row at a time without looking at
+//! its neighbours.
 
 use std::collections::HashMap;
 
@@ -236,45 +239,7 @@ pub fn build(
         let parents: Vec<Oid> = commit.parent_ids().collect();
 
         let incoming = state.clone();
-        let lane = match state.iter().position(|slot| *slot == Some(oid)) {
-            Some(i) => i,
-            None => {
-                let i = alloc(&mut state);
-                state[i] = Some(oid);
-                i
-            }
-        };
-
-        // Several lanes can be waiting for the same commit (it has several
-        // children); they all converge here, so free every one of them.
-        for slot in state.iter_mut() {
-            if *slot == Some(oid) {
-                *slot = None;
-            }
-        }
-
-        let mut down: Vec<usize> = Vec::new();
-        for (n, parent) in parents.iter().enumerate() {
-            let target = match state.iter().position(|slot| *slot == Some(*parent)) {
-                Some(j) => j,
-                None if n == 0 && state[lane].is_none() => {
-                    state[lane] = Some(*parent);
-                    lane
-                }
-                None => {
-                    let j = alloc(&mut state);
-                    state[j] = Some(*parent);
-                    j
-                }
-            };
-            if !down.contains(&target) {
-                down.push(target);
-            }
-        }
-
-        while state.last().is_some_and(|slot| slot.is_none()) {
-            state.pop();
-        }
+        let (lane, down) = place(&mut state, oid, &parents);
 
         let author = commit.author();
         rows.push(Row {
@@ -444,6 +409,72 @@ fn working_tree(repo: &Repository, here: bool) -> (usize, Option<String>) {
     }
 }
 
+/// Give `oid` its lane and hand lanes on to its parents. `state` holds, for
+/// each lane, the commit expected next in it: the lanes as they arrive at this
+/// row on the way in, and as they leave it on the way out. Returns the lane
+/// the commit sits in and the lanes its parents were handed.
+fn place(state: &mut Vec<Option<Oid>>, oid: Oid, parents: &[Oid]) -> (usize, Vec<usize>) {
+    // The leftmost lane waiting for it, or a lane of its own if it is a tip.
+    let lane = match state.iter().position(|slot| *slot == Some(oid)) {
+        Some(i) => i,
+        None => {
+            let i = alloc(state);
+            state[i] = Some(oid);
+            i
+        }
+    };
+
+    // Several lanes can be waiting for the same commit (it has several
+    // children); they all converge here, so free every one of them.
+    for slot in state.iter_mut() {
+        if *slot == Some(oid) {
+            *slot = None;
+        }
+    }
+
+    let mut down: Vec<usize> = Vec::new();
+    for (n, parent) in parents.iter().enumerate() {
+        let target = match state.iter().position(|slot| *slot == Some(*parent)) {
+            // A first parent that another lane, further right, already waits
+            // for: a branch that forked from it was walked before this commit
+            // was. Stay put and wait for it here as well. The two lanes meet
+            // at the parent, in this one, which is where the lookup above
+            // puts it.
+            //
+            // The line used to go to the lane that was waiting, wherever that
+            // was, and leave its own empty. Nothing ever moved it back. So
+            // below the first fork the trunk was drawn in the branch's lane
+            // with nothing to its left, for the rest of the history; and with
+            // enough branches open at the top it came to rest past the last
+            // lane that is drawn, where every older row had an empty cell.
+            Some(j) if n == 0 && j > lane => {
+                state[lane] = Some(*parent);
+                lane
+            }
+            // Waited for further left, or a parent merged in: bend into the
+            // lane that has it. A first-parent line only ever moves left.
+            Some(j) => j,
+            None if n == 0 && state[lane].is_none() => {
+                state[lane] = Some(*parent);
+                lane
+            }
+            None => {
+                let j = alloc(state);
+                state[j] = Some(*parent);
+                j
+            }
+        };
+        if !down.contains(&target) {
+            down.push(target);
+        }
+    }
+
+    while state.last().is_some_and(|slot| slot.is_none()) {
+        state.pop();
+    }
+    (lane, down)
+}
+
 fn alloc(state: &mut Vec<Option<Oid>>) -> usize {
     match state.iter().position(|slot| slot.is_none()) {
         Some(i) => i,
@@ -514,6 +545,22 @@ mod tests {
     use super::*;
     use crate::testkit::*;
     use std::path::Path;
+
+    /// Commit `file` with the commit's own clock set to `when`. The walk is
+    /// newest first, so a test about lanes has to say when things happened.
+    fn commit_at(repo: &Path, file: &str, when: i64) {
+        write(&repo.join(file), "x\n");
+        git(repo, &["add", "--", file]);
+        let date = format!("@{when} +0000");
+        let done = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["commit", "-q", "-m", file])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .status()
+            .expect("git runs");
+        assert!(done.success(), "fixture commit of {file} failed");
+    }
 
     /// Take a loose object away, the way a power cut in the middle of a commit
     /// does.
@@ -610,4 +657,124 @@ mod tests {
         assert_eq!(graph.working_changes, 1);
     }
 
+    // ---- lanes -------------------------------------------------------------
+
+    #[test]
+    fn the_trunk_keeps_its_lane_past_a_branch_that_forked_from_it() {
+        let _guard = isolate();
+        let dir = scratch("lanes-trunk");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_at(&dir, "one", 1_000);
+        commit_at(&dir, "two", 2_000);
+        commit_at(&dir, "three", 3_000);
+        // A branch cut from `two` and committed to, after which main moved on:
+        // the everyday shape of a feature branch.
+        git(&dir, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+        commit_at(&dir, "side", 4_000);
+        git(&dir, &["checkout", "-q", "main"]);
+        commit_at(&dir, "four", 5_000);
+
+        let graph = build(&dir, 500, None).unwrap();
+        assert_eq!(summaries(&graph), ["four", "side", "three", "two", "one"]);
+        // `three` used to follow its parent into the branch's lane, because
+        // the branch had asked for `two` first, and everything older was then
+        // drawn one lane out with nothing to its left.
+        let lanes: Vec<usize> = graph.rows.iter().map(|row| row.lane).collect();
+        assert_eq!(lanes, [0, 1, 0, 0, 0]);
+        assert_eq!(graph.lanes, 2);
+        // Both lanes arrive at `two` waiting for it, which is what the page
+        // draws as the branch bending into the trunk.
+        let two = &graph.rows[3];
+        assert_eq!(two.incoming, [Some(two.id), Some(two.id)]);
+        assert_eq!(two.outgoing.len(), 1);
+    }
+
+    fn id(n: u32) -> Oid {
+        Oid::from_str(&format!("{n:040x}")).unwrap()
+    }
+
+    /// Lay out commits, given as (commit, its parents) in the order a walk
+    /// would hand them over, without a repository: the shapes worth pinning
+    /// take hundreds of commits. Returns each commit's lane and the most
+    /// lanes any row had, and checks on the way that no line is dropped.
+    fn lay_out(commits: &[(u32, Vec<u32>)]) -> (Vec<usize>, usize) {
+        let mut state: Vec<Option<Oid>> = Vec::new();
+        let (mut lanes, mut widest) = (Vec::new(), 0);
+        for (commit, parents) in commits {
+            let parents: Vec<Oid> = parents.iter().map(|parent| id(*parent)).collect();
+            let arriving = state.len();
+            let (lane, down) = place(&mut state, id(*commit), &parents);
+            assert!(!state.contains(&Some(id(*commit))), "{commit} is still waited for");
+            for parent in &parents {
+                assert!(state.contains(&Some(*parent)), "nothing leads on to a parent of {commit}");
+            }
+            for lane in &down {
+                assert!(state[*lane].is_some_and(|next| parents.contains(&next)));
+            }
+            widest = widest.max(arriving).max(state.len()).max(lane + 1);
+            lanes.push(lane);
+        }
+        assert!(state.is_empty(), "lines left hanging: {state:?}");
+        (lanes, widest)
+    }
+
+    #[test]
+    fn stale_branches_do_not_walk_the_trunk_out_of_the_graph() {
+        // Twenty branches of one commit each, cut from the twenty newest
+        // commits of a long linear main and never merged: what a repository
+        // whose pull requests are squashed looks like. The branch tips are
+        // newer than main's, so they are walked first, and each waits for the
+        // commit it was cut from.
+        const BRANCHES: u32 = 20;
+        const MAIN: u32 = 60;
+        let mut commits: Vec<(u32, Vec<u32>)> = Vec::new();
+        for branch in 1..=BRANCHES {
+            commits.push((1000 + branch, vec![branch]));
+        }
+        for main in 1..=MAIN {
+            commits.push((main, if main < MAIN { vec![main + 1] } else { vec![] }));
+        }
+
+        let (lanes, widest) = lay_out(&commits);
+        // The trunk hopped one lane right at every fork, came to rest in the
+        // twentieth, and stayed there for the rest of the history. Past the
+        // sixteenth nothing is drawn, so every older row had an empty cell.
+        let trunk = &lanes[BRANCHES as usize..];
+        assert!(trunk.iter().all(|lane| *lane == 0), "{trunk:?}");
+        // And it costs no lanes: there are twenty lines open at the top, as
+        // there were.
+        assert_eq!(widest, BRANCHES as usize);
+    }
+
+    #[test]
+    fn branches_cut_from_one_commit_still_share_a_lane() {
+        // The shape a cure for the drift must not make worse: keeping every
+        // first parent in its own lane would give these twenty a lane each.
+        let mut commits: Vec<(u32, Vec<u32>)> = Vec::new();
+        for branch in 1..=20 {
+            commits.push((1000 + branch, vec![2]));
+        }
+        commits.extend([(1, vec![2]), (2, vec![3]), (3, vec![])]);
+
+        let (lanes, widest) = lay_out(&commits);
+        assert_eq!(widest, 2);
+        assert_eq!(lanes[20..], [1, 0, 0]);
+    }
+
+    #[test]
+    fn a_merged_branch_meets_the_trunk_in_the_trunks_lane() {
+        // 1 merges 20 into main; the branch is 20 and 21, cut from 3. Its
+        // first commit is walked before main's 2, so it asks for 3 first.
+        let commits = [
+            (1, vec![2, 20]),
+            (20, vec![21]),
+            (21, vec![3]),
+            (2, vec![3]),
+            (3, vec![4]),
+            (4, vec![]),
+        ];
+        let (lanes, widest) = lay_out(&commits);
+        assert_eq!(lanes, [0, 1, 1, 0, 0, 0]);
+        assert_eq!(widest, 2);
+    }
 }
