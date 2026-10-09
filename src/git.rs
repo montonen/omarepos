@@ -56,10 +56,6 @@ pub const ACTIVITY_DAYS: usize = 28;
 /// It is counted over HEAD and the tip of its upstream together, each commit
 /// once. A checkout that is behind has not gone quiet, which is what
 /// [`RepoInfo::upstream_when`] is there to say as well.
-//
-// The card that draws this is being written alongside it. Until that reads
-// these fields, nothing outside the tests does.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Default)]
 pub struct Activity {
     /// Commits per day as `[mine, others]`, oldest first, the last 24 hours
@@ -104,7 +100,6 @@ pub struct Activity {
 #[derive(Debug, Clone)]
 pub struct LangShare {
     pub name: String,
-    pub color: String,
     pub share: f32,
 }
 
@@ -241,8 +236,9 @@ impl RepoInfo {
         None
     }
 
-    /// Sort key for "most recent activity first".
-    pub fn activity(&self) -> i64 {
+    /// Sort key for "most recent activity first". Not `activity`: that is
+    /// the field with the last four weeks in it.
+    pub fn last_active(&self) -> i64 {
         self.last_commit.as_ref().map(|c| c.when).unwrap_or(i64::MIN)
     }
 
@@ -1062,23 +1058,21 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         }
     };
     if let Some(index) = index {
-        let mut counts: HashMap<&'static str, (usize, &'static str)> = HashMap::new();
+        let mut counts: HashMap<&'static str, usize> = HashMap::new();
         let mut total = 0usize;
         for entry in index.iter() {
             let path = String::from_utf8_lossy(&entry.path);
             info.tracked_files += 1;
-            if let Some(l) = lang::classify(&path) {
-                let slot = counts.entry(l.name).or_insert((0, l.color));
-                slot.0 += 1;
+            if let Some(language) = lang::classify(&path) {
+                *counts.entry(language).or_insert(0) += 1;
                 total += 1;
             }
         }
         if total > 0 {
             let mut shares: Vec<LangShare> = counts
                 .into_iter()
-                .map(|(name, (count, color))| LangShare {
+                .map(|(name, count)| LangShare {
                     name: name.to_string(),
-                    color: color.to_string(),
                     share: count as f32 / total as f32,
                 })
                 .collect();

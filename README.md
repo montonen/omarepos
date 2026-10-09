@@ -4,11 +4,13 @@ An Omarchy-styled overview of every git repo on your machine.
 
 A GTK4 / libadwaita desktop app with three views:
 
-- **Fleet** — one card per repository: current branch, working-tree state, how far
-  ahead or behind its upstream it is, stashes, language mix, and the last commit.
-  A repository that is behind and cannot catch up on its own is marked **held
-  back**, with the reason on hover — being behind and being stuck look nothing
-  alike once you know which you are looking at.
+- **Fleet** — one card per repository: where it is, its branch and what is
+  uncommitted, what exists only here and what is waiting on the remote, the
+  last commits, and four weeks of activity. A healthy repository's card is
+  grey, so whatever has a colour is something to do. A repository that is
+  behind and cannot catch up on its own is marked **held back**, with the
+  reason on hover — being behind and being stuck look nothing alike once you
+  know which you are looking at.
 - **Commit graph** — the DAG of any one repository, with branch and tag labels.
 - **Contributions** — who committed what over the last week, across all of your
   repositories or just the ones you tick.
@@ -19,16 +21,18 @@ It reads the active Omarchy theme's `colors.toml`, so it repaints itself when yo
 switch themes.
 
 ```
-┌──────────────────────────────────────┐
-│ omarchy-plugins                   ⋮  │
-│ ~/code/omarchy-plugins               │
-│  main   ~3 ?2   2 behind  held back  │
-│ github.com/you/omarchy-plugins       │
-│ ███████████▌▌▌▌▎▎                    │
-│ ● QML 54%  ● Shell 28%  ● Rust 11%   │
-│ 3 hours ago · remote 1 hour ago · …  │
-│ fix bar widget repaint on theme swap │
-└──────────────────────────────────────┘
+┌───────────────────────────────────────┐
+┃ ☐ omarchy-plugins                  ⋮  │
+┃   ~/code/ · github.com/you/           │
+┃                                       │
+┃ ⑂ main                         ~3 ?2  │
+┃ ↑ 1 ahead     ↓ 2 behind · held back  │
+┃ ───────────────────────────────────── │
+┃ ↑ 3h  Fix bar widget repaint on the…  │
+┃    ▁ ▂▁ ▁   ▃▁  ▁▂ ▁▁  ▅▂▁ ▂▇▃        │
+┃   9 this week · 2 people              │
+┃   PLUGINS                             │
+└───────────────────────────────────────┘
 ```
 
 ## Build and run
@@ -81,7 +85,9 @@ of yours: everything goes over D-Bus to actions that only a debug build has,
 and only when it is started with `OMAREPOS_DUMP=<file>` (`src/ui/debug.rs`).
 `scripts/walk/drive.py` is the same thing by hand: `dump` what is on screen
 as text, `press` a button by what it says, hand the app a `key`, set a
-settings `row`, `pick` a list row, `paint`. A release build has none of it.
+settings `row`, `pick` a list row, `paint`, and `shot` for a picture of the
+window as a PNG, which is the one way to see what a change looks like without
+putting the window on screen. A release build has none of it.
 
 One thing a walk cannot see is what waits for a frame, because a window on a
 hidden workspace is sent none: a change of width across a breakpoint starts
@@ -190,6 +196,61 @@ be found, in any order, so `acme billing` finds the billing repository under
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
 unreadable, holding commits that are on no remote, or that the last fetch or
 update failed on.
+
+### Reading a card
+
+Every fact has a place of its own on a card, the same on every card, and the
+cards are all one height: where a thing is says what it is. Top to bottom:
+
+| Row | Left | Right |
+| --- | --- | --- |
+| Name | The repository | The **flag**, when there is trouble |
+| Where | The folder it lies in, and the remote it belongs to | |
+| Branch | The branch (or the commit a detached HEAD is on), and `+2 branches` when other local branches hold commits that are on no remote | What is uncommitted: `+1 ~3 ?4` is 1 staged, 3 modified, 4 untracked; `!2` is 2 in conflict; `clean`; stashes |
+| Sync | `↑` what exists only here: `2 ahead`, `3 unpublished`, `no remote` | `↓` what is waiting: `12 behind`, and `held back` when it will not arrive by itself |
+| Commit | The last commit: how old, what it says, and who wrote it if that was not you. `↑` in front when it is on no remote | |
+| Lately | Commits a day over the last four weeks, today at the right, and under them `14 this week · 2 people` or `quiet for 3 weeks` | `remote tip 3h ago`, when behind |
+| Tags | The repository's tags; `new` on one found since you last looked | Keys, on the card with the keyboard |
+
+The folder and the remote are written without the repository's name, which is
+on the line above: `~/work/acme/ · github.com/acme/`. A remote called
+something else is written whole, since the difference is then the thing to
+see. The full path and the address are in the tooltip, with the mix of
+languages (`lang:` in the filter still finds by it).
+
+**Colour means something to do.** A card for a repository that is clean and
+level with its remote has none. Yellow is uncommitted work, the accent is
+commits that exist nowhere else, red is trouble. The left edge of the card
+takes the first of those that applies, and says where your work is: red when
+the repository itself is in trouble, yellow when there is uncommitted work,
+the accent when there are commits only here. The flag beside the name is the
+one solid patch of colour on a card, and goes to one trouble at a time: a
+repository that cannot be read, files in conflict, a working tree whose state
+is not known, or a fetch that failed. A failed fetch never takes the edge, so
+a day without a network does not hide which cards have work in them.
+
+**The four weeks.** One column a day, weeks set apart, on one scale for every
+card (a column is full at six commits), so a tall column means the same
+everywhere. Your commits are drawn solid from the baseline and other people's
+fainter on top of them; "you" is whoever that repository is configured to
+commit as. Days are 24-hour windows back from the scan, not calendar days. The
+count takes in the branch's upstream as well as HEAD, so a checkout that is
+behind does not look asleep. It reads at most 200 commits per repository; where
+that does not reach back four weeks, the baseline stops where the reading did,
+so that "not read" is not drawn as "nothing happened". It knows only what has
+been fetched.
+
+**Your own name is not printed.** A name on a commit means somebody else. So
+when your own name does turn up, that repository is set up to commit as
+someone you are not, and you see it on the grid before you see it in a push.
+Where who you are is in doubt (the environment or `author.*` outranks
+`user.email`), nobody is "you": everyone is named and the days are drawn in one
+tone.
+
+**The card with the keyboard** shows the two commits before the last in place
+of the four weeks, or, when it is flagged or held back, the reason in git's own
+words; and the keys that act on it. The card `Enter` would open from the filter
+shows the same, and says `Enter`. Nothing changes size as the keyboard moves.
 
 "Ahead" is measured against the branch's upstream, and says nothing when there
 is none. So a card also says when HEAD has commits that exist on no remote at
@@ -367,13 +428,13 @@ minutes ago` is the last pass that reached a remote: a pass run offline does
 not count as one, so the next launch tries again. With `only_tags` set the
 stamp names the tags it covered, and when nothing carries any of them it reads
 `auto fetch idle: nothing is tagged work` in place of a schedule that would
-fetch nothing. `2 not fetched` and `1 not updated` count the cards carrying
-those pills.
+fetch nothing. `2 not fetched` and `1 not updated` count the cards that say
+`fetch failed` and `held back`.
 
 A remote that turned a fetch away (a login refused, a repository that is not
 there any more) is not asked again by the timer. Trying every few minutes with
 the same credential changes nothing, and is how an account gets locked. The
-card keeps its `fetch failed` pill; `f`, `p` or `Ctrl+Shift+R` try again, and a
+card keeps its `fetch failed` flag; `f`, `p` or `Ctrl+Shift+R` try again, and a
 fetch that works clears it. A remote that could not be reached is different,
 and is tried on every pass.
 
@@ -764,6 +825,28 @@ the size of the change and not of the repository; a week across a dozen repos
 takes well under a second, and a 30-day window over a large fleet is the case
 that can still be felt.
 
+## Theme
+
+Every colour comes from the active Omarchy theme: `colors.toml` under
+`~/.local/state/omarchy/current/theme`, read by the rules of Omarchy's own
+resolver and compiled into the window's stylesheet. `omarchy theme set` puts a
+new theme in that place; the window watches for it and repaints, the drawn
+parts of a card included. Nothing is cached and nothing needs restarting.
+`follow_omarchy_theme = false` keeps the palette the window started with.
+
+The roles are used the way Omarchy's own templates use them: `background` for
+the page, `lighter_background` for cards, `foreground` for text, `muted` for
+borders, `accent`, and `red` and `yellow` for what calls for attention. Small
+print is the foreground at seven tenths, which is how those templates write
+muted text. It is not `light_foreground`, which in some themes is the brighter
+foreground and not the dimmer one.
+
+Coloured text is the theme's own hue where that can be read on every
+background a card takes, and otherwise the hue moved toward the foreground
+until it can. On a theme whose yellow or accent sits close to its background
+the coloured words end up nearly the colour of plain text. The left edge of a
+card is the theme's colour as it stands, and carries the state there.
+
 ## Configuration
 
 Optional, at `~/.config/omarepos/config.toml`:
@@ -864,7 +947,7 @@ counts.
 | `src/search.rs` | Commit search across many repositories |
 | `src/scan.rs` | Worker threads streaming results to the main loop |
 | `src/refresh.rs` | Background fetch and fast-forward, with the safety rules |
-| `src/lang.rs` | Extension → language + colour table |
+| `src/lang.rs` | Extension → language table |
 | `src/testkit.rs` | Test fixtures: scratch repositories with a bare remote, an isolated home |
 | `src/ui/window.rs` | Header, filter, sort, grid, selection, status bar, theme watcher |
 | `src/ui/card.rs` | One repository card |

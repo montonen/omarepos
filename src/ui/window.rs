@@ -570,6 +570,16 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         });
     }
     {
+        // While the keyboard is in the filter, the grid shows which card
+        // Enter would open: the stylesheet does it, told by this class.
+        let typing = gtk::EventControllerFocus::new();
+        let flow = ui.flow.clone();
+        typing.connect_enter(move |_| flow.add_css_class("om-typing"));
+        let flow = ui.flow.clone();
+        typing.connect_leave(move |_| flow.remove_css_class("om-typing"));
+        search.add_controller(typing);
+    }
+    {
         // Down from the filter moves into the grid, the way a launcher does:
         // the filter is where the keyboard starts, and the cards must not be
         // a Tab hunt away from it.
@@ -1248,8 +1258,8 @@ impl Ui {
 
         match Sort::from_index(self.sort.selected()) {
             Sort::Activity => repos.sort_by(|a, b| {
-                b.activity()
-                    .cmp(&a.activity())
+                b.last_active()
+                    .cmp(&a.last_active())
                     .then_with(|| a.name.cmp(&b.name))
             }),
             Sort::Name => repos.sort_by(|a, b| {
@@ -1262,7 +1272,7 @@ impl Ui {
                 b.tree
                     .total()
                     .cmp(&a.tree.total())
-                    .then_with(|| b.activity().cmp(&a.activity()))
+                    .then_with(|| b.last_active().cmp(&a.last_active()))
             }),
             Sort::Unpushed => repos.sort_by(|a, b| {
                 // Work that is nowhere else comes first, then what is merely
@@ -1270,7 +1280,7 @@ impl Ui {
                 let key = |r: &RepoInfo| (r.unpushed.max(r.ahead), r.ahead + r.behind);
                 key(b)
                     .cmp(&key(a))
-                    .then_with(|| b.activity().cmp(&a.activity()))
+                    .then_with(|| b.last_active().cmp(&a.last_active()))
             }),
             Sort::Files => repos.sort_by(|a, b| {
                 b.tracked_files
@@ -1341,7 +1351,7 @@ impl Ui {
                 .0
                 .into_iter()
                 .collect();
-        for info in &repos {
+        for (index, info) in repos.iter().enumerate() {
             let tags = self.meta.borrow().tags_for(&info.path).to_vec();
             let errors = self.fetch_errors.borrow();
             let ctx = card::Context {
@@ -1350,6 +1360,9 @@ impl Ui {
                 auto_update: auto_update && in_scope.contains(&info.path),
                 trouble: errors.get(&info.path.display().to_string()),
                 unseen: !self.is_known(&info.path),
+                // The one Enter opens from the filter: `visible()` again,
+                // which is what the filter itself asks.
+                top_hit: index == 0,
             };
             self.flow.append(&card::build(
                 info,

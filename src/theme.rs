@@ -47,14 +47,25 @@ const STEPPED_BACK: f64 = 0.90;
 const ROW_LIT: f64 = 0.07;
 const ROW_SELECTED: f64 = 0.10;
 
+/// What a card's colour is shaded by under the pointer and under the
+/// keyboard, and how much of the accent is mixed into a ticked card, at rest
+/// and then under either. They are named for the reason the rows' are: what
+/// a card writes in a hue is fitted to these backgrounds.
+const CARD_LIT: f64 = 1.08;
+const CARD_FOCUSED: f64 = 1.30;
+const CARD_TICKED: f64 = 0.10;
+const CARD_TICKED_LIT: f64 = 0.12;
+
 /// How much of its own hue the fill of a coloured label carries.
 const WASH: f64 = 0.16;
 
-/// The contrast a coloured label's text is fitted to. WCAG asks 4.5:1 of text
-/// this small. The little over it is for what happens between here and the
+/// The contrast coloured text is fitted to. WCAG asks 4.5:1 of text this
+/// small. The little over it is for what happens between here and the
 /// screen, where GTK blends a see-through row or a card at 90% and rounds
 /// the result to whole bytes.
 const LEGIBLE: f64 = 4.6;
+/// How much of the foreground small print keeps; the rest is the page.
+const MUTED: f64 = 0.70;
 
 /// An opaque colour as `Palette::rgb` gives it, each channel in 0.0..=1.0.
 type Rgb = (f64, f64, f64);
@@ -68,6 +79,49 @@ fn mix(from: Rgb, to: Rgb, by: f64) -> Rgb {
         from.1 + (to.1 - from.1) * by,
         from.2 + (to.2 - from.2) * by,
     )
+}
+
+/// GTK's `shade()`: the colour taken to hue, lightness and saturation, the
+/// last two multiplied, and brought back.
+fn shade((r, g, b): Rgb, factor: f64) -> Rgb {
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let lightness = (max + min) / 2.0;
+    let (hue, saturation) = if max == min {
+        (0.0, 0.0)
+    } else {
+        let spread = max - min;
+        let saturation =
+            if lightness > 0.5 { spread / (2.0 - max - min) } else { spread / (max + min) };
+        let sixth = if max == r {
+            (g - b) / spread + if g < b { 6.0 } else { 0.0 }
+        } else if max == g {
+            (b - r) / spread + 2.0
+        } else {
+            (r - g) / spread + 4.0
+        };
+        (sixth / 6.0, saturation)
+    };
+    let lightness = (lightness * factor).clamp(0.0, 1.0);
+    let saturation = (saturation * factor).clamp(0.0, 1.0);
+    let upper = if lightness < 0.5 {
+        lightness * (1.0 + saturation)
+    } else {
+        lightness + saturation - lightness * saturation
+    };
+    let lower = 2.0 * lightness - upper;
+    let channel = |turn: f64| {
+        let turn = turn.rem_euclid(1.0);
+        if turn < 1.0 / 6.0 {
+            lower + (upper - lower) * 6.0 * turn
+        } else if turn < 0.5 {
+            upper
+        } else if turn < 2.0 / 3.0 {
+            lower + (upper - lower) * (2.0 / 3.0 - turn) * 6.0
+        } else {
+            lower
+        }
+    };
+    (channel(hue + 1.0 / 3.0), channel(hue), channel(hue - 1.0 / 3.0))
 }
 
 /// The WCAG 2 contrast ratio of two colours: 1 for the same colour twice, 21
@@ -221,8 +275,14 @@ impl Palette {
             bg_raised: colour(&["lighter_background", "lighter_bg"]).unwrap_or_else(|| bg.clone()),
             bg_sunken: colour(&["darker_background", "darker_bg", "dark_background", "dark_bg"])
                 .unwrap_or_else(|| bg.clone()),
-            fg_dim: colour(&["light_foreground", "light_fg", "dark_foreground", "dark_fg"])
-                .unwrap_or_else(|| fg.clone()),
+            // Small print is the foreground at seven tenths, which is how
+            // Omarchy's own templates write muted text (`color-mix(in srgb,
+            // foreground 70%, transparent)`), and not a colour of the
+            // theme's. It was `light_foreground`, the nearest name a theme
+            // has, and that is not a dimmer foreground in every theme: in
+            // Tokyo Night it is the brighter one, and the lines meant to
+            // recede stood out from the ones they were to recede behind.
+            fg_dim: hex(mix(Self::rgb(&bg), Self::rgb(&fg), MUTED)),
             bg,
             fg,
             border: colour(&["muted", "color8", "selection", "selection_background"])
@@ -275,44 +335,19 @@ impl Palette {
         let p = self;
         let (page, card, fg) = (Self::rgb(&p.bg), Self::rgb(&p.bg_raised), Self::rgb(&p.fg));
 
-        // The coloured labels: the pills on a card, the ref names in the
-        // graph, the status letters in the file list. Each was a theme colour
-        // written on an 18 to 30% wash of that same colour. A colour is
-        // closer to a wash of itself than to the bare surface, and these
-        // colours come from a terminal palette, which nobody chose for 11px
-        // text on a tint: of the pill and palette pairs tested below, 46 in
-        // 54 were under 4.5:1 and the worst was 1.66.
+        // The names of branches and tags in the graph. Each was a theme
+        // colour written on an 18 to 30% wash of that same colour. A colour
+        // is closer to a wash of itself than to the bare surface, and these
+        // colours come from a terminal palette, which nobody chose for 10px
+        // text on a tint: of the name and palette pairs tested below, 34 in
+        // 45 were under 4.5:1 and the worst was 1.78.
         //
         // The fill still carries the hue, and the text as much of it as can
         // be read (`ink`). The fill is also opaque now, mixed here into the
-        // surface the label rests on, where it was a see-through `alpha()`.
-        // A card changes colour when it is ticked, focused or under the
-        // pointer, and a see-through fill changed with it, under text that
-        // did not: "held back" on a ticked, focused kanagawa card was 1.04:1.
-        let label = |family: &str, surface: Rgb, steps_back: bool, class: &str, hue: &str| {
-            let fill = whole(mix(surface, Self::rgb(hue), WASH));
-            let behind = |colour: Rgb| mix(page, colour, STEPPED_BACK);
-            let text = p.ink(hue, |ink| {
-                contrast(ink, fill) >= LEGIBLE
-                    && (!steps_back || contrast(behind(ink), behind(fill)) >= LEGIBLE)
-            });
-            format!(
-                ".{family}.{class} {{\n  background-color: {};\n  color: {text};\n}}",
-                hex(fill)
-            )
-        };
-        // A pill is read on a card that has stepped back as well as on one
-        // that has not, so its text is fitted to both.
-        let pills = [
-            ("branch", &p.accent),
-            ("clean", &p.green),
-            ("dirty", &p.yellow),
-            ("ahead", &p.cyan),
-            ("behind", &p.magenta),
-            ("danger", &p.red),
-        ]
-        .map(|(class, hue)| label("om-pill", card, true, class, hue))
-        .join("\n\n");
+        // page the name lies on, where it was a see-through `alpha()`. A row
+        // changes colour when it is selected or under the pointer, and a
+        // see-through fill changed with it, under text that did not.
+        //
         // In this order: the branch HEAD is on is `local` and `current`, and
         // takes the later rule's accent; a detached HEAD is `current` and
         // `head`, and stays red.
@@ -323,7 +358,11 @@ impl Palette {
             ("tag", &p.yellow),
             ("head", &p.red),
         ]
-        .map(|(class, hue)| label("om-ref", page, false, class, hue))
+        .map(|(class, hue)| {
+            let fill = whole(mix(page, Self::rgb(hue), WASH));
+            let text = p.ink(hue, |ink| contrast(ink, fill) >= LEGIBLE);
+            format!(".om-ref.{class} {{\n  background-color: {};\n  color: {text};\n}}", hex(fill))
+        })
         .join("\n\n");
         // A status letter has no fill. It is drawn straight on the row, and
         // has to be read on each background a row can have.
@@ -339,6 +378,68 @@ impl Palette {
             format!(".om-status.{class} {{\n  color: {text};\n}}")
         })
         .join("\n\n");
+        // What a card writes in a hue has no fill either: yellow for work
+        // that is not committed, the accent for commits that are nowhere
+        // else, red for trouble. It has to be read on each colour a card
+        // takes, and on a card that has stepped back, where it fades with
+        // the card.
+        let cards = [
+            card,
+            shade(card, CARD_LIT),
+            shade(card, CARD_FOCUSED),
+            mix(card, Self::rgb(&p.accent), CARD_TICKED),
+            mix(card, Self::rgb(&p.accent), CARD_TICKED_LIT),
+        ];
+        let behind = |colour: Rgb| mix(page, colour, STEPPED_BACK);
+        let on_a_card = |ink: Rgb| {
+            cards.iter().all(|&lit| contrast(ink, lit) >= LEGIBLE)
+                && contrast(behind(ink), behind(card)) >= LEGIBLE
+        };
+        let inks = [
+            (".om-tree.work", &p.yellow),
+            (".om-out,\n.om-arrow.out", &p.accent),
+            (".om-bad,\n.om-tree.bad,\n.om-arrow.bad", &p.red),
+        ]
+        .map(|(written, hue)| format!("{written} {{\n  color: {};\n}}", p.ink(hue, on_a_card)))
+        .join("\n\n");
+        // The flag is the one fill on a card, and it is the theme's red as it
+        // stands, which is what Omarchy's bar gives whatever calls attention
+        // to itself. Its text is the card's own colour where that can be read
+        // on the red, then another of the theme's plain colours, and black or
+        // white where none of them can: nothing rose-pine has gets past
+        // 3.84:1 there. Where nothing reaches the figure it is whichever
+        // comes nearest.
+        let red = Self::rgb(&p.red);
+        let on_red = |text: Rgb| contrast(text, red).min(contrast(behind(text), behind(red)));
+        let plain = [card, page, Self::rgb(&p.bg_sunken), fg, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)];
+        let flag = plain.into_iter().find(|&text| on_red(text) >= LEGIBLE).unwrap_or_else(|| {
+            let nearer = |a: Rgb, b: Rgb| if on_red(b) > on_red(a) { b } else { a };
+            plain.into_iter().fold(card, nearer)
+        });
+        // A card's left edge is the state of its repository: red for
+        // trouble, yellow for work that is not committed, the accent for
+        // commits that are nowhere else. It is 4px where the border is 1px,
+        // and the padding gives the 3px back so that nothing on the card
+        // moves.
+        //
+        // `border-color` is all four sides, and the rules that set it for the
+        // keyboard, on the card it is on and on a card the pointer was left
+        // on, outweigh a card's own two classes. An edge written with those
+        // alone is recoloured with the rest of the border on the one card
+        // that is being read. So it is written again at each of their
+        // weights, with its own class on top.
+        let edges = [("trouble", &p.red), ("work", &p.yellow), ("out", &p.accent)]
+            .map(|(state, hue)| {
+                let edge = format!(".om-card.om-edge-{state}");
+                format!(
+                    "{edge},\n\
+                     flowbox.om-flow > flowboxchild:focus-visible {edge},\n\
+                     flowbox.om-flow.om-keyboard {edge}:hover,\n\
+                     flowbox.om-flow.om-keyboard {edge}.om-selected:hover {{\n  \
+                     border-left: 4px solid {hue};\n  padding-left: 11px;\n}}"
+                )
+            })
+            .join("\n\n");
 
         format!(
             r#"
@@ -436,7 +537,7 @@ dropdown.om-sort > button {{
 
 .om-card:hover {{
   border-color: @om_accent;
-  background-color: shade(@om_raised, 1.08);
+  background-color: shade(@om_raised, {card_lit});
 }}
 
 /* The ring and the check say a card is ticked. The fill only backs them up,
@@ -447,12 +548,12 @@ dropdown.om-sort > button {{
    its own text. */
 .om-card.om-selected {{
   border-color: @om_accent;
-  background-color: mix(@om_raised, @om_accent, 0.10);
+  background-color: mix(@om_raised, @om_accent, {card_ticked});
   box-shadow: inset 0 0 0 2px @om_accent;
 }}
 
 .om-card.om-selected:hover {{
-  background-color: mix(@om_raised, @om_accent, 0.12);
+  background-color: mix(@om_raised, @om_accent, {card_ticked_lit});
 }}
 
 /* A muted theme accent cannot carry the highlight on its own, so once
@@ -475,11 +576,21 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 
 .om-tag {{
   font-size: 0.75rem;
-  font-weight: 600;
-  padding: 1px 8px 1px 6px;
+  font-weight: 700;
+  padding: 1px 7px;
   border-radius: 999px;
   background-color: alpha(@om_fg, 0.10);
   color: @om_fg;
+}}
+
+/* The one chip among the tags that is not a tag: "new", on a repository
+   found since the last look. It is an outline with nothing in it, so that it
+   is not read as one of them, and the pixel of border comes off the padding
+   to leave it the size of the others. */
+.om-tag.new {{
+  padding: 0 6px;
+  background-color: transparent;
+  border: 1px solid @om_dim;
 }}
 
 /* The quick-tag toggles live in the header, so each rule is also written at
@@ -524,25 +635,12 @@ window.omarepos headerbar button.om-quick-tag:checked {{
   padding: 0 10px;
 }}
 
-.om-card.om-dirty {{
-  border-left: 3px solid {yellow};
-  padding-left: 12px;
-}}
-
-.om-card.om-error {{
-  border-left: 3px solid {red};
-  padding-left: 12px;
-}}
+{edges}
 
 .om-name {{
   font-weight: 700;
   font-size: 1.02rem;
   color: @om_fg;
-}}
-
-.om-path {{
-  font-size: 0.75rem;
-  color: @om_dim;
 }}
 
 .om-meta {{
@@ -555,16 +653,105 @@ window.omarepos headerbar button.om-quick-tag:checked {{
   color: @om_fg;
 }}
 
-.om-pill {{
+/* A card is grey for as long as its repository wants nothing. Colour is
+   kept for what is unfinished there and for trouble, and it is on the words
+   themselves, with nothing behind them: the rules that give a hue come
+   after these, fitted to the card. */
+.om-where,
+.om-who,
+.om-caption {{
   font-size: 0.75rem;
-  font-weight: 700;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background-color: alpha(@om_fg, 0.10);
+  color: @om_dim;
+}}
+
+/* A detached HEAD is written as a branch is, for now. `.om-branch.detached`
+   has no rule of its own, and is the name one would go by. */
+.om-branch {{
+  font-family: monospace;
+  font-size: 0.82rem;
+  font-weight: 600;
   color: @om_fg;
 }}
 
-{pills}
+.om-tree {{
+  font-family: monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: @om_fg;
+}}
+
+/* A tree with nothing to count says so in a word, and a word goes back to
+   the font of the text around it. */
+.om-tree.word {{
+  font-family: inherit;
+  font-weight: 400;
+  color: @om_dim;
+}}
+
+.om-out,
+.om-in,
+.om-bad {{
+  font-size: 0.82rem;
+  font-weight: 700;
+}}
+
+.om-in {{
+  color: @om_fg;
+}}
+
+.om-arrow {{
+  font-size: 0.82rem;
+  color: @om_dim;
+}}
+
+{inks}
+
+.om-age {{
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: @om_dim;
+}}
+
+.om-subject {{
+  font-size: 0.82rem;
+  color: @om_fg;
+}}
+
+.om-flag {{
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 4px;
+  background-color: {red};
+  color: {flag};
+}}
+
+/* What the card draws for itself it draws in the colour its widget has
+   here, so a change of theme repaints it as it does a label, with nothing
+   in the code to hear of it. */
+.om-glyph {{
+  color: @om_dim;
+}}
+
+.om-pulse {{
+  color: @om_fg;
+}}
+
+separator.om-rule {{
+  background-color: @om_border;
+  min-height: 1px;
+}}
+
+/* A key that acts on the card, drawn as the cap of one. The letter is
+   centred by its label: there is no property for it here. */
+.om-key {{
+  font-family: monospace;
+  font-size: 0.75rem;
+  color: @om_dim;
+  border: 1px solid @om_border;
+  border-radius: 3px;
+  min-width: 14px;
+}}
 
 .om-dot {{
   border-radius: 999px;
@@ -602,7 +789,7 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card {{
   outline: 2px solid @om_fg;
   outline-offset: 2px;
   border-color: @om_fg;
-  background-color: shade(@om_raised, 1.30);
+  background-color: shade(@om_raised, {card_focused});
 }}
 
 /* While the keyboard is driving, hover says nothing useful — the pointer is
@@ -614,7 +801,7 @@ flowbox.om-flow.om-keyboard .om-card:hover {{
 }}
 
 flowbox.om-flow.om-keyboard .om-card.om-selected:hover {{
-  background-color: mix(@om_raised, @om_accent, 0.10);
+  background-color: mix(@om_raised, @om_accent, {card_ticked});
   border-color: @om_accent;
 }}
 
@@ -629,7 +816,44 @@ flowbox.om-flow.om-has-selection > flowboxchild:focus-visible .om-card:not(.om-s
 
 flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
   outline-color: @om_accent;
-  background-color: mix(@om_raised, @om_accent, 0.12);
+  background-color: mix(@om_raised, @om_accent, {card_ticked_lit});
+}}
+
+/* A card has two layers in the one place and shows one of them. At rest it
+   is the short one, `om-less`. The long one, `om-more`, is shown where the
+   card is being acted on: with `om-keys` on the card the keyboard is on, and
+   with `om-enter` on the filter's top hit while the filter is typed in. They
+   change places by opacity, which leaves the layout alone, so nothing in the
+   grid moves when the keyboard does.
+
+   In this order. The keyboard is in the filter or on a card and never both,
+   and should the two rules meet all the same, they agree on the layer. */
+.om-card .om-more,
+.om-card .om-keys,
+.om-card .om-enter {{
+  opacity: 0;
+}}
+
+.om-card .om-less {{
+  opacity: 1;
+}}
+
+flowbox.om-flow > flowboxchild:focus-visible .om-card .om-more,
+flowbox.om-flow > flowboxchild:focus-visible .om-card .om-keys {{
+  opacity: 1;
+}}
+
+flowbox.om-flow > flowboxchild:focus-visible .om-card .om-less {{
+  opacity: 0;
+}}
+
+flowbox.om-flow.om-typing .om-card.om-top-hit .om-more,
+flowbox.om-flow.om-typing .om-card.om-top-hit .om-enter {{
+  opacity: 1;
+}}
+
+flowbox.om-flow.om-typing .om-card.om-top-hit .om-less {{
+  opacity: 0;
 }}
 
 .om-statusbar {{
@@ -809,9 +1033,13 @@ popover.menu contents, popover contents {{
             dim = p.fg_dim,
             border = p.border,
             accent = p.accent,
-            yellow = p.yellow,
             red = p.red,
+            flag = hex(flag),
             stepped_back = STEPPED_BACK,
+            card_lit = CARD_LIT,
+            card_focused = CARD_FOCUSED,
+            card_ticked = CARD_TICKED,
+            card_ticked_lit = CARD_TICKED_LIT,
             row_lit = ROW_LIT,
             row_selected = ROW_SELECTED,
         )
@@ -1023,6 +1251,15 @@ mod tests {
             self.value(selector, property).parse().expect("a number")
         }
 
+        /// Where the first rule for exactly this selector stands in the
+        /// sheet. Of two rules that weigh the same, the later one wins.
+        fn place(&self, selector: &str) -> usize {
+            self.rules
+                .iter()
+                .position(|(written, _, _)| written == selector)
+                .unwrap_or_else(|| panic!("no rule for `{selector}`"))
+        }
+
         /// A colour expression, as GTK resolves it.
         fn eval(&self, expr: &str) -> Rgba {
             let expr = expr.trim();
@@ -1056,7 +1293,11 @@ mod tests {
                     let lerp = |a: f64, b: f64| a + (b - a) * by;
                     (lerp(from.0, to.0), lerp(from.1, to.1), lerp(from.2, to.2), lerp(from.3, to.3))
                 }
-                ("shade", [colour, by]) => shade(self.eval(colour), factor(by)),
+                ("shade", [colour, by]) => {
+                    let (r, g, b, alpha) = self.eval(colour);
+                    let (r, g, b) = shade((r, g, b), factor(by));
+                    (r, g, b, alpha)
+                }
                 _ => panic!("`{expr}` is not a colour this test can read"),
             }
         }
@@ -1078,49 +1319,6 @@ mod tests {
         }
         out.push(list[start..].trim());
         out
-    }
-
-    /// GTK's `shade()`: the colour taken to hue, lightness and saturation,
-    /// the last two multiplied, and brought back.
-    fn shade((r, g, b, alpha): Rgba, factor: f64) -> Rgba {
-        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-        let lightness = (max + min) / 2.0;
-        let (hue, saturation) = if max == min {
-            (0.0, 0.0)
-        } else {
-            let spread = max - min;
-            let saturation =
-                if lightness > 0.5 { spread / (2.0 - max - min) } else { spread / (max + min) };
-            let sixth = if max == r {
-                (g - b) / spread + if g < b { 6.0 } else { 0.0 }
-            } else if max == g {
-                (b - r) / spread + 2.0
-            } else {
-                (r - g) / spread + 4.0
-            };
-            (sixth / 6.0, saturation)
-        };
-        let lightness = (lightness * factor).clamp(0.0, 1.0);
-        let saturation = (saturation * factor).clamp(0.0, 1.0);
-        let upper = if lightness < 0.5 {
-            lightness * (1.0 + saturation)
-        } else {
-            lightness + saturation - lightness * saturation
-        };
-        let lower = 2.0 * lightness - upper;
-        let channel = |turn: f64| {
-            let turn = turn.rem_euclid(1.0);
-            if turn < 1.0 / 6.0 {
-                lower + (upper - lower) * 6.0 * turn
-            } else if turn < 0.5 {
-                upper
-            } else if turn < 2.0 / 3.0 {
-                lower + (upper - lower) * (2.0 / 3.0 - turn) * 6.0
-            } else {
-                lower
-            }
-        };
-        (channel(hue + 1.0 / 3.0), channel(hue), channel(hue - 1.0 / 3.0), alpha)
     }
 
     /// One colour drawn over another. GTK blends the encoded values, not
@@ -1250,7 +1448,16 @@ mod tests {
         (classes, elements(selector).len())
     }
 
-    const PILLS: [&str; 6] = ["branch", "clean", "dirty", "ahead", "behind", "danger"];
+    /// What a card writes or draws in the foreground or in a hue.
+    const WRITTEN: [&str; 11] = [
+        ".om-branch", ".om-tree", ".om-tree.work", ".om-tree.bad", ".om-out", ".om-in",
+        ".om-bad", ".om-arrow.out", ".om-arrow.bad", ".om-subject", ".om-pulse",
+    ];
+    /// And in the theme's dim.
+    const MUTED: [&str; 8] = [
+        ".om-where", ".om-tree.word", ".om-arrow", ".om-age", ".om-who", ".om-caption",
+        ".om-key", ".om-glyph",
+    ];
     const REFS: [&str; 5] = ["local", "current", "remote", "tag", "head"];
     const LETTERS: [&str; 4] = ["added", "deleted", "renamed", "modified"];
 
@@ -1366,7 +1573,9 @@ color15 = "#bcc0cc"
 
         // The shades it does not name are not invented.
         assert_eq!([&palette.bg_raised, &palette.bg_sunken], ["#eff1f5", "#eff1f5"]);
-        assert_eq!(palette.fg_dim, "#4c4f69");
+        // Small print is the foreground at seven tenths on the page, here as
+        // in every theme.
+        assert_eq!(palette.fg_dim, "#7d8093");
     }
 
     /// The order is Omarchy's: `mode`, `theme_type`, a `light.mode` file, the
@@ -1451,7 +1660,9 @@ color15 = "#bcc0cc"
         assert_eq!((palette.bg.as_str(), palette.fg.as_str()), ("#111111", "#eeeeee"));
         assert_eq!(palette.red, "#aa0000");
         assert_eq!([&palette.bg_raised, &palette.bg_sunken], ["#444444", "#000000"]);
-        assert_eq!(palette.fg_dim, "#cccccc");
+        // Not `light_fg`: small print is made from the foreground and the
+        // page, whatever lighter foreground a theme names.
+        assert_eq!(palette.fg_dim, "#acacac");
         assert_eq!([&palette.magenta, &palette.yellow], ["#800080", "#ff8800"]);
 
         // A value that is not a colour passes the turn to the next name, and
@@ -1497,7 +1708,7 @@ brown = "#743d1e"
             [&palette.bg, &palette.bg_raised, &palette.bg_sunken],
             ["#05182e", "#0a2540", "#020c17"]
         );
-        assert_eq!([&palette.fg, &palette.fg_dim], ["#f6dcac", "#a7c9c6"]);
+        assert_eq!([&palette.fg, &palette.fg_dim], ["#f6dcac", "#aea186"]);
         assert_eq!([&palette.border, &palette.accent], ["#2a6b78", "#faa968"]);
         assert_eq!(
             [&palette.red, &palette.yellow, &palette.green],
@@ -1644,59 +1855,128 @@ brown = "#743d1e"
         notes.check();
     }
 
-    /// The pills are what the grid is looked at for, and each drew its hue
-    /// on a wash of that hue laid over whatever the card was doing: 1.66:1
-    /// for "dirty" on a flexoki-light card at rest, and 1.04 for "held back"
-    /// on a kanagawa card that was ticked and had the focus.
+    /// What a card has to say it writes straight on itself, in the foreground,
+    /// in the theme's dim or in a hue. Nothing is behind the words but the
+    /// card, and the card changes colour under them, so everything on it is
+    /// measured on each colour it takes, and on a card that has stepped back.
+    /// The hues are fitted to all of those: the theme's yellow as it stands
+    /// would be 1.58:1 on a ticked flexoki-light card under the pointer.
+    ///
+    /// The one fill is the flag's, the theme's red as it stands, and what
+    /// gives way there is the text.
     #[test]
-    fn a_pill_reads_on_its_fill_whatever_state_its_card_is_in() {
-        let mut pills = Measured::new("a pill on its card", AA);
-        for palette in palettes() {
-            let sheet = Sheet::of(&palette);
-            for (state, rule) in CARD_STATES {
-                let card = sheet.solid(rule, "background-color");
-                for class in PILLS {
-                    let pill = format!(".om-pill.{class}");
-                    let fill = over(sheet.colour(&pill, "background-color"), card);
-                    let text = sheet.solid(&pill, "color");
-                    pills.add(&palette, &format!("{class}, {state}"), ratio(text, fill));
-                }
-            }
-        }
-        pills.check();
-    }
-
-    /// On a card that has stepped back a pill is faded with the rest of it.
-    /// Its text is fitted to that as well, and where a palette cannot manage
-    /// it the text is the plain foreground: there is nothing more to give,
-    /// and such a pill is held to the floor instead.
-    #[test]
-    fn a_pill_reads_on_a_card_that_has_stepped_back_or_is_in_the_plain_foreground() {
-        let mut pills = Measured::new("a pill on a card that has stepped back", AA);
-        let mut plain = Measured::new("a pill in the plain foreground, stepped back", FLOOR);
+    fn what_a_card_says_reads_whatever_state_the_card_is_in() {
+        let mut written = Measured::new("what a card writes in the foreground or a hue", AA);
+        let mut muted = Measured::new("what a card writes in the theme's dim", FLOOR);
+        let mut flags = Measured::new("a flag's text on its red", AA);
         for palette in palettes() {
             let sheet = Sheet::of(&palette);
             let page = sheet.solid("flowbox.om-flow", "background-color");
-            let card = sheet.solid(".om-card", "background-color");
-            let opacity = sheet.number(STEPS_BACK, "opacity");
-            for class in PILLS {
-                let pill = format!(".om-pill.{class}");
-                let fill = over(sheet.colour(&pill, "background-color"), card);
-                let text = sheet.solid(&pill, "color");
-                let seen = ratio(faded(text, opacity, page), faded(fill, opacity, page));
-                if text == sheet.solid(".om-pill", "color") {
-                    plain.add(&palette, class, seen);
-                } else {
-                    pills.add(&palette, class, seen);
+            let back = sheet.number(STEPS_BACK, "opacity");
+            // A card that has stepped back is a card at rest: the pointer and
+            // the focus bring it forward again.
+            let mut states: Vec<(&str, Solid, f64)> = CARD_STATES
+                .iter()
+                .map(|&(state, rule)| (state, sheet.solid(rule, "background-color"), 1.0))
+                .collect();
+            states.push(("stepped back", sheet.solid(".om-card", "background-color"), back));
+            for (state, card, opacity) in states {
+                let on_card = |rule: &str| {
+                    let text = sheet.solid(rule, "color");
+                    ratio(faded(text, opacity, page), faded(card, opacity, page))
+                };
+                for rule in WRITTEN {
+                    written.add(&palette, &format!("{rule}, {state}"), on_card(rule));
+                }
+                for rule in MUTED {
+                    muted.add(&palette, &format!("{rule}, {state}"), on_card(rule));
+                }
+            }
+
+            let text = sheet.solid(".om-flag", "color");
+            let red = sheet.solid(".om-flag", "background-color");
+            flags.add(&palette, "", ratio(text, red));
+            let seen = ratio(faded(text, back, page), faded(red, back, page));
+            flags.add(&palette, "stepped back", seen);
+        }
+        written.check();
+        muted.check();
+        flags.check();
+    }
+
+    /// A card has two layers in one place and shows one of them: the short
+    /// one at rest, and the long one where the keyboard is, or on the filter's
+    /// top hit while the filter is typed in. And its left edge is its state,
+    /// on the card the keyboard is on as on any other. Both come down to which
+    /// rule wins, which is a matter of weight and then of order.
+    #[test]
+    fn the_card_under_the_keyboard_shows_its_other_layer_and_keeps_its_edge() {
+        let palette = Palette::fallback();
+        let sheet = Sheet::of(&palette);
+        let focused = "flowbox.om-flow > flowboxchild:focus-visible .om-card";
+        let top_hit = "flowbox.om-flow.om-typing .om-card.om-top-hit";
+        let rank = |selector: &str| (weight(selector), sheet.place(selector));
+        let shown = |card: &str, layer: &str| sheet.number(&format!("{card} {layer}"), "opacity");
+
+        let at_rest = [".om-less", ".om-more", ".om-keys", ".om-enter"];
+        assert_eq!(at_rest.map(|layer| shown(".om-card", layer)), [1.0, 0.0, 0.0, 0.0]);
+        let with_the_focus = [".om-less", ".om-more", ".om-keys"];
+        assert_eq!(with_the_focus.map(|layer| shown(focused, layer)), [0.0, 1.0, 1.0]);
+        let as_top_hit = [".om-less", ".om-more", ".om-enter"];
+        assert_eq!(as_top_hit.map(|layer| shown(top_hit, layer)), [0.0, 1.0, 1.0]);
+
+        // Rest, the focus, the top hit, in that order. And of a layer the
+        // focus rule sets, a rule that says otherwise has to lose to it, as
+        // rest does. The top hit's would win, and agrees.
+        let more = |card: &str| sheet.place(&format!("{card} .om-more"));
+        assert!(more(".om-card") < more(focused) && more(focused) < more(top_hit));
+        for layer in with_the_focus {
+            let lit = format!("{focused} {layer}");
+            for (selector, property, value) in &sheet.rules {
+                if property == "opacity" && selector.ends_with(layer) {
+                    let agrees = value == sheet.value(&lit, "opacity");
+                    assert!(agrees || rank(selector) < rank(&lit), "`{selector}` undoes the focus");
                 }
             }
         }
-        pills.check();
-        plain.check();
+
+        // `border-color` is all four sides. A rule that sets it on a card has
+        // to lose to the card's edge, or be written again with the edge's
+        // class on the card, which then outweighs it: the focus rule is.
+        let edges =
+            [("trouble", &palette.red), ("work", &palette.yellow), ("out", &palette.accent)];
+        for (state, hue) in edges {
+            let edge = format!(".om-card.om-edge-{state}");
+            assert_eq!(sheet.value(&edge, "border-left"), format!("4px solid {hue}"));
+            let lit = format!("{focused}.om-edge-{state}");
+            assert_eq!(sheet.value(&lit, "border-left"), sheet.value(&edge, "border-left"));
+            for (rule, property, _) in &sheet.rules {
+                let card = rule.rsplit(' ').next().unwrap_or_default();
+                if property == "border-color" && card.contains(".om-card") {
+                    let again = rule.replacen(".om-card", &edge, 1);
+                    let kept =
+                        sheet.rules.iter().any(|(s, p, _)| *s == again && p == "border-left");
+                    assert!(kept || rank(rule) < rank(&edge), "`{rule}` recolours `{edge}`");
+                }
+            }
+        }
     }
 
-    /// The names of branches and tags in the graph were drawn the way the
-    /// pills were, on washes of up to 30%: 1.78:1 for a tag on rose-pine.
+    /// The card that wore pills is gone, and the rules written for it go with
+    /// it. A rule that nothing wears is still worked out and loaded at every
+    /// change of theme, and reads as a class there is to use.
+    #[test]
+    fn no_rule_is_left_for_what_a_card_no_longer_wears() {
+        let sheet = Sheet::of(&Palette::fallback());
+        for gone in [".om-pill", ".om-path", ".om-dirty", ".om-error"] {
+            let left = sheet.rules.iter().any(|(selector, _, _)| selector.contains(gone));
+            assert!(!left, "a rule is left for `{gone}`");
+        }
+    }
+
+    /// The names of branches and tags in the graph were each drawn in a theme
+    /// colour on a wash of that colour, up to 30% of it: 1.78:1 for a tag on
+    /// rose-pine.
     #[test]
     fn a_ref_label_reads_on_its_fill_whatever_state_its_row_is_in() {
         let mut labels = Measured::new("a ref label in its row", AA);
@@ -1732,9 +2012,10 @@ brown = "#743d1e"
     }
 
     /// Making everything the foreground colour would pass every test above.
-    /// The colours are how a pill is told from the one beside it without
-    /// reading it, so a hue that can be read is left exactly as the theme
-    /// has it, and one that cannot is moved no further than it must be.
+    /// The colours are how work that is not committed is told from commits
+    /// that are not pushed, and both from trouble, without reading a word, so
+    /// a hue that can be read is left exactly as the theme has it, and one
+    /// that cannot is moved no further than it must be.
     #[test]
     fn a_hue_that_can_be_read_is_left_alone() {
         let retro = &palettes()[0];
@@ -1743,15 +2024,16 @@ brown = "#743d1e"
 
         let sheet = Sheet::of(retro);
         let colour = |rule: &str| sheet.value(rule, "color").to_string();
-        assert_eq!(colour(".om-pill.branch"), retro.accent);
-        assert_eq!(colour(".om-pill.ahead"), retro.cyan);
+        assert_eq!(colour(".om-out"), retro.accent);
         assert_eq!(colour(".om-ref.tag"), retro.yellow);
         assert_eq!(colour(".om-status.modified"), retro.yellow);
+        // A flag's red is never moved. Its text is what is fitted.
+        assert_eq!(sheet.value(".om-flag", "background-color"), retro.red);
 
-        // "clean" is #028391 there, which was 2.82:1 on its fill. It is
-        // moved, and stops short of the foreground.
-        let clean = colour(".om-pill.clean");
-        assert!(clean != retro.green && clean != retro.fg, "{clean}");
+        // The red is #f85525 there, which is 3.77:1 on a ticked card under
+        // the pointer. It is moved, and stops short of the foreground.
+        let bad = colour(".om-bad");
+        assert!(bad != retro.red && bad != retro.fg, "{bad}");
     }
 
     /// The figure the labels are fitted to, held against values that are
@@ -1798,13 +2080,7 @@ brown = "#743d1e"
     #[test]
     fn a_toggle_in_the_header_shows_that_it_is_on() {
         let sheet = Sheet::of(&Palette::fallback());
-        let place = |selector: &str| {
-            sheet
-                .rules
-                .iter()
-                .position(|(written, _, _)| written == selector)
-                .unwrap_or_else(|| panic!("no rule for `{selector}`"))
-        };
+        let place = |selector: &str| sheet.place(selector);
         let button = |state: &str| format!("window.omarepos headerbar button{state}");
         let chip = |state: &str| format!("window.omarepos headerbar button.om-quick-tag{state}");
 
