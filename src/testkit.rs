@@ -132,6 +132,83 @@ pub fn commit_file(repo: &Path, file: &str, body: &str, message: &str) {
     git(repo, &["commit", "-q", "-m", message]);
 }
 
+/// Like `git`, with both of a commit's clocks set to `when`, in seconds since
+/// 1970: for a fixture whose history has to have happened on chosen days.
+pub fn git_at(dir: &Path, when: i64, args: &[&str]) -> String {
+    let stamp = format!("@{when} +0000");
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_DATE", &stamp)
+        .env("GIT_COMMITTER_DATE", &stamp)
+        .output()
+        .expect("git runs");
+    if !out.status.success() {
+        panic!(
+            "fixture git {:?} at {when} in {} failed:\n{}\n{}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A commit of nothing by `who`, a name and an address, at `when`. A test of
+/// history needs a commit to be there, to be somebody's and to be so old, and
+/// no file has to change for that.
+pub fn commit_as(repo: &Path, who: (&str, &str), when: i64, message: &str) {
+    let (name, email) = (format!("user.name={}", who.0), format!("user.email={}", who.1));
+    let commit = ["-c", &name, "-c", &email, "commit", "-q", "--allow-empty", "-m", message];
+    git_at(repo, when, &commit);
+}
+
+/// A commit of nothing for each of `times`, oldest first, on top of whatever
+/// `branch` holds and all by `who`. They go in through `git fast-import`, so
+/// that a history of hundreds costs about what one `git commit` does.
+pub fn commit_run(repo: &Path, branch: &str, who: (&str, &str), times: &[i64]) {
+    let branch = format!("refs/heads/{branch}");
+    let (grown, _) = try_git(repo, &["rev-parse", "--verify", "-q", &branch]);
+    let mut stream = String::new();
+    for (i, when) in times.iter().enumerate() {
+        let message = format!("run {i}");
+        let who = format!("{} <{}> {when} +0000", who.0, who.1);
+        stream.push_str(&format!("commit {branch}\nauthor {who}\ncommitter {who}\n"));
+        stream.push_str(&format!("data {}\n{message}\n", message.len()));
+        // Only the first says what it stands on, and only when the branch is
+        // there already. The ones after it follow the one before, and a
+        // branch fast-import is told no start for is begun from nothing.
+        if i == 0 && grown {
+            stream.push_str(&format!("from {branch}^0\n"));
+        }
+        stream.push('\n');
+    }
+
+    use std::io::Write;
+    let mut import = Command::new("git")
+        .current_dir(repo)
+        .args(["fast-import", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git runs");
+    // Written whole before anything is read back. `--quiet` leaves it nothing
+    // to say unless it stops, and a pipe closed early shows below as a failure.
+    let _ = import.stdin.take().expect("a pipe to write to").write_all(stream.as_bytes());
+    let out = import.wait_with_output().expect("git runs");
+    if !out.status.success() {
+        panic!(
+            "fixture git fast-import in {} failed:\n{}\n{}",
+            repo.display(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// A remote and two clones of it: `remote.git` (bare), `seed` (somebody else,
 /// who pushes) and `work` (the repository under test). One commit on `main`,
 /// upstream set.

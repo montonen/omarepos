@@ -1,6 +1,7 @@
 //! Repository discovery and inspection via libgit2.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,89 @@ pub struct Commit {
     pub author: String,
     pub when: i64,
     pub short_id: String,
+    /// Written under the identity this repository is configured to commit
+    /// as, where that can be told: see [`Activity::split`].
+    pub mine: bool,
+    /// On no remote: nothing a remote-tracking branch points at reaches it.
+    /// [`RepoInfo::unpushed`] says how many such commits there are, and a
+    /// number cannot say whether the commit a card names is one of them.
+    ///
+    /// It comes from the walk that makes that count, so it is false wherever
+    /// the count was not made either: in a bare repository, and where the
+    /// walk failed, which `history_unreadable` says.
+    pub unpushed: bool,
+}
+
+impl Commit {
+    /// What a card says of `commit`. Whose it is and whether it is anywhere
+    /// else are not things a commit knows of itself.
+    fn of(commit: &git2::Commit<'_>, mine: bool, unpushed: bool) -> Commit {
+        Commit {
+            summary: commit.summary().ok().flatten().unwrap_or("").trim().to_string(),
+            author: commit.author().name().unwrap_or("unknown").to_string(),
+            when: commit.time().seconds(),
+            short_id: short(&commit.id()),
+            mine,
+            unpushed,
+        }
+    }
+}
+
+/// How many days of history a card draws.
+pub const ACTIVITY_DAYS: usize = 28;
+
+/// What has been committed lately, for the card to draw.
+///
+/// A card had the newest commit and nothing behind it, and that cannot tell
+/// the last commit of a busy week from the only one this year, or the user's
+/// own work from a colleague's.
+///
+/// It is counted over HEAD and the tip of its upstream together, each commit
+/// once. A checkout that is behind has not gone quiet, which is what
+/// [`RepoInfo::upstream_when`] is there to say as well.
+//
+// The card that draws this is being written alongside it. Until that reads
+// these fields, nothing outside the tests does.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Default)]
+pub struct Activity {
+    /// Commits per day as `[mine, others]`, oldest first, the last 24 hours
+    /// last. [`ACTIVITY_DAYS`] long, or empty when history could not be read:
+    /// a walk that broke off has not found the rest of the month quiet, and
+    /// an empty list cannot be drawn as if it had. `reached`, `week` and
+    /// `people` are not readings then either.
+    ///
+    /// A day is 24 hours counted back from the moment of the scan and not a
+    /// date on a calendar, so that no time zone comes into it. Which day a
+    /// commit falls in is said by its author's clock: work that was rebased
+    /// this morning was not written this morning. A commit dated after the
+    /// scan, by a clock that runs ahead, is counted in the last day.
+    pub days: Vec<[u32; 2]>,
+    /// How many of those days, counting back from now, the walk reached
+    /// before it hit its limit of commits, or the edge of a shallow clone,
+    /// which is as far as its commits go. [`ACTIVITY_DAYS`] when it reached
+    /// them all. Days it did not reach are unknown, which is not the same as
+    /// quiet: what is counted on one of them is what the walk happened to
+    /// read of it, so at least that many were committed, and a zero there is
+    /// only nothing read.
+    pub reached: usize,
+    /// Commits in the last seven days, and how many different people made
+    /// them, going by the address each was written under. Both are lower
+    /// bounds where `reached` is less than seven.
+    pub week: u32,
+    pub people: usize,
+    /// Whether "mine" could be told from "others" at all. Mine is what was
+    /// written under the `user.email` configured here, and that is worth
+    /// going by only when it is who git would record. With no address
+    /// configured, or with [`RepoInfo::identity_doubt`] set, every commit is
+    /// counted under others and no [`Commit`] is `mine`: one colour for
+    /// everybody, rather than a colleague's month drawn as the user's own.
+    pub split: bool,
+    /// The newest commits on HEAD, newest first, at most three: the last
+    /// commit and the two before it, in the order `git log` lists them. What
+    /// the upstream has on top of HEAD is counted in `days` and is not named
+    /// here, because it is not what is checked out.
+    pub recent: Vec<Commit>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +186,10 @@ pub struct RepoInfo {
     /// draws the first few; the `lang:` filter has to see all of them.
     pub langs: Vec<LangShare>,
     pub last_commit: Option<Commit>,
+    /// What has been committed lately. The first of the commits it names is
+    /// `last_commit`. In a repository that could not be read (`error`) it is
+    /// left as empty as the rest, and [`Activity::days`] says what that means.
+    pub activity: Activity,
     /// `user.name` and `user.email` as libgit2 reads the configuration for
     /// this directory. `includeIf gitdir:` makes this differ per repository,
     /// and a misconfigured rule is otherwise silent until something is pushed
@@ -297,24 +385,27 @@ pub fn open_here(path: &Path) -> Result<Repository, String> {
 /// remote does not have its whole history walked on every scan.
 pub const UNPUSHED_CAP: usize = 1000;
 
-/// How many commits reachable from `from` are on no remote, counted up to
-/// `cap`. This is `git rev-list --count <from> --not --remotes`.
+/// The commits reachable from `from` that are on no remote, up to `cap` of
+/// them. This is `git rev-list <from> --not --remotes`, and how many it finds
+/// is the count a card shows.
+///
+/// They are handed back and not only counted so that the commits a card names
+/// can be marked from this walk, without a second one for the same answer.
 ///
 /// A walk that fails is an error and not a count. It used to be a count both
 /// ways: a walk that could not start was zero, and one that broke off at a
 /// commit it could not read counted the failure itself as a commit.
-fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> Result<usize, git2::Error> {
+fn on_no_remote(
+    repo: &Repository,
+    from: git2::Oid,
+    cap: usize,
+) -> Result<Vec<git2::Oid>, git2::Error> {
     let mut walk = repo.revwalk()?;
     walk.push(from)?;
     // No remote-tracking refs at all is not an error: then nothing is hidden,
     // and everything counts.
     let _ = walk.hide_glob("refs/remotes/*");
-    let mut count = 0;
-    for step in walk.take(cap) {
-        step?;
-        count += 1;
-    }
-    Ok(count)
+    walk.take(cap).collect()
 }
 
 /// What became of one configured root.
@@ -667,13 +758,22 @@ fn submodule_paths(repo: &Repository) -> Result<HashSet<PathBuf>, git2::Error> {
 /// Inspect one repository. Never fails, and never passes a read that failed
 /// off as a reading of zero: a repository that cannot be read at all says so in
 /// [`RepoInfo::error`], a working tree that cannot in [`WorkTree::unreadable`],
-/// and commits that cannot be counted in [`RepoInfo::history_unreadable`].
+/// and commits that cannot be counted in [`RepoInfo::history_unreadable`]. A
+/// month of history that cannot be walked leaves [`Activity::days`] empty,
+/// which no card can draw as a quiet one.
 ///
 /// It used to promise the first and do none of the three for anything past
 /// opening the repository. An index libgit2 refused came out as a clean tree
 /// with no files in it, and a newest commit lost to a power cut as "no commits
 /// yet", on the one screen meant to show which repositories need looking at.
 pub fn inspect(path: &Path) -> RepoInfo {
+    inspect_at(path, now())
+}
+
+/// [`inspect`], told what time it is. The days of an [`Activity`] are counted
+/// back from the moment of the scan, and a test of them has to be able to say
+/// when that was.
+fn inspect_at(path: &Path, now: i64) -> RepoInfo {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -701,6 +801,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
         tracked_files: 0,
         langs: Vec::new(),
         last_commit: None,
+        activity: Activity::default(),
         identity: None,
         identity_doubt: None,
         error: None,
@@ -721,6 +822,11 @@ pub fn inspect(path: &Path) -> RepoInfo {
         return info;
     }
 
+    // The commits HEAD and its upstream are on, which is where the count of
+    // what has been committed lately starts from.
+    let mut head_commit = None;
+    let mut upstream_commit = None;
+
     match repo.head() {
         Ok(head) => {
             if repo.head_detached().unwrap_or(false) {
@@ -734,19 +840,10 @@ pub fn inspect(path: &Path) -> RepoInfo {
             }
             match head.peel_to_commit() {
                 Ok(commit) => {
-                    let author = commit.author();
-                    info.last_commit = Some(Commit {
-                        summary: commit
-                            .summary()
-                            .ok()
-                            .flatten()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string(),
-                        author: author.name().unwrap_or("unknown").to_string(),
-                        when: commit.time().seconds(),
-                        short_id: short(&commit.id()),
-                    });
+                    // Whose it is and whether it is on a remote are not known
+                    // yet. Both are filled in where `activity` is.
+                    info.last_commit = Some(Commit::of(&commit, false, false));
+                    head_commit = Some(commit.id());
                 }
                 // HEAD names a commit and the commit is not there, or is not
                 // one: git calls this a bad object and stops. The card went on
@@ -782,6 +879,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
                     .map(|commit| commit.time().seconds());
                 let local = branch.get().target();
                 let remote = upstream.get().target();
+                upstream_commit = remote;
                 if let (Some(local), Some(remote)) = (local, remote) {
                     match repo.graph_ahead_behind(local, remote) {
                         Ok((ahead, behind)) => {
@@ -799,11 +897,17 @@ pub fn inspect(path: &Path) -> RepoInfo {
         info.local_branches = branches.count();
     }
 
+    // The commits `unpushed` counts, kept so that the ones a card names can
+    // be told from the ones a remote has.
+    let mut unpushed = Vec::new();
     if !info.bare && !info.unborn {
         let head = repo.head().ok().and_then(|head| head.target());
         if let Some(head) = head {
             match on_no_remote(&repo, head, UNPUSHED_CAP) {
-                Ok(count) => info.unpushed = count,
+                Ok(found) => {
+                    info.unpushed = found.len();
+                    unpushed = found;
+                }
                 Err(err) => {
                     info.history_unreadable.get_or_insert_with(|| err.message().to_string());
                 }
@@ -815,7 +919,7 @@ pub fn inspect(path: &Path) -> RepoInfo {
                     continue;
                 }
                 match on_no_remote(&repo, tip, 1) {
-                    Ok(0) => {}
+                    Ok(found) if found.is_empty() => {}
                     Ok(_) => info.stray_branches += 1,
                     Err(err) => {
                         info.history_unreadable.get_or_insert_with(|| err.message().to_string());
@@ -844,6 +948,10 @@ pub fn inspect(path: &Path) -> RepoInfo {
     info.remote = remote_url.as_deref().map(prettify_remote);
     info.web = remote_url.as_deref().and_then(web_url);
 
+    // The address that makes a commit the user's own, where there is one to
+    // go by: see [`Activity::split`].
+    let mut me = None;
+
     // libgit2's reading of `user.*`, which is git's own for the plain case and
     // for `includeIf gitdir:` and `onbranch:`. This comment used to say it was
     // "the same answer `git config` gives", and the card printed it as "Commits
@@ -856,13 +964,18 @@ pub fn inspect(path: &Path) -> RepoInfo {
     if let Ok(config) = repo.config().and_then(|mut c| c.snapshot()) {
         let name = config.get_str("user.name").ok().map(str::to_string);
         let email = config.get_str("user.email").ok().map(str::to_string);
-        info.identity = match (name, email) {
+        info.identity = match (name, email.clone()) {
             (Some(name), Some(email)) => Some(format!("{name} <{email}>")),
             (Some(name), None) => Some(name),
             (None, Some(email)) => Some(email),
             (None, None) => None,
         };
         info.identity_doubt = identity_doubt(&config, &|name| std::env::var_os(name).is_some());
+        // Only where it is the address git would record, and an empty one is
+        // nobody's.
+        if info.identity_doubt.is_none() {
+            me = email.filter(|email| !email.is_empty());
+        }
     }
     // Nothing here says which credential helper a fetch will use. The card
     // used to, from two exact config keys and a host cut out of the tidied-up
@@ -871,6 +984,14 @@ pub fn inspect(path: &Path) -> RepoInfo {
     // which asks none, and missed any helper set for a path, a user or a
     // wildcard host. git asks every helper that matches, in order, and offers
     // no way to list them short of running it.
+
+    info.activity = activity_at(&repo, head_commit, upstream_commit, me.as_deref(), &unpushed, now);
+    // `last_commit` is the first of the commits named there. By now it is
+    // known whose it is and whether a remote has it.
+    if let (Some(last), Some(newest)) = (info.last_commit.as_mut(), info.activity.recent.first()) {
+        last.mine = newest.mine;
+        last.unpushed = newest.unpushed;
+    }
 
     if !info.bare {
         // No `update_index`, on purpose. Without it libgit2 never writes back
@@ -975,6 +1096,167 @@ pub fn inspect(path: &Path) -> RepoInfo {
     }
 
     info
+}
+
+/// Seconds since 1970, which is how a commit is dated.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+const DAY: i64 = 86_400;
+
+/// The days at the end of [`Activity::days`] that `week` and `people` are
+/// counted over.
+const WEEK: usize = 7;
+
+/// The most commits a scan counts in one repository. Every repository is
+/// walked at every scan, and four weeks of a busy one is thousands of commits
+/// read to draw twenty-eight bars. A walk that stops here says how far it
+/// got, in [`Activity::reached`], and the days it never read are not passed
+/// off as days on which nothing was committed.
+const ACTIVITY_COMMITS: usize = 200;
+
+/// How many commits a card names: the last one and the two before it.
+const RECENT_COMMITS: usize = 3;
+
+/// How many whole days before `now` it was at `when`. A moment after `now` is
+/// today's: a commit dated by a clock that runs ahead is recent work, and
+/// there is no day after the last for it to go in.
+fn days_ago(now: i64, when: i64) -> usize {
+    usize::try_from(now.saturating_sub(when) / DAY).unwrap_or(0)
+}
+
+/// What has been committed lately, as of `now`: see [`Activity`] for what
+/// each figure means. `head` and `upstream` are the commits the two are on,
+/// `me` is the address that makes a commit the user's own, where there is one
+/// to go by, and `unpushed` is what [`on_no_remote`] found from HEAD.
+///
+/// The time is handed in because the days are counted back from it, and a
+/// test of them has to be able to say when that was.
+fn activity_at(
+    repo: &Repository,
+    head: Option<git2::Oid>,
+    upstream: Option<git2::Oid>,
+    me: Option<&str>,
+    unpushed: &[git2::Oid],
+    now: i64,
+) -> Activity {
+    let mine = |commit: &git2::Commit<'_>| {
+        me.is_some_and(|me| commit.author().email_bytes().eq_ignore_ascii_case(me.as_bytes()))
+    };
+    let mut activity = Activity { split: me.is_some(), ..Activity::default() };
+
+    // A walk of its own, from HEAD alone: what the upstream has on top is not
+    // checked out, and a card names what is. However far it gets is kept. A
+    // commit that could be read is worth naming when the one under it could
+    // not, and when the count below came to nothing.
+    let _ = newest_first(repo, head, |commit| {
+        let unpushed = unpushed.contains(&commit.id());
+        activity.recent.push(Commit::of(commit, mine(commit), unpushed));
+        activity.recent.len() < RECENT_COMMITS
+    });
+
+    let mut days = vec![[0u32; 2]; ACTIVITY_DAYS];
+    let mut people = HashSet::new();
+    let mut counted = 0;
+    let mut reached = ACTIVITY_DAYS;
+    let walked = newest_first(repo, head.into_iter().chain(upstream), |commit| {
+        // The first commit that is not counted, either for being older than
+        // anything a card draws or for being one more than a scan counts.
+        // Whatever the walk has not handed over by now was committed no later
+        // than this one, and written no later than it was committed, so
+        // every day after this one's has been read in full.
+        //
+        // That takes a commit to be no older than what it stands on. One
+        // that is, made by a clock that was set back or given an old date on
+        // purpose, hides what is under it from this walk exactly as it does
+        // from `git log --since`.
+        let committed = days_ago(now, commit.time().seconds());
+        if committed >= ACTIVITY_DAYS || counted == ACTIVITY_COMMITS {
+            reached = reached.min(committed);
+            return false;
+        }
+        counted += 1;
+        // The edge of a shallow clone, or of a graft: the commit names a
+        // parent and libgit2 lists none, because the history was cut there
+        // on purpose. What lies under it was not read, any more than what
+        // lies past the limit, and its own day may hold more than this one
+        // commit.
+        if commit.parent_count() == 0 && commit.header_field_bytes("parent").is_ok() {
+            reached = reached.min(committed);
+        }
+
+        let author = commit.author();
+        let written = days_ago(now, author.when().seconds());
+        if written < ACTIVITY_DAYS {
+            let whose = if mine(commit) { 0 } else { 1 };
+            days[ACTIVITY_DAYS - 1 - written][whose] += 1;
+        }
+        if written < WEEK {
+            // The address, however it is capitalised, and the name where a
+            // commit was written under no address at all.
+            let email = author.email_bytes();
+            let who = if email.is_empty() { author.name_bytes() } else { email };
+            people.insert(String::from_utf8_lossy(who).to_lowercase());
+        }
+        true
+    });
+    // A walk that broke off has counted some of these days and has not found
+    // the rest of them quiet, so nothing is said about any.
+    if walked.is_ok() {
+        activity.week = days[ACTIVITY_DAYS - WEEK..].iter().map(|day| day[0] + day[1]).sum();
+        activity.people = people.len();
+        activity.days = days;
+        activity.reached = reached;
+    }
+    activity
+}
+
+/// Hand `each` the commits reachable from `tips`, newest first by the
+/// committer's clock and each of them once, for as long as it answers that it
+/// wants more. This is the order `git log` lists them in: of two committed in
+/// the same second, the one that was found first goes first.
+///
+/// libgit2 has a walk in this order, and this is not it. It marks every
+/// sorted walk limited, which is its word for reading all of the history
+/// before it hands over the first commit. Over the 48 repositories of one
+/// machine that came to 479 ms a scan, against 33 ms for a walk of this kind,
+/// and over a fixture of 100,000 commits it is 300 ms against half a
+/// millisecond: what this reads does not grow with what lies behind it. A
+/// commit is read when one of its children has been handed over and more was
+/// asked for, so a walk that is stopped has read the tips, what it handed
+/// over, the parents of all of that but the last, and nothing behind them.
+/// And a commit is all that is read: never a tree, never a diff.
+fn newest_first<'repo>(
+    repo: &'repo Repository,
+    tips: impl IntoIterator<Item = git2::Oid>,
+    mut each: impl FnMut(&git2::Commit<'repo>) -> bool,
+) -> Result<(), git2::Error> {
+    let mut seen = HashSet::new();
+    // Every commit read, in the order it was read, and the ones not handed
+    // over yet as (when committed, place in `read`). A heap gives up its
+    // largest, so the place is reversed for the earlier one to win a tie.
+    let mut read: Vec<git2::Commit<'repo>> = Vec::new();
+    let mut waiting = BinaryHeap::new();
+    let mut found: Vec<git2::Oid> = tips.into_iter().collect();
+    loop {
+        for id in found.drain(..) {
+            if seen.insert(id) {
+                let commit = repo.find_commit(id)?;
+                waiting.push((commit.time().seconds(), Reverse(read.len())));
+                read.push(commit);
+            }
+        }
+        let Some((_, Reverse(at))) = waiting.pop() else { return Ok(()) };
+        let commit = &read[at];
+        if !each(commit) {
+            return Ok(());
+        }
+        found.extend(commit.parent_ids());
+    }
 }
 
 /// The first thing in sight that outranks `user.name` and `user.email`, or
@@ -1834,5 +2116,613 @@ mod tests {
         let info = inspect(&dir);
         assert_eq!(info.remote, None);
         assert_eq!((info.ahead, info.unpushed), (0, 2), "no remote at all");
+    }
+
+    // ---- what has been committed lately ------------------------------------
+
+    const ANN: (&str, &str) = ("Ann Other", "ann@example.invalid");
+    const BEN: (&str, &str) = ("Ben Elsewhere", "ben@example.invalid");
+    /// Who the kit's git config commits as, and so whose commits are "mine"
+    /// in a fixture that configures nobody of its own.
+    const ME: (&str, &str) = ("Fixture", "fixture@example.invalid");
+
+    /// The moment these tests scan at, a long way ahead of the real clock.
+    /// Every commit that is meant to be counted is given its date by hand,
+    /// back from here. What a fixture commits without one, as `fleet()` does
+    /// its first, is dated by the real clock and so is older than anything a
+    /// card draws.
+    fn scan_time() -> i64 {
+        now() + 400 * DAY
+    }
+
+    /// A scan at `now`, held to what every scan promises: the commit a card
+    /// has always shown is the first of the ones it names.
+    fn scan(path: &Path, now: i64) -> RepoInfo {
+        let info = inspect_at(path, now);
+        assert_eq!(
+            format!("{:?}", info.last_commit.as_ref()),
+            format!("{:?}", info.activity.recent.first())
+        );
+        info
+    }
+
+    /// [`ACTIVITY_DAYS`] quiet days, but for `busy`: (days back from the scan,
+    /// `[mine, others]`).
+    fn days(busy: &[(usize, [u32; 2])]) -> Vec<[u32; 2]> {
+        let mut days = vec![[0, 0]; ACTIVITY_DAYS];
+        for (ago, count) in busy {
+            days[ACTIVITY_DAYS - 1 - ago] = *count;
+        }
+        days
+    }
+
+    /// What the commits a card names are called, newest first.
+    fn named(info: &RepoInfo) -> Vec<&str> {
+        info.activity.recent.iter().map(|commit| commit.summary.as_str()).collect()
+    }
+
+    /// The same, with whether each is on no remote.
+    fn marked(info: &RepoInfo) -> Vec<(&str, bool)> {
+        info.activity
+            .recent
+            .iter()
+            .map(|commit| (commit.summary.as_str(), commit.unpushed))
+            .collect()
+    }
+
+    #[test]
+    fn a_commit_is_counted_on_the_day_it_was_written_in_days_back_from_the_scan() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-days");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        // Seconds before the scan, oldest first, which is the order they have
+        // to be made in.
+        let made = [
+            40 * DAY,
+            // Twenty-eight days to the second is the twenty-ninth day back,
+            // and no card draws that one.
+            28 * DAY,
+            28 * DAY - 1,
+            27 * DAY,
+            27 * DAY - 1,
+            2 * DAY,
+            DAY + 1,
+            // Twenty-four hours to the second is yesterday's.
+            DAY,
+            DAY - 1,
+            60,
+            0,
+            // Dated after the scan, by an hour and by three days: a clock
+            // that runs ahead, or one that was set wrong. It is recent work
+            // all the same.
+            -3600,
+            -3 * DAY,
+        ];
+        for ago in made {
+            commit_as(&dir, ME, now - ago, &format!("{ago} s before the scan"));
+        }
+
+        let activity = scan(&dir, now).activity;
+        assert_eq!(
+            activity.days,
+            days(&[(27, [2, 0]), (26, [1, 0]), (2, [1, 0]), (1, [2, 0]), (0, [5, 0])])
+        );
+        assert_eq!(activity.reached, ACTIVITY_DAYS);
+        assert_eq!((activity.week, activity.people), (8, 1));
+
+        // And a scan that is not told the time takes the real one.
+        let dir = scratch("activity-days-now");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ME, super::now() - 3 * DAY - 60, "three days ago by the real clock");
+        assert_eq!(inspect(&dir).activity.days, days(&[(3, [1, 0])]));
+    }
+
+    #[test]
+    fn work_that_was_made_again_today_is_counted_on_the_day_it_was_written() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-rebased");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ME, now - 3 * DAY, "under the branch");
+        // Ann's branch, rebased here an hour ago. The committer is the user
+        // and the committer's clock says today for all three of its commits.
+        // The author is still Ann, and her clock says forty days ago, ten
+        // and two.
+        let ann = format!("{} <{}>", ANN.0, ANN.1);
+        for (i, written) in [40 * DAY, 10 * DAY, 2 * DAY].into_iter().enumerate() {
+            let date = format!("@{} +0000", now - written);
+            let message = format!("written {} days ago", written / DAY);
+            let commit =
+                ["commit", "-q", "--allow-empty", "--author", &ann, "--date", &date, "-m", &message];
+            git_at(&dir, now - 3600 + i as i64, &commit);
+        }
+
+        let info = scan(&dir, now);
+        // The one written forty days ago is on no day a card draws. The walk
+        // goes by when a commit was committed, so it goes on past that one
+        // to the commit underneath. And whose a commit is goes by who wrote
+        // it: these are Ann's, whoever committed them, and she is the second
+        // of the week's two people.
+        assert_eq!(info.activity.days, days(&[(10, [0, 1]), (3, [1, 0]), (2, [0, 1])]));
+        assert_eq!((info.activity.week, info.activity.people), (2, 2));
+        assert_eq!(
+            named(&info),
+            ["written 2 days ago", "written 10 days ago", "written 40 days ago"]
+        );
+        // The name on a card has always been the author's, and how old the
+        // card says a commit is has always gone by when it was committed.
+        // Neither has changed.
+        let last = info.last_commit.expect("there are commits");
+        assert_eq!((last.author.as_str(), last.when, last.mine), ("Ann Other", now - 3598, false));
+    }
+
+    #[test]
+    fn the_users_own_commits_are_told_from_everybody_elses() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-mine");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ANN, now - 2 * DAY - 30, "ann, two days ago");
+        commit_as(&dir, ME, now - 2 * DAY - 20, "mine, two days ago");
+        // An address is the same address however it is capitalised.
+        let capitals = ("Fixture", "Fixture@Example.INVALID");
+        commit_as(&dir, capitals, now - 2 * DAY - 10, "mine, in capitals");
+        commit_as(&dir, BEN, now - DAY - 10, "ben, yesterday");
+        commit_as(&dir, ME, now - 60, "mine, just now");
+
+        let info = scan(&dir, now);
+        assert_eq!(info.identity.as_deref(), Some("Fixture <fixture@example.invalid>"));
+        assert_eq!(info.identity_doubt, None);
+        assert!(info.activity.split);
+        assert_eq!(info.activity.days, days(&[(2, [2, 1]), (1, [0, 1]), (0, [1, 0])]));
+        let whose: Vec<(&str, bool)> = info
+            .activity
+            .recent
+            .iter()
+            .map(|commit| (commit.summary.as_str(), commit.mine))
+            .collect();
+        assert_eq!(
+            whose,
+            [("mine, just now", true), ("ben, yesterday", false), ("mine, in capitals", true)]
+        );
+        assert!(info.last_commit.is_some_and(|commit| commit.mine));
+    }
+
+    #[test]
+    fn nobodys_commits_are_called_the_users_own_when_who_that_is_is_in_doubt() {
+        let _guard = isolate();
+        let now = scan_time();
+        let f = fleet("activity-doubt");
+        commit_as(&f.work, ME, now - DAY, "mine, by user.email");
+        commit_as(&f.work, ANN, now - 3600, "ann's");
+        let info = scan(&f.work, now);
+        assert!(info.activity.split);
+        assert_eq!(info.activity.days, days(&[(1, [1, 0]), (0, [0, 1])]));
+
+        // `author.email` outranks `user.email`: the address libgit2 read is
+        // not the one git would record, and a card that went by it would draw
+        // the user's commits as somebody else's and the other way round.
+        git(&f.work, &["config", "author.email", "author@elsewhere.example"]);
+        let info = scan(&f.work, now);
+        assert!(info.identity_doubt.is_some());
+        assert!(!info.activity.split);
+        assert_eq!(info.activity.days, days(&[(1, [0, 1]), (0, [0, 1])]));
+        assert!(info.activity.recent.iter().all(|commit| !commit.mine));
+        // Counted all the same, and still by two people.
+        assert_eq!((info.activity.week, info.activity.people), (2, 2));
+
+        // An address that is empty is nobody's, a commit written under none
+        // included.
+        git(&f.work, &["config", "--unset", "author.email"]);
+        git(&f.work, &["config", "user.email", ""]);
+        commit_as(&f.work, ("Nobody Inparticular", ""), now - 60, "no address");
+        let info = scan(&f.work, now);
+        assert_eq!(info.identity_doubt, None);
+        assert!(!info.activity.split);
+        assert_eq!(info.activity.days, days(&[(1, [0, 1]), (0, [0, 2])]));
+        assert!(info.activity.recent.iter().all(|commit| !commit.mine));
+
+        // And no `user.email` at all, which no fixture can be without: the
+        // kit's own configuration has one.
+        let repo = Repository::open(&f.work).unwrap();
+        let head = repo.head().unwrap().target();
+        let activity = activity_at(&repo, head, None, None, &[], now);
+        assert!(!activity.split);
+        assert_eq!(activity.days, days(&[(1, [0, 1]), (0, [0, 2])]));
+        assert!(activity.recent.iter().all(|commit| !commit.mine));
+    }
+
+    #[test]
+    fn a_week_is_its_commits_and_the_people_who_wrote_them() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-week");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        // Before the week, and seven days to the second is the eighth day
+        // back: both are counted on their days, and Ben is not one of the
+        // week's people.
+        commit_as(&dir, BEN, now - 9 * DAY, "ben, nine days ago");
+        commit_as(&dir, BEN, now - 7 * DAY, "ben, a second too early");
+        commit_as(&dir, ANN, now - 7 * DAY + 1, "ann, inside the week");
+        // One person, however her address is capitalised, in letters ASCII
+        // has no capitals for as well.
+        let (small, capitals) = ("åsa@example.invalid", "ÅSA@Example.Invalid");
+        commit_as(&dir, ("Åsa Påhittad", small), now - 4 * DAY - 120, "åsa");
+        commit_as(&dir, ("Åsa Påhittad", capitals), now - 4 * DAY - 60, "åsa, in capitals");
+        commit_as(&dir, ("Ann Other", "ANN@Example.Invalid"), now - 3 * DAY, "ann, in capitals");
+        // No address at all, and then the name has to do.
+        commit_as(&dir, ("Nobody Inparticular", ""), now - 2 * DAY, "no address");
+        commit_as(&dir, ("Nobody Inparticular", ""), now - 2 * DAY + 60, "no address, again");
+        commit_as(&dir, ("Somebody Else", ""), now - DAY, "no address, somebody else");
+        commit_as(&dir, ME, now - 60, "mine");
+
+        let activity = scan(&dir, now).activity;
+        assert_eq!(
+            activity.days,
+            days(&[
+                (9, [0, 1]),
+                (7, [0, 1]),
+                (6, [0, 1]),
+                (4, [0, 2]),
+                (3, [0, 1]),
+                (2, [0, 1]),
+                (1, [0, 2]),
+                (0, [1, 0]),
+            ])
+        );
+        assert_eq!((activity.week, activity.people), (8, 5));
+    }
+
+    #[test]
+    fn a_checkout_that_is_behind_has_not_gone_quiet() {
+        let _guard = isolate();
+        let now = scan_time();
+        let f = fleet("activity-behind");
+        // Somebody pushes, and this clone takes it.
+        commit_as(&f.seed, ANN, now - 5 * DAY, "shared");
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["pull", "-q", "--ff-only"]);
+        // They push twice more, and this clone only fetches.
+        commit_as(&f.seed, ANN, now - 2 * DAY, "theirs, two days ago");
+        commit_as(&f.seed, BEN, now - DAY, "theirs, yesterday");
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["fetch", "-q"]);
+
+        let info = scan(&f.work, now);
+        assert_eq!((info.ahead, info.behind), (0, 2));
+        // What both sides hold is there once.
+        assert_eq!(info.activity.days, days(&[(5, [0, 1]), (2, [0, 1]), (1, [0, 1])]));
+        assert_eq!((info.activity.week, info.activity.people), (3, 2));
+        // The commits a card names are the ones that are checked out.
+        assert_eq!(named(&info), ["shared", "first"]);
+
+        // Work of its own on top. Neither side holds the other now, and each
+        // commit is still counted once.
+        commit_as(&f.work, ME, now - 3600, "mine, an hour ago");
+        let info = scan(&f.work, now);
+        assert_eq!((info.ahead, info.behind), (1, 2));
+        assert_eq!(
+            info.activity.days,
+            days(&[(5, [0, 1]), (2, [0, 1]), (1, [0, 1]), (0, [1, 0])])
+        );
+        assert_eq!(named(&info), ["mine, an hour ago", "shared", "first"]);
+
+        // On no branch there is no upstream to be behind.
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        let info = scan(&f.work, now);
+        assert_eq!(info.activity.days, days(&[(5, [0, 1]), (0, [1, 0])]));
+    }
+
+    #[test]
+    fn a_walk_that_stops_at_its_limit_says_how_far_it_got() {
+        let _guard = isolate();
+        let now = scan_time();
+        // A commit an hour for `count` hours, oldest first, the newest a
+        // minute before the scan.
+        let hourly = |count: usize| -> Vec<i64> {
+            (0..count as i64).rev().map(|hours| now - hours * 3600 - 60).collect()
+        };
+        // Commits on each day, the last 24 hours first.
+        fn per_day(activity: &Activity) -> Vec<u32> {
+            activity.days.iter().rev().map(|day| day[0] + day[1]).collect()
+        }
+        let history = |name: &str, times: &[i64]| -> Activity {
+            let dir = scratch(name);
+            git(&dir, &["init", "-q", "-b", "main"]);
+            commit_run(&dir, "main", ANN, times);
+            scan(&dir, now).activity
+        };
+
+        // Fifty more than a scan counts. What it counted is eight whole days
+        // and the first eight hours of the ninth.
+        let activity = history("activity-limit", &hourly(ACTIVITY_COMMITS + 50));
+        let counted = per_day(&activity);
+        assert_eq!(counted[..8], [24; 8]);
+        assert_eq!(counted[8], 8, "the day it stopped in, as far as that was read");
+        assert_eq!(counted[9..], [0; ACTIVITY_DAYS - 9]);
+        assert_eq!(activity.reached, 8);
+        assert_eq!((activity.week, activity.people), (7 * 24, 1));
+        assert!(activity.days.iter().all(|day| day[0] == 0), "none of them is the user's");
+
+        // Exactly as many as a scan counts, and nothing under them that a
+        // card would draw: the limit was met and cut nothing off, so every
+        // day was reached.
+        let activity = history("activity-limit-met", &hourly(ACTIVITY_COMMITS));
+        assert_eq!(per_day(&activity).iter().sum::<u32>(), ACTIVITY_COMMITS as u32);
+        assert_eq!(activity.reached, ACTIVITY_DAYS);
+        let mut times = vec![now - 60 * DAY];
+        times.extend(hourly(ACTIVITY_COMMITS));
+        let activity = history("activity-limit-met-old", &times);
+        assert_eq!(per_day(&activity).iter().sum::<u32>(), ACTIVITY_COMMITS as u32);
+        assert_eq!(activity.reached, ACTIVITY_DAYS);
+
+        // One commit more, twelve days back. It is the newest that was not
+        // counted, and anything else that was not is older still, so the
+        // days between it and the rest are known to be quiet.
+        let mut times = vec![now - 12 * DAY - 60];
+        times.extend(hourly(ACTIVITY_COMMITS));
+        let activity = history("activity-limit-gap", &times);
+        assert_eq!(per_day(&activity).iter().sum::<u32>(), ACTIVITY_COMMITS as u32);
+        assert_eq!(activity.reached, 12);
+    }
+
+    #[test]
+    fn the_newest_commits_are_named_in_the_order_git_log_lists_them() {
+        let _guard = isolate();
+        let now = scan_time();
+        // The first three of `git log`, as the short ids a card shows.
+        fn git_log(dir: &Path) -> Vec<String> {
+            git(dir, &["log", "-3", "--format=%H"]).lines().map(|id| id[..7].to_string()).collect()
+        }
+        fn ids(info: &RepoInfo) -> Vec<String> {
+            info.activity.recent.iter().map(|commit| commit.short_id.clone()).collect()
+        }
+
+        // A branch that was worked on after the main line was last touched,
+        // and then merged: the two commits before the merge are both on its
+        // second parent's side.
+        let dir = scratch("activity-recent-merge");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ME, now - 10 * DAY, "root");
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        commit_as(&dir, ANN, now - 4 * DAY, "side, one");
+        commit_as(&dir, ANN, now - 2 * DAY, "side, two");
+        git(&dir, &["checkout", "-q", "main"]);
+        commit_as(&dir, ME, now - 5 * DAY, "main line");
+        git_at(&dir, now - DAY, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let info = scan(&dir, now);
+        assert_eq!(named(&info), ["merge side", "side, two", "side, one"]);
+        assert_eq!(ids(&info), git_log(&dir));
+        // A merge is a commit like any other: on its day, and its author's.
+        assert_eq!(
+            info.activity.days,
+            days(&[(10, [1, 0]), (5, [1, 0]), (4, [0, 1]), (2, [0, 1]), (1, [1, 0])])
+        );
+
+        // Everything in one second, which is how a script commits. Git lists
+        // a merge's first parent ahead of its second then, and what was found
+        // first ahead of what was found later.
+        let dir = scratch("activity-recent-ties");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let second = now - DAY;
+        commit_as(&dir, ME, second, "root");
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        commit_as(&dir, ANN, second, "side");
+        git(&dir, &["checkout", "-q", "main"]);
+        commit_as(&dir, ME, second, "main line");
+        git_at(&dir, second, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let info = scan(&dir, now);
+        assert_eq!(named(&info), ["merge side", "main line", "side"]);
+        assert_eq!(ids(&info), git_log(&dir));
+        commit_as(&dir, ME, second, "on top");
+        let info = scan(&dir, now);
+        assert_eq!(named(&info), ["on top", "merge side", "main line"]);
+        assert_eq!(ids(&info), git_log(&dir));
+
+        // It is the committer's clock that git goes by. The main line here
+        // was written before the side branch and committed after it, as a
+        // cherry-pick is, and is listed ahead of it.
+        let dir = scratch("activity-recent-committed");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ME, now - 10 * DAY, "root");
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        commit_as(&dir, ANN, now - 2 * DAY, "side");
+        git(&dir, &["checkout", "-q", "main"]);
+        let written = format!("@{} +0000", now - 9 * DAY);
+        let commit = ["commit", "-q", "--allow-empty", "--date", &written, "-m", "main line"];
+        git_at(&dir, now - DAY, &commit);
+        git_at(&dir, now - 3600, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let info = scan(&dir, now);
+        assert_eq!(named(&info), ["merge side", "main line", "side"]);
+        assert_eq!(ids(&info), git_log(&dir));
+
+        // Fewer than three commits, and then that is all of them.
+        let dir = scratch("activity-recent-two");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ME, now - 2 * DAY, "one");
+        commit_as(&dir, ME, now - DAY, "two");
+        assert_eq!(named(&scan(&dir, now)), ["two", "one"]);
+    }
+
+    #[test]
+    fn a_commit_that_is_on_no_remote_is_marked_as_one() {
+        let _guard = isolate();
+        let now = scan_time();
+        let f = fleet("activity-unpushed");
+        let info = scan(&f.work, now);
+        assert_eq!(marked(&info), [("first", false)], "level with its upstream");
+
+        commit_as(&f.work, ME, now - 2 * DAY, "one");
+        commit_as(&f.work, ME, now - DAY, "two");
+        let info = scan(&f.work, now);
+        assert_eq!((info.ahead, info.unpushed), (2, 2));
+        assert_eq!(marked(&info), [("two", true), ("one", true), ("first", false)]);
+        assert!(info.last_commit.is_some_and(|commit| commit.unpushed));
+
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        let info = scan(&f.work, now);
+        assert_eq!(marked(&info), [("two", false), ("one", false), ("first", false)]);
+        assert!(info.last_commit.is_some_and(|commit| !commit.unpushed));
+
+        // A branch that was never published, off one that was: no upstream to
+        // be ahead of, and its commit is on no remote all the same.
+        git(&f.work, &["checkout", "-q", "-b", "topic"]);
+        commit_as(&f.work, ME, now - 3600, "three");
+        let info = scan(&f.work, now);
+        assert_eq!((info.ahead, info.unpushed), (0, 1));
+        assert_eq!(marked(&info), [("three", true), ("two", false), ("one", false)]);
+
+        // The remote itself is not a clone with work to push. Nothing is
+        // counted there, and nothing is marked.
+        let info = scan(&f.remote, now);
+        assert!(info.bare);
+        assert_eq!(info.unpushed, 0);
+        assert_eq!(marked(&info), [("two", false), ("one", false), ("first", false)]);
+        assert_eq!(info.activity.days, days(&[(2, [1, 0]), (1, [1, 0])]));
+    }
+
+    #[test]
+    fn with_no_remote_every_commit_is_on_none() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-no-remote");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for ago in [4, 3, 2, 1] {
+            commit_as(&dir, ME, now - ago * DAY, &format!("{ago}d ago"));
+        }
+
+        let info = scan(&dir, now);
+        assert_eq!((info.remote.as_deref(), info.unpushed), (None, 4));
+        assert_eq!(marked(&info), [("1d ago", true), ("2d ago", true), ("3d ago", true)]);
+        // Nothing else about it needs a remote.
+        assert_eq!(
+            info.activity.days,
+            days(&[(4, [1, 0]), (3, [1, 0]), (2, [1, 0]), (1, [1, 0])])
+        );
+        assert_eq!(info.activity.reached, ACTIVITY_DAYS);
+
+        // More of them than are counted. The count stops at its cap, and the
+        // newest commits are among the ones it got to: the marks are taken
+        // from that walk, and it has to have started where a card does.
+        let dir = scratch("activity-no-remote-many");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let minutes = (0..UNPUSHED_CAP as i64 + 100).rev();
+        let times: Vec<i64> = minutes.map(|ago| now - 40 * DAY - ago * 60).collect();
+        commit_run(&dir, "main", ME, &times);
+        let info = scan(&dir, now);
+        assert_eq!(info.unpushed, UNPUSHED_CAP);
+        assert_eq!(marked(&info), [("run 1099", true), ("run 1098", true), ("run 1097", true)]);
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_has_had_a_quiet_month() {
+        let _guard = isolate();
+        let dir = scratch("activity-unborn");
+        git(&dir, &["init", "-q", "-b", "main"]);
+
+        let info = scan(&dir, scan_time());
+        assert!(info.unborn);
+        assert_eq!(info.error, None);
+        assert!(info.last_commit.is_none() && info.activity.recent.is_empty());
+        // Nothing was committed, and that is known: quiet, not unread.
+        assert_eq!(info.activity.days, days(&[]));
+        assert_eq!(info.activity.reached, ACTIVITY_DAYS);
+        assert_eq!((info.activity.week, info.activity.people), (0, 0));
+    }
+
+    #[test]
+    fn a_repository_nobody_has_touched_lately_is_quiet_and_still_names_its_commits() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-old");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for ago in [90, 60, 45, 29] {
+            commit_as(&dir, ME, now - ago * DAY, &format!("{ago}d ago"));
+        }
+
+        let info = scan(&dir, now);
+        assert_eq!(info.activity.days, days(&[]));
+        assert_eq!(info.activity.reached, ACTIVITY_DAYS);
+        assert_eq!((info.activity.week, info.activity.people), (0, 0));
+        assert_eq!(named(&info), ["29d ago", "45d ago", "60d ago"]);
+    }
+
+    #[test]
+    fn history_that_cannot_be_read_is_not_drawn_as_quiet() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-lost");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for ago in [5, 4, 3, 2, 1] {
+            commit_as(&dir, ME, now - ago * DAY, &format!("{ago}d ago"));
+        }
+        assert_eq!(scan(&dir, now).activity.days.len(), ACTIVITY_DAYS);
+        lose_object(&dir, "HEAD~3");
+
+        let info = scan(&dir, now);
+        assert_eq!(info.error, None);
+        // Nothing, rather than three days with a commit on them and
+        // twenty-five that are called quiet because the walk broke off.
+        assert_eq!(info.activity.days, Vec::<[u32; 2]>::new());
+        assert_eq!((info.activity.reached, info.activity.week, info.activity.people), (0, 0, 0));
+        // The commits it names were all read before the one that is gone.
+        assert_eq!(named(&info), ["1d ago", "2d ago", "3d ago"]);
+
+        // Gone from right under the newest, and that one is still named.
+        lose_object(&dir, "HEAD~1");
+        let info = scan(&dir, now);
+        assert_eq!(info.error, None);
+        assert_eq!(info.activity.days, Vec::<[u32; 2]>::new());
+        assert_eq!(named(&info), ["1d ago"]);
+
+        // A shallow clone stops short on purpose, and that is not damage. But
+        // what was committed before its one commit is not known to be
+        // nothing: the walk got as far as that commit's day and no further.
+        let f = fleet("activity-shallow");
+        commit_as(&f.seed, ANN, now - 3 * DAY, "three days ago");
+        commit_as(&f.seed, ANN, now - 2 * DAY, "two days ago");
+        git(&f.seed, &["push", "-q", "origin", "main"]);
+        let url = format!("file://{}", f.remote.display());
+        git(&f.root, &["clone", "-q", "--depth", "1", &url, "shallow"]);
+        let info = scan(&f.root.join("shallow"), now);
+        assert_eq!(info.activity.days, days(&[(2, [0, 1])]));
+        assert_eq!(info.activity.reached, 2);
+        assert_eq!(named(&info), ["two days ago"]);
+        // A history that really begins two days ago is another matter.
+        // Nothing is missing under a commit that names no parent.
+        let dir = scratch("activity-root");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, ANN, now - 2 * DAY, "the first there is");
+        let info = scan(&dir, now);
+        assert_eq!(info.activity.days, days(&[(2, [0, 1])]));
+        assert_eq!(info.activity.reached, ACTIVITY_DAYS);
+    }
+
+    #[test]
+    fn the_days_are_counted_without_reading_what_lies_behind_them() {
+        let _guard = isolate();
+        let now = scan_time();
+        let dir = scratch("activity-no-further");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        for ago in [50, 28, 2, 1] {
+            commit_as(&dir, ME, now - ago * DAY, &format!("{ago}d ago"));
+        }
+        // The oldest commit, which is nothing a card has any use for. A walk
+        // that read all of the history before it handed over any of it would
+        // stop here, and it is the reading of all of it that a count made in
+        // every repository at every scan cannot afford. This one stops at the
+        // commit above it, which is 28 days old to the second, and never asks
+        // what that stands on.
+        lose_object(&dir, "HEAD~3");
+
+        let info = scan(&dir, now);
+        assert_eq!(info.activity.days, days(&[(2, [1, 0]), (1, [1, 0])]));
+        assert_eq!(info.activity.reached, ACTIVITY_DAYS);
+        assert_eq!(named(&info), ["1d ago", "2d ago", "28d ago"]);
+        // The count of what is on no remote is another walk. With no remote
+        // to stop it short it does go that far back, and says that it could
+        // not.
+        assert!(info.history_unreadable.is_some());
     }
 }
