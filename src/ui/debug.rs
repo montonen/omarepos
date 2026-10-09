@@ -192,12 +192,20 @@ pub fn install(window: &adw::ApplicationWindow) {
     // screen (the sort order on the grid, the window on Contributions).
     let choose = gio::SimpleAction::new("choose", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
-    choose.connect_activate(move |_, n| {
+    choose.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
-        let Some(n) = n.and_then(|n| n.str()).and_then(|n| n.parse::<u32>().ok()) else { return };
-        match find_dropdown(window.upcast_ref()) {
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        // "2" is the third entry of the first drop-down on screen. A page
+        // with two of them names the one it means by its tooltip:
+        // "Time window=2".
+        let (which, n) = match wanted.rsplit_once('=') {
+            Some((which, n)) => (which, n),
+            None => ("", wanted),
+        };
+        let Ok(n) = n.parse::<u32>() else { return };
+        match find_dropdown(window.upcast_ref(), which) {
             Some(dropdown) => dropdown.set_selected(n),
-            None => note!("omarepos: no drop-down is on screen"),
+            None => note!("omarepos: no drop-down on screen says {which:?}"),
         }
     });
     window.add_action(&choose);
@@ -474,16 +482,18 @@ fn find_alert(widget: &gtk::Widget) -> Option<adw::AlertDialog> {
     last
 }
 
-fn find_dropdown(widget: &gtk::Widget) -> Option<gtk::DropDown> {
+fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
     if !widget.is_mapped() {
         return None;
     }
     if let Some(dropdown) = widget.downcast_ref::<gtk::DropDown>() {
-        return Some(dropdown.clone());
+        if dropdown.tooltip_text().unwrap_or_default().contains(says) {
+            return Some(dropdown.clone());
+        }
     }
     let mut child = widget.first_child();
     while let Some(current) = child {
-        if let Some(found) = find_dropdown(&current) {
+        if let Some(found) = find_dropdown(&current, says) {
             return Some(found);
         }
         child = current.next_sibling();

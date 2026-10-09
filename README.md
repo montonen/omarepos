@@ -806,6 +806,15 @@ local calendar days, bucketed at local midnight.
   counted once for each copy of it. A commit held by several checkouts of the
   same repository counts once, and two repositories with the same folder name
   stay two.
+- **All branches**, in the drop-down beside the time window, is the other
+  view: every branch a repository has, its own and the ones it has fetched, as
+  `git shortlog HEAD --branches --remotes` would. It shows the work on a
+  branch nobody has checked out, which the first view cannot, and it does
+  count a rewritten change once for each copy of it: after a squash merge the
+  branch's commits and the squash are both there until the branch is deleted
+  and pruned. The page says so while it is showing. Read it as who is busy
+  where, and take numbers from the first view. A page opens on the first view
+  every time.
 - A commit belongs to the day its author wrote it, not the day it was rebased
   or merged. One dated later than today is left out, and the page says how many.
 - Authors are keyed by e-mail, so one person with two spellings of their name

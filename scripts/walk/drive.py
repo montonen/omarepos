@@ -13,7 +13,7 @@ compositor, so the desktop it runs on is not disturbed.
     drive.py press LABEL        "!LABEL" reaches a button that is not on screen
     drive.py row "Title=value"  a settings row: on/off/toggle, a number, text
     drive.py pick LIST:ROW      select a list row; "LIST:ROW!" activates it
-    drive.py choose N           the first drop-down on screen
+    drive.py choose N           the first drop-down on screen; "Tooltip=N" names one
     drive.py respond ID         answer a question dialog (save, remove, cancel)
     drive.py paint              run every draw function on screen
     drive.py dump [FILTER]      what is on screen, as text

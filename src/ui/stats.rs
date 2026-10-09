@@ -9,10 +9,13 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
-use crate::stats::{self, Author, Contributions, RepoCommits};
+use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
 use crate::ui::{day_window, key_color, relative_time};
 
 const RANGES: [(&str, usize); 3] = [("Last 7 days", 7), ("Last 14 days", 14), ("Last 30 days", 30)];
+/// The two views, the one there has always been first.
+const VIEWS: [(&str, Branches); 2] =
+    [("Checked-out branches", Branches::CheckedOut), ("All branches", Branches::All)];
 const BAR_H: i32 = 46;
 const SPARK_W: f64 = 11.0;
 
@@ -24,14 +27,9 @@ pub type OnOpen = Rc<dyn Fn(PathBuf, String, Option<String>)>;
 pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::NavigationPage {
     // The subtitle also says which commits are counted. The totals mean one
     // thing for the branch that is checked out and another for every branch
-    // there is, and the page gave no way to tell which it was showing.
-    let counted = if repos.len() == 1 { "checked-out branch" } else { "checked-out branches" };
-    let title = adw::WindowTitle::new("Contributions", &format!("{scope} · {counted}"));
-    title.set_tooltip_text(Some(
-        "Counts the branch each repository has checked out and the branch it tracks.\n\
-         Other branches are left out, so that work which was squashed, rebased or amended\n\
-         is not counted once for every copy of it.",
-    ));
+    // there is, and the page gave no way to tell which it was showing. It is
+    // written by `load`, which knows which was asked for.
+    let title = adw::WindowTitle::new("Contributions", &scope);
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
@@ -39,6 +37,16 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     range.add_css_class("om-sort");
     range.set_tooltip_text(Some("Time window"));
     header.pack_end(&range);
+
+    // Which branches: the line of history each repository has checked out,
+    // or every branch it has. Two views of one thing and a switch between
+    // them, because neither can be both: the first counts a change once and
+    // cannot see a branch nobody has checked out, the second sees every
+    // branch and counts a change once for each copy of it.
+    let view = gtk::DropDown::from_strings(&VIEWS.map(|(label, _)| label));
+    view.add_css_class("om-sort");
+    view.set_tooltip_text(Some("Which branches are counted"));
+    header.pack_end(&view);
 
     let spinner = gtk::Spinner::new();
     spinner.start();
@@ -84,13 +92,13 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     body.append(&stack);
     body.append(&status);
 
-    let view = adw::ToolbarView::new();
-    view.add_top_bar(&header);
-    view.set_content(Some(&body));
+    let frame = adw::ToolbarView::new();
+    frame.add_top_bar(&header);
+    frame.set_content(Some(&body));
 
     let page = adw::NavigationPage::builder()
         .title("Contributions")
-        .child(&view)
+        .child(&frame)
         .build();
 
     // A generation counter so a slow run that the user has already moved on
@@ -98,7 +106,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     let generation = Rc::new(RefCell::new(0u64));
     let repos = Rc::new(repos);
 
-    let load: Rc<dyn Fn(usize)> = {
+    let load: Rc<dyn Fn()> = {
         let generation = Rc::clone(&generation);
         let repos = Rc::clone(&repos);
         let stack = stack.clone();
@@ -106,7 +114,17 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
         let empty = empty.clone();
         let status = status.clone();
         let progress = progress.clone();
-        Rc::new(move |days: usize| {
+        let (range, view) = (range.clone(), view.clone());
+        let title = title.clone();
+        Rc::new(move || {
+            let days = RANGES.get(range.selected() as usize).map_or(7, |(_, days)| *days);
+            let branches = VIEWS
+                .get(view.selected() as usize)
+                .map_or(Branches::CheckedOut, |(_, branches)| *branches);
+            let (says, means) = counted(branches, repos.len());
+            title.set_subtitle(&format!("{scope} · {says}"));
+            title.set_tooltip_text(Some(means));
+
             let mine = {
                 let mut counter = generation.borrow_mut();
                 *counter += 1;
@@ -116,7 +134,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
             status.set_label("Reading history…");
             status.set_tooltip_text(None);
 
-            let rx = stats::spawn((*repos).clone(), day_window(days));
+            let rx = stats::spawn((*repos).clone(), day_window(days), branches);
             let generation = Rc::clone(&generation);
             let stack = stack.clone();
             let content = content.clone();
@@ -150,6 +168,19 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
                                 if !result.errors.is_empty() {
                                     content.append(&not_counted(&result.errors));
                                 }
+                                // Said on the page and not only in a tooltip:
+                                // these figures are not the other view's, and
+                                // read as a tally they are too high.
+                                if result.branches == Branches::All {
+                                    let (_, means) = counted(result.branches, result.repos_scanned);
+                                    let note = gtk::Label::builder()
+                                        .label(means)
+                                        .xalign(0.0)
+                                        .wrap(true)
+                                        .build();
+                                    note.add_css_class("om-meta");
+                                    content.append(&note);
+                                }
                                 content.append(&overview(&result));
                                 for author in &result.authors {
                                     content.append(&author_row(author, &result, &on_open));
@@ -170,19 +201,31 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
         })
     };
 
-    {
+    for dropdown in [&range, &view] {
         let load = Rc::clone(&load);
-        range.connect_selected_notify(move |dropdown| {
-            let days = RANGES
-                .get(dropdown.selected() as usize)
-                .map(|(_, d)| *d)
-                .unwrap_or(7);
-            load(days);
-        });
+        dropdown.connect_selected_notify(move |_| load());
     }
-    load(RANGES[0].1);
+    load();
 
     page
+}
+
+/// What a view counts: in a word or two for the subtitle, and in full.
+fn counted(branches: Branches, repos: usize) -> (&'static str, &'static str) {
+    match branches {
+        Branches::CheckedOut => (
+            if repos == 1 { "checked-out branch" } else { "checked-out branches" },
+            "Counts the branch each repository has checked out and the branch it tracks.\n\
+             Other branches are left out, so that work which was squashed, rebased or amended\n\
+             is not counted once for every copy of it.",
+        ),
+        Branches::All => (
+            "all branches",
+            "Counts every branch, a repository's own and the ones it has fetched. \
+             Work that was squashed, rebased or amended is counted once for each copy of it, \
+             so read this as who is busy where, and not as a tally.",
+        ),
+    }
 }
 
 fn status_line(result: &Contributions) -> String {
@@ -749,6 +792,7 @@ mod tests {
                 day_labels: vec![String::new(); 7],
                 day_titles: vec![String::new(); 7],
             },
+            branches: stats::Branches::CheckedOut,
             authors: Vec::new(),
             per_day_total: vec![0; 7],
             repos_scanned: scanned,

@@ -8,6 +8,13 @@
 //! its remote-tracking ref long after the change has landed. Walking every ref
 //! counted each of them.
 //!
+//! That is the view the page opens on, and it cannot show the work on a branch
+//! that nobody has checked out. So there is a second, asked for by a switch on
+//! the page ([`Branches::All`]): every branch, a repository's own and the ones
+//! it has fetched, with each copy of a rewritten change counted. It is the
+//! same walk from more tips and takes nothing out. The first is the one to
+//! believe a number from; the second is for seeing who is busy where.
+//!
 //! A commit belongs to the day it was written, by its author's clock, because
 //! it is its author who is credited with it. The committer's clock says when
 //! this copy of it was made, which after a rebase is another day and may be
@@ -126,9 +133,26 @@ impl Author {
     }
 }
 
+/// Which of a repository's branches are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Branches {
+    /// The commit HEAD is on and the branch it tracks: the line of history
+    /// the top of this file describes, in which a change is counted once.
+    #[default]
+    CheckedOut,
+    /// Every branch there is, a repository's own and the ones it has fetched.
+    /// It shows the work that is on a branch nobody has checked out here,
+    /// which the other cannot, and it counts a change that was squashed,
+    /// rebased or amended once for each copy of it, which the other was made
+    /// not to. An indication of who is doing what, and not a tally.
+    All,
+}
+
 #[derive(Debug, Clone)]
 pub struct Contributions {
     pub window: Window,
+    /// The branches these figures are of.
+    pub branches: Branches,
     pub authors: Vec<Author>,
     pub per_day_total: Vec<usize>,
     pub repos_scanned: usize,
@@ -153,7 +177,7 @@ pub enum Event {
     Done(Box<Contributions>),
 }
 
-pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Event> {
+pub fn spawn(repos: Vec<PathBuf>, window: Window, branches: Branches) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
 
     std::thread::spawn(move || {
@@ -165,7 +189,7 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
             // A repository is read to the end before any of it is counted, so
             // one that fails part of the way through is left out whole and
             // named, not counted as far as it got.
-            match collect(path, &window, &tally.counted) {
+            match collect(path, &window, branches, &tally.counted) {
                 Ok(found) => tally.add(path, &name, found),
                 Err(err) => errors.push(format!("{name}: {err}")),
             }
@@ -178,7 +202,7 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window) -> async_channel::Receiver<Eve
             }
         }
 
-        let _ = tx.send_blocking(Event::Done(Box::new(tally.finish(window, total, errors))));
+        let _ = tx.send_blocking(Event::Done(Box::new(tally.finish(window, branches, total, errors))));
     });
 
     rx
@@ -298,7 +322,13 @@ impl Tally {
         }
     }
 
-    fn finish(self, window: Window, repos_scanned: usize, errors: Vec<String>) -> Contributions {
+    fn finish(
+        self,
+        window: Window,
+        branches: Branches,
+        repos_scanned: usize,
+        errors: Vec<String>,
+    ) -> Contributions {
         // One address, several spellings of the name: the row is titled with
         // the one most of the commits carry. It used to be whichever the walk
         // met first, which changed with the order the repositories were read
@@ -326,6 +356,7 @@ impl Tally {
         });
         Contributions {
             window,
+            branches,
             authors,
             per_day_total: self.per_day_total,
             repos_scanned,
@@ -412,7 +443,12 @@ struct Found {
 
 /// Read one repository to the end, counting nothing. The error is what libgit2
 /// said, for the page to show beside the repository's name.
-fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Found, String> {
+fn collect(
+    path: &Path,
+    window: &Window,
+    branches: Branches,
+    counted: &HashSet<Oid>,
+) -> Result<Found, String> {
     let said = |e: git2::Error| e.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
     let mut walk = repo.revwalk().map_err(said)?;
@@ -425,17 +461,41 @@ fn collect(path: &Path, window: &Window, counted: &HashSet<Oid>) -> Result<Found
         return Ok(found);
     }
 
-    // HEAD and its upstream, and nothing else: see the top of the file. HEAD
-    // used to be walked only when no branch could be, so a commit made on a
-    // detached HEAD was counted nowhere.
-    let Some(head) = head_commit(&repo).map_err(said)? else {
-        return Ok(found);
-    };
-    walk.push(head).map_err(said)?;
+    let head = head_commit(&repo).map_err(said)?;
     let mut rewritten = HashSet::new();
-    if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
-        walk.push(upstream).map_err(said)?;
-        rewritten = rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
+    match branches {
+        // HEAD and its upstream, and nothing else: see the top of the file.
+        // HEAD used to be walked only when no branch could be, so a commit
+        // made on a detached HEAD was counted nowhere.
+        Branches::CheckedOut => {
+            let Some(head) = head else {
+                return Ok(found);
+            };
+            walk.push(head).map_err(said)?;
+            if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
+                walk.push(upstream).map_err(said)?;
+                rewritten =
+                    rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
+            }
+        }
+        // `git log HEAD --branches --remotes`. HEAD besides the branches,
+        // for the commits a detached one alone leads to; and the branches
+        // whether or not HEAD is on a commit, since a repository that has
+        // fetched and checked nothing out has them all the same. Not tags
+        // and not the stash: neither is anybody's branch.
+        //
+        // Nothing is taken out for being a copy. Telling which of two
+        // commits is the other one rewritten is done above for one pair of
+        // tips, where there is an answer; across every branch there is not,
+        // and whoever asks for this view has been told what it counts.
+        Branches::All => {
+            if let Some(head) = head {
+                walk.push(head).map_err(said)?;
+            }
+            for glob in ["refs/heads/*", "refs/remotes/*"] {
+                walk.push_glob(glob).map_err(said)?;
+            }
+        }
     }
 
     // Who is who, as `git shortlog` would have it: the `.mailmap` in the work
@@ -817,12 +877,114 @@ mod tests {
 
     /// What the page would show for these repositories over the last week.
     fn contributions(paths: &[&Path]) -> Contributions {
-        let rx = spawn(paths.iter().map(|p| p.to_path_buf()).collect(), window(7));
+        counted(paths, Branches::CheckedOut)
+    }
+
+    /// And what it would show with every branch read.
+    fn all_branches(paths: &[&Path]) -> Contributions {
+        counted(paths, Branches::All)
+    }
+
+    fn counted(paths: &[&Path], branches: Branches) -> Contributions {
+        let rx = spawn(paths.iter().map(|p| p.to_path_buf()).collect(), window(7), branches);
         loop {
             if let Event::Done(result) = rx.recv_blocking().expect("the worker reported") {
                 return *result;
             }
         }
+    }
+
+    /// What `git log` counts with every branch asked for.
+    const EVERYTHING: [&str; 3] = ["HEAD", "--branches", "--remotes"];
+
+    /// The other view: every branch there is, one's own and the ones that
+    /// were fetched, as `git shortlog HEAD --branches --remotes` has it.
+    #[test]
+    fn every_branch_is_counted_when_every_branch_is_asked_for() {
+        let _guard = isolate();
+        let f = fleet("stats-all-branches");
+        // A branch of one's own that is not checked out and was never pushed.
+        git(&f.work, &["checkout", "-q", "-b", "feature"]);
+        commit_file(&f.work, "f1.txt", &lines(10), "feature one");
+        commit_file(&f.work, "f2.txt", &lines(10), "feature two");
+        git(&f.work, &["checkout", "-q", "main"]);
+        // Somebody else's, which is here only as what was fetched.
+        git(&f.seed, &["checkout", "-q", "-b", "theirs"]);
+        commit_as(&f.seed, BOB, "t.txt", &lines(7), "their work");
+        git(&f.seed, &["push", "-q", "-u", "origin", "theirs"]);
+        git(&f.work, &["fetch", "--quiet"]);
+
+        // The view there has always been leaves both out, and still does.
+        let checked_out = contributions(&[&f.work]);
+        assert_eq!(checked_out.branches, Branches::CheckedOut);
+        assert_eq!(totals(&checked_out), (1, 1, 0), "the first commit and nothing else");
+
+        let all = all_branches(&[&f.work]);
+        assert_eq!(all.branches, Branches::All);
+        assert_eq!(by_author(&all), shortlog(&f.work, &EVERYTHING));
+        assert_eq!(totals(&all), git_totals(&f.work, &EVERYTHING));
+        assert_eq!(totals(&all), (4, 28, 0), "the first, two on the feature branch, and theirs");
+        assert_eq!(by_author(&all).get(BOB.1), Some(&1));
+    }
+
+    /// What the first view was made to avoid and the second accepts: a change
+    /// that exists in two copies is counted for each of them. It is the price
+    /// of seeing the branches at all, and the page says so.
+    #[test]
+    fn with_every_branch_a_change_is_counted_once_for_each_copy_of_it() {
+        let _guard = isolate();
+        let f = fleet("stats-all-copies");
+        git(&f.work, &["checkout", "-q", "-b", "topic"]);
+        commit_file(&f.work, "a.txt", &lines(5), "topic a");
+        commit_file(&f.work, "b.txt", &lines(5), "topic b");
+        git(&f.work, &["checkout", "-q", "main"]);
+        git(&f.work, &["merge", "-q", "--squash", "topic"]);
+        git(&f.work, &["commit", "-q", "-m", "Add the topic"]);
+
+        assert_eq!(totals(&contributions(&[&f.work])), (2, 11, 0), "the first, and what landed");
+        let all = all_branches(&[&f.work]);
+        assert_eq!(totals(&all), git_totals(&f.work, &EVERYTHING));
+        assert_eq!(totals(&all), (4, 21, 0), "and the two it was made from, a second time");
+    }
+
+    /// A commit is one commit however many branches lead to it.
+    #[test]
+    fn with_every_branch_a_commit_on_several_of_them_is_counted_once() {
+        let _guard = isolate();
+        let f = fleet("stats-all-shared");
+        commit_file(&f.work, "shared.txt", &lines(4), "shared");
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        git(&f.work, &["branch", "one"]);
+        git(&f.work, &["branch", "two"]);
+        git(&f.work, &["checkout", "-q", "-b", "three"]);
+        commit_file(&f.work, "three.txt", &lines(3), "three");
+        git(&f.work, &["checkout", "-q", "main"]);
+
+        let all = all_branches(&[&f.work]);
+        assert_eq!(totals(&all), git_totals(&f.work, &EVERYTHING));
+        assert_eq!(totals(&all), (3, 8, 0), "the first, the shared one once, and three's own");
+    }
+
+    /// HEAD is read whether or not it is on a branch, and the branches are
+    /// read whether or not HEAD is on a commit.
+    #[test]
+    fn with_every_branch_a_head_on_no_branch_and_branches_under_no_head_are_read() {
+        let _guard = isolate();
+        let f = fleet("stats-all-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        commit_file(&f.work, "d.txt", &lines(2), "on no branch");
+        let all = all_branches(&[&f.work]);
+        assert_eq!(totals(&all), git_totals(&f.work, &EVERYTHING));
+        assert_eq!(totals(&all), (2, 3, 0), "the first, and the one HEAD alone leads to");
+
+        // Fetched, and nothing checked out: HEAD names a branch that has no
+        // commit, which is what a clone left half-way looks like.
+        let empty = scratch("stats-all-unborn");
+        git(&empty, &["init", "-q", "-b", "elsewhere"]);
+        git(&empty, &["remote", "add", "origin", f.remote.to_str().unwrap()]);
+        git(&empty, &["fetch", "-q"]);
+        assert_eq!(totals(&contributions(&[&empty])), (0, 0, 0), "nothing is checked out");
+        assert_eq!(totals(&all_branches(&[&empty])), (1, 1, 0), "the remote's first commit");
     }
 
     /// (commits, insertions, deletions) across everything read.

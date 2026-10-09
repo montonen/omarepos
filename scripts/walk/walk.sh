@@ -115,8 +115,9 @@ for repo in $REPOS; do
   step "$repo: o" "X pick 0:1; X keys o"
   step "$repo: shortcuts" "X keys shift+question; sleep 0.3; X keys Escape"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
-  step "$repo: 14 days" "X choose 1; sleep 1"
-  step "$repo: 30 days" "X choose 2; sleep 1"
+  step "$repo: 14 days" "X choose 'Time window=1'; sleep 1"
+  step "$repo: 30 days" "X choose 'Time window=2'; sleep 1"
+  step "$repo: every branch" "X choose 'Which branches=1'; sleep 1.2"
   step "$repo: an author's commits" 'X press "Fixture"; sleep 0.4'
   step "$repo: open a commit from there" "X pick 0:0!; sleep 1.2"
   step "$repo: back out" "X keys Escape Escape Escape Escape"
@@ -145,9 +146,18 @@ step "back to the grid" "X keys Escape Escape Escape"
 
 # ---- contributions across the fleet
 step "contributions" "X keys ctrl+g; sleep 1.6"
-step "14 days" "X choose 1; sleep 1.3"
-step "30 days" "X choose 2; sleep 1.5"
-step "7 days" "X choose 0; sleep 1.2"
+step "14 days" "X choose 'Time window=1'; sleep 1.3"
+step "30 days" "X choose 'Time window=2'; sleep 1.5"
+# The other view: every branch, which on these fixtures is more commits than
+# the branches that are checked out have, the merges fixture's two unmerged
+# branches among them. And back.
+before=$(X dump " commits")
+step "every branch" "X choose 'Which branches=1'; sleep 1.6"
+X dump "all branches" | grep -q "all branches" || { WRONG=$((WRONG+1)); echo "WRONG: the page does not say it is counting all branches"; }
+[ "$(X dump " commits")" != "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: every branch counted the same as the checked-out ones ($before)"; }
+step "checked-out branches again" "X choose 'Which branches=0'; sleep 1.5"
+[ "$(X dump " commits")" = "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: back on the checked-out branches the figures are not what they were"; }
+step "7 days" "X choose 'Time window=0'; sleep 1.2"
 step "an author" 'X press "Fixture"; sleep 0.4'
 step "back" "X keys Escape"
 
