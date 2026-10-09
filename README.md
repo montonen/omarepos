@@ -210,7 +210,7 @@ cards are all one height: where a thing is says what it is. Top to bottom:
 | Sync | `↑` what exists only here: `2 ahead`, `3 unpublished`, `no remote` | `↓` what is waiting: `12 behind`, and `held back` when it will not arrive by itself |
 | Commit | The last commit: how old, what it says, and who wrote it if that was not you. `↑` in front when it is on no remote | |
 | Lately | Commits a day over the last four weeks, today at the right, and under them `14 this week · 2 people` or `quiet for 3 weeks` | `remote tip 3h ago`, when behind |
-| Tags | The repository's tags; `new` on one found since you last looked | Keys, on the card with the keyboard |
+| Tags | The repository's tags, each with the dot of its own colour; `new` on one found since you last looked | Keys, on the card with the keyboard |
 
 The folder and the remote are written without the repository's name, which is
 on the line above: `~/work/acme/ · github.com/acme/`. A remote called
@@ -227,7 +227,10 @@ the accent when there are commits only here. The flag beside the name is the
 one solid patch of colour on a card, and goes to one trouble at a time: a
 repository that cannot be read, files in conflict, a working tree whose state
 is not known, or a fetch that failed. A failed fetch never takes the edge, so
-a day without a network does not hide which cards have work in them.
+a day without a network does not hide which cards have work in them. The one
+colour on a card that is not about its state is the dot on a tag: a tag has
+one colour wherever it is shown, the same on a card as on its chip in the
+header.
 
 **The four weeks.** One column a day, weeks set apart, on one scale for every
 card (a column is full at six commits), so a tall column means the same

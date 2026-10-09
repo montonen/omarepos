@@ -4,7 +4,9 @@
 //! work that is not finished (yellow for what is uncommitted, the accent for
 //! commits that exist nowhere else) and trouble (red). So across forty cards
 //! whatever has a colour is something to do, and "clean" and "level" are not
-//! said in green on every one of them.
+//! said in green on every one of them. The one exception is the dot on a
+//! tag, which is the tag's own colour and the same one its chip has in the
+//! header.
 //!
 //! Every fact has a slot of its own, and every slot is built whether or not
 //! there is anything to put in it: the cards are all one height, and where a
@@ -1009,8 +1011,21 @@ fn tag_row(tags: &[String]) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     row.set_halign(gtk::Align::Start);
     for tag in tags.iter().take(SHOWN) {
-        let chip = text(tag, "om-tag", pango::EllipsizeMode::End, 10);
+        // The tag's own colour, as a dot, the same as on its chip in the
+        // header: a tag is one colour wherever it is shown, and the chip to
+        // press up there is found by the colour seen down here. It is the
+        // one colour on a card that is not about the state of anything.
+        let chip = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        chip.add_css_class("om-tag");
         chip.set_valign(gtk::Align::Center);
+        chip.append(&crate::ui::color_dot(crate::ui::key_color(&tag.to_lowercase())));
+        chip.append(
+            &gtk::Label::builder()
+                .label(tag)
+                .ellipsize(pango::EllipsizeMode::End)
+                .max_width_chars(10)
+                .build(),
+        );
         row.append(&chip);
     }
     if tags.len() > SHOWN {

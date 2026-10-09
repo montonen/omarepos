@@ -577,7 +577,7 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
 .om-tag {{
   font-size: 0.75rem;
   font-weight: 700;
-  padding: 1px 7px;
+  padding: 1px 8px 1px 6px;
   border-radius: 999px;
   background-color: alpha(@om_fg, 0.10);
   color: @om_fg;
