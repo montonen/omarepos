@@ -34,7 +34,7 @@ unless set), and OMAREPOS_WALK_ROOT the directory scanned (fleet/ in there).
 Set to nothing, the roots are the scratch configuration's own, and the window
 is an ordinary one and not a one-off look: it has a refresh, and says so.
 """
-import contextlib, io, json, os, subprocess, sys, time
+import contextlib, hashlib, io, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -92,6 +92,20 @@ def stop_all():
         os.remove(OFFSCREEN)
 
 
+def http_socket():
+    """Where the display daemon listens for a browser: a socket and not a port, so that
+    nothing is opened to the network. Beside everything else of the walk's, unless that
+    is too deep: a socket's path holds 107 bytes, the daemon cuts a longer one short
+    without a word, and what it then leaves behind is not what gets removed, so that
+    the next start finds the address in use. Then it goes in the runtime directory,
+    under a name made from the walk's own directory."""
+    path = os.path.join(W, 'broadway-http.sock')
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if len(os.fsencode(path)) > 100 and runtime:
+        path = os.path.join(runtime, 'omarepos-walk-%s.sock' % hashlib.sha1(os.fsencode(W)).hexdigest()[:12])
+    return path
+
+
 def daemon():
     """The pid of this walk's display daemon, if it is running: by what it was started
     with, like the window."""
@@ -100,13 +114,15 @@ def daemon():
         cmdline = open(f'/proc/{pid}/cmdline').read()
     except (OSError, ValueError):
         return None
-    return pid if 'gtk4-broadwayd' in cmdline and W in cmdline else None
+    return pid if 'gtk4-broadwayd' in cmdline and http_socket() in cmdline else None
 
 
 def stop_daemon():
     pid = daemon()
     if pid:
         os.kill(pid, 15)
+        with contextlib.suppress(OSError):
+            os.remove(http_socket())
         # It leaves the socket windows reach it by behind: display N is N + 1 there.
         runtime = os.environ.get('XDG_RUNTIME_DIR')
         if runtime:
@@ -118,8 +134,7 @@ def start_offscreen():
     stop_all()
     time.sleep(0.4)
     if not daemon():
-        # Reached over a socket under target/, so no port is opened for it.
-        http = os.path.join(W, 'broadway-http.sock')
+        http = http_socket()
         with contextlib.suppress(FileNotFoundError):
             os.remove(http)
         server = subprocess.Popen(['gtk4-broadwayd', '--unixsocket', http, DISPLAY],
