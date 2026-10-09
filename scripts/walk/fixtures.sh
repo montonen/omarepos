@@ -10,7 +10,10 @@ W=${OMAREPOS_WALK_DIR:-$(dirname "$(dirname "$HERE")")/target/walk}
 python3 "$HERE/drive.py" stop 2>/dev/null || true
 chmod -R u+rwx "$W" 2>/dev/null || true
 rm -rf "$W"
-mkdir -p "$W/fleet" "$W/remotes" "$W/config/omarepos" "$W/config/gtk-4.0" "$W/state"
+# The directory Omarchy keeps its current theme in is there before the window
+# starts, as it is on a real desktop: the window watches it from the start,
+# and a directory that turns up later has its first change missed.
+mkdir -p "$W/fleet" "$W/remotes" "$W/config/omarepos" "$W/config/gtk-4.0" "$W/state/omarchy/current"
 cat > "$W/gitconfig" <<'INI'
 [user]
 	name = Fixture
@@ -22,6 +25,11 @@ cat > "$W/gitconfig" <<'INI'
 [advice]
 	detachedHead = false
 INI
+# The same again where libgit2 looks: the program reads who a repository
+# commits as in-process, and that reader goes by XDG_CONFIG_HOME, not by the
+# variable git is given. Without it nobody here is "you", and a card names
+# everyone and draws its four weeks in one tone.
+mkdir -p "$W/config/git" && cp "$W/gitconfig" "$W/config/git/config"
 # A window nobody is looking at is sent no frames, and a page transition that
 # is animated never ends there.
 printf '[Settings]\ngtk-enable-animations=false\n' > "$W/config/gtk-4.0/settings.ini"
@@ -66,9 +74,15 @@ start conflicted
   && git switch -q main && echo mine > README.md && git commit -q -am mine && { git merge -q other >/dev/null 2>&1 || true; } )
 # An index nothing can read.
 start broken; printf 'garbage' > broken/.git/index
-# Enough history and enough untracked files to fold and to scroll.
-start lots
+# Enough history and enough untracked files to fold and to scroll, written
+# over six weeks by two people: what a card's four weeks of days are drawn
+# from, and whose name it leaves out.
+git init -q -b main lots
 ( cd lots && for i in $(seq 1 14); do echo $i > "untracked-$i.txt"; done
+  now=$(date +%s)
   for i in $(seq 1 30); do echo $i >> log.txt; git add log.txt
-    git commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis"; done )
+    at="$(( now - (30 - i) * 34 * 3600 - 600 )) +0000"; who="Fixture"; mail="fixture@example.invalid"
+    [ $((i % 3)) = 0 ] && who="Tove Lind" && mail="tove@example.invalid"
+    GIT_AUTHOR_DATE="$at" GIT_COMMITTER_DATE="$at" git -c user.name="$who" -c user.email="$mail" \
+      commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis"; done )
 echo "fixtures in $W/fleet: $(ls "$W/fleet" | tr '\n' ' ')"

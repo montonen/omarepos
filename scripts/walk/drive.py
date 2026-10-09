@@ -19,6 +19,7 @@ compositor, so the desktop it runs on is not disturbed.
     drive.py dump [FILTER]      what is on screen, as text
     drive.py dump-all [FILTER]  everything, on screen or not
     drive.py resize WxH         offscreen only: a tiling compositor decides for itself
+    drive.py shot FILE.png      a picture of the window as it is laid out
     drive.py act NAME [ARG]     any window action
 
 A hidden workspace sends a window no frames, so nothing there is laid out or
@@ -243,6 +244,8 @@ def main(argv):
         dump(first, everything=True)
     elif cmd == 'act':
         act(*rest[:2])
+    elif cmd == 'shot':
+        act('shot', os.path.abspath(first))
     elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize'):
         act(cmd, first)
     elif cmd == 'paint':

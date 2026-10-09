@@ -93,6 +93,10 @@ pub fn install(window: &adw::ApplicationWindow) {
     let window_weak = window.downgrade();
     key.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
+        // A key that is really pressed makes GTK show where the keyboard is,
+        // which the stylesheet's `:focus-visible` rules wait for. This one
+        // never reaches GTK, so it says so itself.
+        window.set_focus_visible(true);
         let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
         let (mods, name) = match wanted.rsplit_once('+') {
             Some((mods, name)) => (mods, name),
@@ -266,6 +270,38 @@ pub fn install(window: &adw::ApplicationWindow) {
         }
     });
     window.add_action(&resize);
+
+    // A picture of the window, written as a PNG to the path given. The dump
+    // says what is on a card and where the keyboard is; it cannot say what a
+    // card looks like, and that is what a change to one is judged by. Drawn
+    // by a renderer of its own, into memory, so it asks nothing of the
+    // display. It needs the window to have been laid out, which a window on
+    // a hidden workspace is only once.
+    let shot = gio::SimpleAction::new("shot", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    shot.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(path) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (width, height) = (window.width() as f64, window.height() as f64);
+        let snapshot = gtk::Snapshot::new();
+        gtk::WidgetPaintable::new(Some(&window)).snapshot(&snapshot, width, height);
+        let Some(node) = snapshot.to_node() else {
+            note!("omarepos: there is nothing to take a picture of");
+            return;
+        };
+        let renderer = gtk::gsk::CairoRenderer::new();
+        if let Err(err) = renderer.realize(gtk::gdk::Surface::NONE) {
+            note!("omarepos: no picture: {err}");
+            return;
+        }
+        let texture = renderer.render_texture(&node, None);
+        renderer.unrealize();
+        match texture.save_to_png(path) {
+            Ok(()) => note!("omarepos: picture in {path}"),
+            Err(err) => note!("omarepos: no picture: {err}"),
+        }
+    });
+    window.add_action(&shot);
 
     // Text, into the field the keyboard is in.
     let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
@@ -532,7 +568,7 @@ fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
     let classes: Vec<String> = widget
         .css_classes()
         .iter()
-        .filter(|class| class.starts_with("om-") || ["danger", "warn", "ok", "current"].contains(&class.as_str()))
+        .filter(|class| class.starts_with("om-") || ["danger", "warn", "ok", "current", "work", "bad", "word", "out", "new", "detached"].contains(&class.as_str()))
         .map(|class| class.to_string())
         .collect();
     let tooltip = widget.tooltip_text().filter(|_| said.is_some() || !flags.is_empty());

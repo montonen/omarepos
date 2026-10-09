@@ -169,14 +169,24 @@ step "filter by a tag, then lose the tag" 'X press "ACME"; sleep 0.3'
 tags "JM"; step "rescan with the tag gone" "X keys ctrl+r; sleep 1.2"
 
 # ---- themes: light, broken, odd, dark, none
-T=$W/state/omarchy/current/theme; mkdir -p "$T"
-step "light theme" "printf 'background = \"#eff1f5\"\nforeground = \"#4c4f69\"\naccent = \"#1e66f5\"\n' > $T/colors.toml; sleep 1"
+# Switched the way Omarchy switches: the new theme is put together beside the
+# old one and moved into its place, and then its name is written. The window
+# watches the directory the two are in. Writing colors.toml where it lies,
+# which is what this used to do, is not seen there: these steps changed
+# nothing, and passed.
+C=$W/state/omarchy/current
+theme() { rm -rf "$C/next-theme"; mkdir -p "$C/next-theme"; printf "$2" > "$C/next-theme/colors.toml"
+  rm -rf "$C/theme"; mv "$C/next-theme" "$C/theme"; echo "$1" > "$C/theme.name"; sleep 1; }
+named() { X dump "$1" | grep -q "$1" || { WRONG=$((WRONG+1)); echo "WRONG: the window is not in the theme called $1"; }; }
+step "light theme" "theme walk-light 'mode = \"light\"\nbackground = \"#eff1f5\"\nforeground = \"#4c4f69\"\naccent = \"#1e66f5\"\n'"
+named walk-light
 step "light theme: a graph" "open_repo merges"
 step "back" "X keys Escape Escape Escape"
-step "broken theme file" "printf 'background = \"#zzzzzz\"\nforeground = 12\naccent = \"#äöå\"\n[[[' > $T/colors.toml; sleep 1"
-step "odd colours" "printf 'background = \"#fff\"\nforeground = \"#00000\"\naccent = \"é#12345\"\ncolor1 = \"\"\n' > $T/colors.toml; sleep 1"
-step "dark theme" "printf 'background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\naccent = \"#7aa2f7\"\n' > $T/colors.toml; sleep 1"
-step "no theme file" "rm -f $T/colors.toml; sleep 1"
+step "broken theme file" "theme walk-broken 'background = \"#zzzzzz\"\nforeground = 12\naccent = \"#äöå\"\n[[['"
+step "odd colours" "theme walk-odd 'background = \"#fff\"\nforeground = \"#00000\"\naccent = \"é#12345\"\ncolor1 = \"\"\n'"
+step "dark theme" "theme walk-dark 'background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\naccent = \"#7aa2f7\"\n'"
+named walk-dark
+step "no theme" "rm -rf $C/theme $C/theme.name; sleep 1"
 
 # ---- settings, row by row
 step "settings" "X act settings; sleep 0.6"
