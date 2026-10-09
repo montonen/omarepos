@@ -29,8 +29,18 @@ WRONG=0
 wrong() { WRONG=$((WRONG+1)); echo "WRONG: $1"; }
 keyboard() { X dump "keyboard:" | grep -q "$1" || wrong "$2 ($(X dump keyboard:))"; }
 # Across the width where the header changes, and back. A change takes two or
-# three frames to be over, and they come one a second here.
-across() { for size in 900x700 1020x700; do X resize $size; sleep 3.5; done; }
+# three frames to be over, and they come one a second here. Where that width
+# lies depends on what is in the header (820 px with no tag buttons in it), so
+# this also checks that the two sizes are on either side of it: the header
+# needs less on the narrow side, having given something up. Sizes that had
+# both come to lie on one side would change nothing, and pass. That can be
+# read off only with the grid in front, whose header it is: `across grid`.
+across() {
+  X resize 760x700; sleep 3.5; local narrow; narrow=$(X dump "width:")
+  X resize 900x700; sleep 3.5; local wide; wide=$(X dump "width:")
+  [ "$1" != grid ] || [ "${narrow#*needs }" != "${wide#*needs }" ] \
+    || wrong "no breakpoint between the two widths ($narrow; $wide)"
+}
 
 python3 "$HERE/drive.py" start-offscreen || exit 2
 keyboard GtkText "the keyboard is not in the filter at launch"
@@ -40,11 +50,11 @@ keyboard GtkText "the keyboard is not in the filter at launch"
 X type mer; sleep 1.2
 X keys Down
 keyboard GtkFlowBoxChild "Down from the filter did not reach a card"
-across
+across grid
 keyboard GtkFlowBoxChild "a card lost the keyboard to a change of width"
 
 X keys ctrl+f
-across
+across grid
 keyboard GtkText "the filter lost the keyboard to a change of width"
 X type g; sleep 1.2
 X dump | grep -q 'SearchEntry "merg"' || wrong "what was in the filter was not added to after a change of width"

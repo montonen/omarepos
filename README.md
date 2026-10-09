@@ -384,10 +384,12 @@ live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
   currently shown, so the filter box doubles as a bulk selector.
 - Editing several at once only replaces the tags they have *in common*; tags
   unique to one of them survive.
-- With one or two tags they appear as toggle chips in the header — one click to
-  filter instead of three. From three tags on, the **Tags** popover takes over,
-  since more than that crowds out the title. Chips and counts are of the
-  repositories on the grid, not of everything the file remembers.
+- With up to five tags, each has a button of its own in the header — one click
+  to filter instead of three, and in the colour its dot has on the cards. With
+  more than five the **Tags** menu lists them instead. The header gives the
+  buttons up on a window too narrow for them (how narrow depends on how long
+  the names are), and the menu lists the tags then as well. Buttons and counts
+  are of the repositories on the grid, not of everything the file remembers.
 - `Enter` in the tag editor saves.
 - `repos.toml` can be edited by hand while the window is open, on the same
   terms as the config file: read again at the next rescan, and never saved over

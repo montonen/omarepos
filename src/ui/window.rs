@@ -18,16 +18,25 @@ use crate::scan::{self, Event};
 use crate::theme::Palette;
 use crate::ui::{self, Action, card};
 
-/// Below this width the header gives up its labels and a third of the filter
-/// box. With everything showing it needs 1010 px, and 1095 with two tag chips
-/// in it, which is what one or two tags put there.
-const NARROW_BELOW: f64 = 1140.0;
-/// Below this one, its sort order and tag chips as well. Without its labels
-/// it needs 780 px, about 910 with chips, and without those and the sort
-/// order, 584. Measured with the debug dump under the built-in theme at the
-/// default font size; a larger font or longer tag names need more, which is
-/// what the margin on each is for.
-const CRAMPED_BELOW: f64 = 940.0;
+/// How many tags get a button each in the header. Up to this many are one
+/// click to filter by; more than this and the Tags menu lists them. It was
+/// two, with the widths below fixed for two short names. They are worked out
+/// from the buttons that are there now (`fit_header`), so the number is a
+/// matter of taste and not of room.
+const QUICK_TAGS: usize = 5;
+/// What the header needs with everything showing and no tag buttons in it,
+/// and what the label of its Tags button takes of that. With tag buttons
+/// there is no label: they say what it would.
+const HEADER_FULL: f64 = 1010.0;
+const TAGS_LABEL: f64 = 40.0;
+/// What it needs without its labels, tag buttons not counted. Without those
+/// and the sort order as well it needs 584.
+const HEADER_BARE: f64 = 780.0;
+/// Room to spare over each of those before the header gives something up.
+/// All of it was measured with the debug dump under the built-in theme at
+/// the default font size; a larger font needs more, which is what this is
+/// for. The tag buttons are not in it: they are measured as they stand.
+const SPARE: f64 = 40.0;
 /// The least the window claims to be usable at. A window with breakpoints has
 /// no minimum of its own: libadwaita drops the one its content would give it
 /// and expects to be told.
@@ -76,6 +85,10 @@ struct Ui {
     theme_name: RefCell<String>,
     /// Whether that palette is a light one.
     light: Cell<bool>,
+    /// The two widths at which the header gives something up: its labels,
+    /// and below that its tag buttons and sort order. Kept because where
+    /// they lie depends on how wide the tag buttons are; see `fit_header`.
+    breakpoints: RefCell<Option<[adw::Breakpoint; 2]>>,
     /// Whether the window is too narrow for the header's labels.
     narrow: Cell<bool>,
     /// Whether it is too narrow for the tag chips as well.
@@ -352,6 +365,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         subtitle,
         theme_name: RefCell::new(String::new()),
         light: Cell::new(false),
+        breakpoints: RefCell::new(None),
         narrow: Cell::new(false),
         cramped: Cell::new(false),
         search: search.clone(),
@@ -815,11 +829,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     // for the ninety pixels between that and what the header needs, which is
     // where half of a 1920 screen falls, the window was narrower than its own
     // header.
-    let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-        adw::BreakpointConditionLengthType::MaxWidth,
-        NARROW_BELOW,
-        adw::LengthUnit::Px,
-    ));
+    // Where it lies is set by `fit_header`, which knows what is in the
+    // header; until the first scan has said which tags there are, it is
+    // where it would be with none.
+    let breakpoint = adw::Breakpoint::new(below(HEADER_FULL + SPARE));
     breakpoint.add_setter(&ui.search, "width-request", Some(&160.to_value()));
     {
         // The labels are not given to the breakpoint as setters. The grid
@@ -840,25 +853,20 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             ui_for_unapply.sync_tag_controls();
         });
     }
-    window.add_breakpoint(breakpoint);
+    window.add_breakpoint(breakpoint.clone());
 
     // Narrower still, and the sort order and the tag chips go too: both are
     // one click away elsewhere (the Tags menu filters), and with them the
     // header fits a third of a screen. Only the last breakpoint that matches
     // is applied, so this one says again what the wider one says.
-    let cramped = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-        adw::BreakpointConditionLengthType::MaxWidth,
-        CRAMPED_BELOW,
-        adw::LengthUnit::Px,
-    ));
+    let cramped = adw::Breakpoint::new(below(HEADER_BARE + SPARE));
     cramped.add_setter(&ui.search, "width-request", Some(&120.to_value()));
     cramped.add_setter(&ui.sort, "visible", Some(&false.to_value()));
     // Not the tag chips, though they go too. A breakpoint puts back what it
     // found when it lets go, and what it found was the chips hidden, as they
     // are before the first scan has said which tags there are: a window that
     // was ever this narrow, at launch for an instant, had its chips hidden
-    // for good, and with one or two tags the chips are the only place the
-    // tags are. `sync_tag_controls` decides, and is told how wide things are.
+    // for good. `sync_tag_controls` decides, and is told how wide things are.
     {
         let ui_for_apply = Rc::clone(&ui);
         cramped.connect_apply(move |_| {
@@ -875,6 +883,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             ui_for_unapply.sync_tag_controls();
         });
     }
+    ui.breakpoints.replace(Some([breakpoint, cramped.clone()]));
     window.add_breakpoint(cramped);
 
     if let Some(content) = window.content() {
@@ -1959,10 +1968,8 @@ impl Ui {
     /// click instead of three; past that they would crowd out the title, so the
     /// popover takes over.
     fn sync_tag_controls(self: &Rc<Self>) {
-        const QUICK_LIMIT: usize = 3;
-
         let tags = self.grid_tags();
-        let quick = !tags.is_empty() && tags.len() < QUICK_LIMIT;
+        let quick = !tags.is_empty() && tags.len() <= QUICK_TAGS;
         let signature = tags
             .iter()
             .map(|(tag, count)| format!("{tag}\u{1f}{count}"))
@@ -1972,6 +1979,7 @@ impl Ui {
         if signature != *self.tag_signature.borrow() {
             *self.tag_signature.borrow_mut() = signature;
             self.build_quick_tags(&tags, quick);
+            self.fit_header();
         }
 
         // Reflect the live filter without the writes bouncing back as toggles.
@@ -1981,10 +1989,15 @@ impl Ui {
         }
         self.tag_syncing.set(false);
 
-        self.tag_quick.set_visible(quick && !self.cramped.get());
+        // The buttons are there to be pressed only while there is room for
+        // them. Without it the menu does the filtering, and says how much of
+        // it is on: it used to go on saying nothing, as it does beside the
+        // buttons, with the buttons gone.
+        let buttons = self.tag_buttons_showing();
+        self.tag_quick.set_visible(buttons);
         let active = self.tag_filter.borrow().len() + usize::from(self.untagged_only.get());
-        self.tags_content.set_label(&match (quick, self.narrow.get(), active) {
-            // The chips carry the filtering, so the button is only the menu.
+        self.tags_content.set_label(&match (buttons, self.narrow.get(), active) {
+            // The buttons carry the filtering, so this one is only the menu.
             (true, _, _) => String::new(),
             (false, true, 0) => String::new(),
             (false, true, n) => n.to_string(),
@@ -1992,11 +2005,45 @@ impl Ui {
             (false, false, n) => format!("Tags ({n})"),
         });
         self.tags_button
-            .set_tooltip_text(Some(if quick {
+            .set_tooltip_text(Some(if buttons {
                 "Tag the selected repos, or filter by untagged"
             } else {
                 "Filter by tag, or tag the selected repos"
             }));
+    }
+
+    /// Whether the header has a button for each tag at the moment: there are
+    /// few enough of them, and the window is wide enough.
+    fn tag_buttons_showing(&self) -> bool {
+        let tags = self.grid_tags().len();
+        (1..=QUICK_TAGS).contains(&tags) && !self.cramped.get()
+    }
+
+    /// Put the two widths at which the header gives something up where what
+    /// is in it now needs them.
+    ///
+    /// They were two numbers, right for two tag buttons with two-letter
+    /// names. A button is as wide as its tag's name, and there can be five
+    /// of them, so the widths are worked out from the buttons as they stand:
+    /// what the header needs without any, and the buttons on top of that.
+    fn fit_header(&self) {
+        let buttons = self.tag_quick_buttons.borrow();
+        // Each button asked on its own. The row they are in is hidden when
+        // the window is too narrow for it, and a hidden row asks for nothing:
+        // measured as a whole it would call itself narrow enough to show
+        // again the moment it had been put away.
+        let wide: f64 = buttons
+            .iter()
+            .map(|(_, button)| {
+                let (_, natural, _, _) = button.measure(gtk::Orientation::Horizontal, -1);
+                f64::from(natural + self.tag_quick.spacing())
+            })
+            .sum();
+        let label = if buttons.is_empty() { 0.0 } else { TAGS_LABEL };
+        if let Some([narrow, cramped]) = self.breakpoints.borrow().as_ref() {
+            narrow.set_condition(Some(&below(HEADER_FULL - label + wide + SPARE)));
+            cramped.set_condition(Some(&below(HEADER_BARE + wide + SPARE)));
+        }
     }
 
     fn build_quick_tags(self: &Rc<Self>, tags: &[(String, usize)], quick: bool) {
@@ -2051,10 +2098,11 @@ impl Ui {
         body.set_width_request(230);
 
         let known = self.grid_tags();
-        let quick = !known.is_empty() && known.len() < 3;
-        if quick {
-            // The header chips already do the filtering; repeating it here
-            // would be two controls for one setting.
+        if self.tag_buttons_showing() {
+            // The header's buttons already do the filtering; repeating it
+            // here would be two controls for one setting. Only while they
+            // are showing, though: on a window too narrow for them this
+            // menu was all there was, and it did not list a single tag.
             let untagged = gtk::CheckButton::builder()
                 .label("Untagged only")
                 .active(self.untagged_only.get())
@@ -3018,6 +3066,15 @@ fn split_query(raw: &str) -> Query {
         }
     }
     query
+}
+
+/// "Narrower than this", as a breakpoint is told it.
+fn below(width: f64) -> adw::BreakpointCondition {
+    adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        width,
+        adw::LengthUnit::Px,
+    )
 }
 
 /// Whether a fetch failed because the remote turned it away, and not because

@@ -515,6 +515,11 @@ fn find_button(widget: &gtk::Widget, wanted: &str, unseen: bool) -> Option<gtk::
     if let Some(button) = widget.downcast_ref::<gtk::Button>() {
         let mut words = say(widget).unwrap_or_default();
         words.push_str(&button.tooltip_text().unwrap_or_default());
+        // A menu button is a button inside the widget that has the tooltip,
+        // and on a narrow window the tooltip is all it says.
+        if let Some(menu) = widget.parent().and_downcast::<gtk::MenuButton>() {
+            words.push_str(&menu.tooltip_text().unwrap_or_default());
+        }
         // A button with a child of its own (an icon and a label) says what
         // the labels inside it say.
         let mut inner = String::new();

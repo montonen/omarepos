@@ -45,9 +45,9 @@ step() { # what it is, then the commands
 asked() { grep -cF "would open https://git.example.invalid/acme/widgets" "$W/app.log"; }
 asks() { [ "$(asked)" = $(( $1 + $2 )) ] || { WRONG=$((WRONG+1)); echo "WRONG: $3"; }; }
 open_repo() { X keys Escape Escape Escape ctrl+f; X type "$1"; sleep 0.35; X keys Return; sleep 1.3; }
-# A tag file giving the first five repositories these tags, in turn.
+# A tag file giving the first six repositories these tags, in turn.
 tags() { : > "$W/config/omarepos/repos.toml"; local i=0 n; n=$(echo "$1" | wc -w)
-  for r in alpha beta gamma merges lots; do i=$((i+1)); t=$(echo "$1" | cut -d' ' -f$(( (i-1) % n + 1 )))
+  for r in alpha beta gamma merges lots widgets; do i=$((i+1)); t=$(echo "$1" | cut -d' ' -f$(( (i-1) % n + 1 )))
     printf '[repos."%s/fleet/%s"]\ntags = ["%s"]\n\n' "$W" "$r" "$t" >> "$W/config/omarepos/repos.toml"; done; }
 
 boot
@@ -152,15 +152,26 @@ step "an author" 'X press "Fixture"; sleep 0.4'
 step "back" "X keys Escape"
 
 # ---- tags: the menu, the editor, the chips
-tags "one two three"; step "three tags" "X keys ctrl+r; sleep 1.2"
-step "tag menu" 'X press "Tags"'
-step "tag menu: tick a tag" 'X press "!one"'
+# Up to five tags have a button each in the header; more than that and the
+# menu lists them.
+buttons() { [ "$(X dump | grep -c 'om-quick-tag')" = "$1" ] || { WRONG=$((WRONG+1)); echo "WRONG: the header does not have $1 tag buttons"; }; }
+tags "one two three four five"; step "five tags: a button each" "X keys ctrl+r; sleep 1.2"
+buttons 5
+step "a tag's button on" 'X press "three"'
+step "and off" 'X press "three"'
+step "the menu beside the buttons" 'X press "Tag the selected repos"; sleep 0.3'
+step "close it" "X keys Escape"
+tags "one two three four five six"; step "six tags: the menu instead" "X keys ctrl+r; sleep 1.2"
+buttons 0
+step "tag menu" 'X press "Filter by tag"; sleep 0.3'
 step "tag menu: clear" 'X press "!Clear tag filter"'
+tags "one two three"; step "three tags" "X keys ctrl+r; sleep 1.2"
+buttons 3
 step "tag editor from a card" 'X press "!Tags…"; sleep 0.5'
 step "tag editor: type and save" "X row 'Tags=one, extra'; X respond save; sleep 0.6"
 step "tag editor again, cancel" 'X press "!Tags…"; sleep 0.5; X respond cancel; sleep 0.4'
 step "tag editor: empty and save" 'X press "!Tags…"; sleep 0.5; X row "Tags="; X respond save; sleep 0.6'
-step "tag the selection" 'X keys ctrl+a; X press "Tags"; X press "!selected…"; sleep 0.5; X row "Tags=open source, a,b"; X respond save; sleep 0.6; X keys ctrl+shift+a'
+step "tag the selection" 'X keys ctrl+a; X press "Tag the selected repos"; X press "!selected…"; sleep 0.5; X row "Tags=open source, a,b"; X respond save; sleep 0.6; X keys ctrl+shift+a'
 tags "JM ACME"; step "two tags: chips" "X keys ctrl+r; sleep 1.2"
 step "chip on" 'X press "JM"'
 step "second chip on" 'X press "ACME"'
