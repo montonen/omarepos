@@ -19,7 +19,8 @@ compositor, so the desktop it runs on is not disturbed.
     drive.py dump [FILTER]      what is on screen, as text
     drive.py dump-all [FILTER]  everything, on screen or not
     drive.py resize WxH         offscreen only: a tiling compositor decides for itself
-    drive.py shot FILE.png      a picture of the window as it is laid out
+    drive.py shot FILE.png [2]  a picture of the window as it is laid out; 2 for twice the size
+    drive.py split N            the divider of a split page, N pixels from its top
     drive.py act NAME [ARG]     any window action
 
 A hidden workspace sends a window no frames, so nothing there is laid out or
@@ -27,12 +28,19 @@ drawn unless asked, and a change of width never finishes. `start-offscreen`
 runs the window on GTK's Broadway display instead, with its own daemon and no
 port open: frames arrive, sizes are real and can be chosen, and Hyprland is
 not involved at all. Everything else is driven the same way.
+
+OMAREPOS_WALK_DIR is where the scratch configuration and state are (target/walk
+unless set), and OMAREPOS_WALK_ROOT the directory scanned (fleet/ in there).
+Set to nothing, the roots are the scratch configuration's own, and the window
+is an ordinary one and not a one-off look: it has a refresh, and says so.
 """
 import contextlib, io, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 W = os.environ.get('OMAREPOS_WALK_DIR', os.path.join(REPO, 'target', 'walk'))
+ROOT = os.environ.get('OMAREPOS_WALK_ROOT', os.path.join(W, 'fleet'))
+WHERE = ['--root', ROOT] if ROOT else []
 BIN = os.path.join(REPO, 'target', 'debug', 'omarepos')
 PIDFILE = os.path.join(W, 'pid')
 OBJECT = '/se/alphadev/Omarepos/window/1'
@@ -123,7 +131,7 @@ def start_offscreen():
                XDG_CONFIG_HOME=f'{W}/config', XDG_STATE_HOME=f'{W}/state',
                GIT_CONFIG_GLOBAL=f'{W}/gitconfig', GIT_CONFIG_NOSYSTEM='1',
                GDK_DEBUG='no-portals', OMAREPOS_DUMP=f'{W}/dump.txt')
-    app = subprocess.Popen([BIN, '--root', f'{W}/fleet'], env=env, start_new_session=True,
+    app = subprocess.Popen([BIN, *WHERE], env=env, start_new_session=True,
                            stdout=open(os.path.join(W, 'app.log'), 'w'), stderr=subprocess.STDOUT)
     open(PIDFILE, 'w').write(str(app.pid))
     open(OFFSCREEN, 'w').write(DISPLAY)
@@ -142,7 +150,7 @@ def start():
     before = {c['pid'] for c in clients()}
     env = (f'env XDG_CONFIG_HOME={W}/config XDG_STATE_HOME={W}/state GIT_CONFIG_GLOBAL={W}/gitconfig '
            f'GIT_CONFIG_NOSYSTEM=1 GDK_DEBUG=no-portals OMAREPOS_DUMP={W}/dump.txt')
-    command = f"sh -c '{env} {BIN} --root {W}/fleet > {W}/app.log 2>&1'"
+    command = f"sh -c '{env} {BIN} {' '.join(WHERE)} > {W}/app.log 2>&1'"
     sh('hyprctl', 'dispatch', 'hl.dsp.exec_cmd("%s", { workspace = "special:omarepos-walk silent" })' % command)
     for _ in range(50):
         time.sleep(0.2)
@@ -245,8 +253,9 @@ def main(argv):
     elif cmd == 'act':
         act(*rest[:2])
     elif cmd == 'shot':
-        act('shot', os.path.abspath(first))
-    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize'):
+        scale = rest[1] + ':' if len(rest) > 1 else ''
+        act('shot', scale + os.path.abspath(first))
+    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize', 'split'):
         act(cmd, first)
     elif cmd == 'paint':
         act('paint')

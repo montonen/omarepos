@@ -8,7 +8,8 @@
 # Broadway, with its own daemon and no port open), where frames do arrive,
 # if only about one a second with no browser attached, and where a window
 # can be given a width. Hyprland is not involved, and nothing is put on
-# screen. It takes about a minute.
+# screen. It takes about a minute. The same display is where the README's
+# pictures are taken, so what those need of it is checked here as well.
 #
 #     scripts/walk/frames.sh
 #
@@ -63,6 +64,19 @@ X keys Return; sleep 4; X pick 0:2; sleep 1.2
 keyboard GtkListBoxRow "the keyboard is not on a commit"
 across
 keyboard GtkListBoxRow "a commit lost the keyboard to a change of width"
+
+# What a picture of the window needs (scripts/shots), with the graph still in
+# front: a size past the display's own 1024 by 768, the divider of this page
+# put somewhere, a picture at twice the size, and the way back to a size the
+# display allows. A PNG says how large it is in its first bytes.
+X resize 1300x900; sleep 3.5
+X dump "width:" | grep -q "width: 1300 " || wrong "the window did not grow past the display ($(X dump width:))"
+X split 300; sleep 1.2
+rm -f "$W/shot.png"; X shot "$W/shot.png" 2; sleep 1
+size=$(python3 -c 'import struct, sys; print("%dx%d" % struct.unpack(">II", open(sys.argv[1], "rb").read(24)[16:]))' "$W/shot.png" 2>/dev/null)
+[ "$size" = 2600x1800 ] || wrong "a picture at twice the size came out as '$size', not 2600x1800"
+X resize 900x700; sleep 3.5
+X dump "width:" | grep -q "width: 900 " || wrong "the window did not shrink back ($(X dump width:))"
 
 python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || wrong "the program stopped: $(grep -m1 -A1 'panicked at' "$W/app.log" | cut -c1-200)"
 X stop

@@ -264,18 +264,39 @@ pub fn install(window: &adw::ApplicationWindow) {
     // compositor does not), and only one that sends frames finishes what a
     // change of width starts: a breakpoint takes the content off screen
     // until the next frame.
+    //
+    // A display also has a size of its own that a window is kept within,
+    // and Broadway's, with no browser attached, is 1024 by 768. The one
+    // thing that outranks it is the least a window may be, so a size past
+    // the display's is asked for as that; a size within it puts the least
+    // back to what the window was built with, and the window can shrink
+    // again.
     let resize = gio::SimpleAction::new("resize", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
+    let least = window.size_request();
     resize.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
         let size = wanted
             .and_then(|wanted| wanted.str())
             .and_then(|wanted| wanted.split_once('x'))
-            .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)));
-        match size {
-            Some((width, height)) => window.set_default_size(width, height),
-            None => note!("omarepos: resize wants a size like 1000x700"),
+            .and_then(|(width, height)| Some((width.parse::<i32>().ok()?, height.parse::<i32>().ok()?)));
+        let Some((width, height)) = size else {
+            note!("omarepos: resize wants a size like 1000x700");
+            return;
+        };
+        let display = gtk::prelude::WidgetExt::display(&window);
+        let screen = display
+            .monitors()
+            .item(0)
+            .and_downcast::<gtk::gdk::Monitor>()
+            .map(|monitor| monitor.geometry());
+        match screen {
+            Some(screen) if width > screen.width() || height > screen.height() => {
+                window.set_size_request(width.max(least.0), height.max(least.1));
+            }
+            _ => window.set_size_request(least.0, least.1),
         }
+        window.set_default_size(width, height);
     });
     window.add_action(&resize);
 
@@ -285,13 +306,25 @@ pub fn install(window: &adw::ApplicationWindow) {
     // by a renderer of its own, into memory, so it asks nothing of the
     // display. It needs the window to have been laid out, which a window on
     // a hidden workspace is only once.
+    //
+    // "2:" in front of the path draws it at twice the size, which is what a
+    // picture for a page wants: text and everything the window draws itself
+    // are drawn again at that size, not stretched. A path starts with "/",
+    // so the two cannot be mistaken for each other.
     let shot = gio::SimpleAction::new("shot", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
     shot.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
-        let Some(path) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (scale, path) = match wanted.split_once(':') {
+            Some((scale, path)) if !scale.is_empty() && scale.chars().all(|c| c.is_ascii_digit()) => {
+                (scale.parse::<f32>().unwrap_or(1.0).clamp(1.0, 4.0), path)
+            }
+            _ => (1.0, wanted),
+        };
         let (width, height) = (window.width() as f64, window.height() as f64);
         let snapshot = gtk::Snapshot::new();
+        snapshot.scale(scale, scale);
         gtk::WidgetPaintable::new(Some(&window)).snapshot(&snapshot, width, height);
         let Some(node) = snapshot.to_node() else {
             note!("omarepos: there is nothing to take a picture of");
@@ -310,6 +343,23 @@ pub fn install(window: &adw::ApplicationWindow) {
         }
     });
     window.add_action(&shot);
+
+    // Where the divider of a split page stands, in pixels from its top: the
+    // commit graph above, what a commit changed below. A person drags it; a
+    // page opened where frames are slow takes its share of a height it does
+    // not have yet, and a picture of it wants the divider put somewhere.
+    let split = gio::SimpleAction::new("split", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    split.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let at = wanted.and_then(|wanted| wanted.str()).and_then(|wanted| wanted.parse::<i32>().ok());
+        match (first_split(window.upcast_ref()), at) {
+            (Some(split), Some(at)) => split.set_position(at),
+            (None, _) => note!("omarepos: there is no split on screen"),
+            (_, None) => note!("omarepos: split wants a number of pixels"),
+        }
+    });
+    window.add_action(&split);
 
     // Text, into the field the keyboard is in.
     let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
@@ -494,6 +544,23 @@ fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
     let mut child = widget.first_child();
     while let Some(current) = child {
         if let Some(found) = find_dropdown(&current, says) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
+fn first_split(widget: &gtk::Widget) -> Option<gtk::Paned> {
+    if !widget.is_mapped() {
+        return None;
+    }
+    if let Some(split) = widget.downcast_ref::<gtk::Paned>() {
+        return Some(split.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = first_split(&current) {
             return Some(found);
         }
         child = current.next_sibling();

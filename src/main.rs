@@ -101,8 +101,12 @@ fn main() -> glib::ExitCode {
     // a bare "activate" to the one already running and exits, and whatever was
     // on its command line goes with it. A run that was told where to look is
     // therefore its own process, or `-r` would do nothing whenever a window
-    // happened to be open.
-    let flags = if cfg.one_off() {
+    // happened to be open. So is a window a script drives: started beside the
+    // one somebody is using, it would bring that one forward and exit.
+    let alone = cfg.one_off();
+    #[cfg(debug_assertions)]
+    let alone = alone || ui::debug::driven();
+    let flags = if alone {
         gtk::gio::ApplicationFlags::NON_UNIQUE
     } else {
         gtk::gio::ApplicationFlags::empty()
