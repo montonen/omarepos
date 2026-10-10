@@ -202,6 +202,39 @@ command in `uwsm-app`, which puts it in its own systemd scope. Check the key is
 free first with `omarchy menu keybindings --print`, and validate with
 `hyprctl reload && hyprctl configerrors`.
 
+### Or have your agent install it
+
+If a coding agent works on your machine (Claude Code, or any other that can
+run commands there), give it this prompt:
+
+```text
+Install omarepos from https://github.com/montonen/omarepos on this machine.
+
+1. Clone it to ~/code/omarepos, creating ~/code if it is not there. If
+   ~/code/omarepos exists already, stop and ask me.
+2. Read the "Install" section of README.md in the clone and do what it says:
+   the packages (ask me before running anything with sudo), then
+   `cargo install --path .`, the symlink into ~/.local/bin, the desktop entry
+   and the icon.
+3. Add the Hyprland keybinding the README gives, on SUPER + SHIFT + R. First
+   check that the key is free with `omarchy menu keybindings --print`. If it
+   is taken, tell me what has it and propose another key. Back up
+   ~/.config/hypr/bindings.lua before editing it, then run
+   `hyprctl reload && hyprctl configerrors` and show me what they say.
+4. Ask me which folders hold my git repositories. If the answer is anything
+   but ~/code alone, write them as `roots` in ~/.config/omarepos/config.toml,
+   after the pattern of config.example.toml in the clone.
+5. Check that `~/.local/bin/omarepos --version` runs. Do not start the app,
+   and change nothing else on the machine.
+
+Then tell me what you installed and where, and anything you skipped.
+```
+
+It is built from source, so give it a few minutes. To update later, ask the
+agent to pull in `~/code/omarepos` and run `cargo install --path .` again. A
+window that was open through the update is still the old program, and says so
+when you bring it forward.
+
 ## Getting started
 
 Start it. With no configuration it looks for repositories under `~/code`,
