@@ -2,7 +2,8 @@
 
 ## Configuration
 
-Optional, at `~/.config/omarepos/config.toml`:
+Optional, at `~/.config/omarepos/config.toml`. Without one there is a single
+root, `~/Work`, searched three levels down.
 
 Everything here is also editable from the settings dialog, which rewrites this
 file (and drops your comments when it does).
@@ -23,8 +24,8 @@ it says so when it is brought forward: quit and start again for the new one.
 # Directories to scan. `~` is expanded. A root is either a bare path, or a
 # table when it needs options.
 roots = [
-  "~/code",
-  { path = "~/work/acme", nested = true, tag = "acme", include_self = false },
+  "~/Work",
+  { path = "~/clients/acme", nested = true, tag = "acme", include_self = false },
 ]
 
 # Individual repositories, included wherever they live.
@@ -70,7 +71,9 @@ colours in a diff are the highlighter's.
 
 The roles are used the way Omarchy's own templates use them: `background` for
 the page, `lighter_background` for cards, `foreground` for text, `muted` for
-borders, `accent`, and `red` and `yellow` for what calls for attention. Small
+borders, `accent`, and `red` and `yellow` for what calls for attention.
+The button a page puts forward to be pressed, **Commit** or **Choose
+folders…**, is filled with the accent. Small
 print is the foreground at seven tenths, which is how those templates write
 muted text. It is not `light_foreground`, which in some themes is the brighter
 foreground and not the dimmer one.

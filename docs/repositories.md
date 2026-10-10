@@ -2,6 +2,12 @@
 
 ## Adding repositories
 
+With no configuration omarepos looks under `~/Work`, the folder Omarchy sets
+up for work. A window with nothing to list says which folders it looked in and
+what it found there, and offers **Choose folders…**, which opens Settings. The
+keyboard is on that button, so `Enter` gets there; once there is something to
+list, the keyboard is in the filter, as it is at launch.
+
 Three ways, in order of convenience:
 
 1. **Settings** (`Ctrl+,` or the gear in the header) — add a scan root with a
@@ -25,7 +31,7 @@ Otherwise there is one window: starting omarepos while it is already open
 brings that window forward.
 
 A root is searched `max_depth` levels down and stops descending at the first
-repository it finds, so `~/code` picks up `~/code/foo` and `~/code/plugins/bar`
+repository it finds, so `~/Work` picks up `~/Work/foo` and `~/Work/plugins/bar`
 without ever walking into their contents. `extra_repos` entries are included
 whatever their depth, which is the escape hatch for a repo in an awkward place.
 
@@ -39,8 +45,8 @@ Mark such a root as a *workspace*, in settings or in the config file:
 
 ```toml
 roots = [
-  "~/code",
-  { path = "~/work/acme", nested = true, tag = "acme" },
+  "~/Work",
+  { path = "~/clients/acme", nested = true, tag = "acme" },
 ]
 ```
 

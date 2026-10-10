@@ -40,7 +40,7 @@ pub fn tildify(path: &Path) -> String {
 /// it needs options:
 ///
 /// ```toml
-/// roots = ["~/code", { path = "~/work/acme", nested = true, tag = "acme" }]
+/// roots = ["~/Work", { path = "~/clients/acme", nested = true, tag = "acme" }]
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -436,7 +436,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            roots: vec![RootSpec::Simple("~/code".to_string())],
+            // Where Omarchy puts work: its installer makes ~/Work, and its
+            // shell keeps `try` under it. It was ~/code, one person's habit,
+            // which a fresh Omarchy does not have.
+            roots: vec![RootSpec::Simple("~/Work".to_string())],
             extra_repos: Vec::new(),
             max_depth: 3,
             terminal: None,
@@ -776,7 +779,7 @@ mod tests {
         let _ = std::fs::remove_file(Config::path());
         let cfg = Config::load();
         assert_eq!(cfg.load_error, None);
-        assert_eq!(cfg.root_labels(), vec!["~/code".to_string()]);
+        assert_eq!(cfg.root_labels(), vec!["~/Work".to_string()]);
         assert!(!cfg.one_off());
     }
 

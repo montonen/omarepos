@@ -2,13 +2,13 @@
 
 # A root is a bare path, or a table when it needs options.
 roots = [
-  "~/code",
+  "~/Work",
 
   # A "workspace": a repository that holds nothing but other clones. `nested`
   # finds the clones this folder's own repository ignores, at any depth, and
   # leaves its submodules out. `tag` is one word, put on what is found, so you
   # can filter it back out of the grid.
-  # { path = "~/work/acme", nested = true, tag = "acme", include_self = false },
+  # { path = "~/clients/acme", nested = true, tag = "acme", include_self = false },
 ]
 
 # Individual repositories outside the roots above.

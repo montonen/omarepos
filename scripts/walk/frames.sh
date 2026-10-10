@@ -80,5 +80,47 @@ X dump "width:" | grep -q "width: 900 " || wrong "the window did not shrink back
 
 python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || wrong "the program stopped: $(grep -m1 -A1 'panicked at' "$W/app.log" | cut -c1-200)"
 X stop
+
+# ---- a window with nothing to list
+# Not a one-off look this time, which always has its fixtures: an ordinary
+# window, whose roots are the configuration's, pointed at a folder that is
+# not there. It has a home of its own as well, so that nothing it falls back
+# on can be a folder of whoever runs this. The page has to say what it found,
+# offer the way to Settings with the keyboard on it, give the keyboard back
+# to that button when Settings closes, and to the filter once there is a
+# fleet. Here and not in the walk because a page that has never been drawn
+# is not on screen there.
+ordinary() { OMAREPOS_WALK_ROOT= HOME="$W/home" python3 "$HERE/drive.py" "$@"; }
+on_the_way() { X dump "Choose folders" | grep -q "\[focus\]" || wrong "$1 ($(X dump keyboard:))"; }
+# A first start in a home with no caches is slow, and frames are few: wait
+# for what is expected for as long as fifteen seconds, and say when it did
+# not come.
+until_says() { local i; for i in $(seq 1 30); do X dump | grep -q "$1" && return 0; sleep 0.5; done; return 1; }
+mkdir -p "$W/home"
+printf 'roots = ["%s/nowhere"]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"
+ordinary start-offscreen || exit 2
+until_says 'StatusPage "No repositories found | .*nowhere: does not exist' || wrong "an empty window does not say what it found ($(X dump StatusPage))"
+until_says 'Choose folders.*\[focus\]' || wrong "with nothing to list, the keyboard is not on the way to Settings ($(X dump keyboard:))"
+X press "Choose folders"
+until_says "dialog: true" || wrong "the button on the empty page did not open Settings"
+sleep 2; X keys Escape
+until_says "dialog: false" || wrong "Settings did not close"
+sleep 2
+on_the_way "closing Settings did not put the keyboard back on the empty page's button"
+X keys ctrl+r; sleep 3.5
+on_the_way "a rescan that found nothing did not put the keyboard back on the way to Settings"
+# The same, with Settings closed the moment it opens: before it has been
+# drawn, which is when the keyboard was left on a button in the header.
+X press "Choose folders"; X keys Escape
+until_says "dialog: false" || wrong "Settings did not close when closed at once"
+sleep 2
+on_the_way "Settings closed at once left the keyboard somewhere else"
+printf 'roots = ["%s/fleet"]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"
+X keys ctrl+r
+until_says "om-name" || wrong "the fleet did not appear after the empty page"
+sleep 2
+keyboard GtkText "leaving the empty page did not put the keyboard in the filter"
+python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || wrong "the program stopped: $(grep -m1 -A1 'panicked at' "$W/app.log" | cut -c1-200)"
+X stop
 echo "wrong: $WRONG"
 [ "$WRONG" = 0 ]

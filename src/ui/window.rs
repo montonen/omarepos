@@ -125,6 +125,12 @@ struct Ui {
     stack: gtk::Stack,
     /// What the window shows in place of an empty grid.
     empty: adw::StatusPage,
+    /// On that page, the way to Settings: shown when there is no repository
+    /// to list at all, not when a filter hides the ones there are.
+    empty_action: gtk::Button,
+    /// The window has shown that page and the keyboard has not yet been
+    /// started in the filter for the repositories that came after it.
+    unstarted: Cell<bool>,
     flow: gtk::FlowBox,
     status: gtk::Label,
     /// Up for as long as a file the app keeps cannot be read.
@@ -309,9 +315,23 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .build();
     scroller.add_css_class("om-grid");
 
+    // What a window with nothing to list offers: the way to Settings, which
+    // is where a folder to scan is named. A first launch on a machine that
+    // keeps its repositories somewhere else used to end at a folder icon and
+    // "~/code: does not exist", with the keyboard in a filter that had
+    // nothing to filter, and no word of where to go from there.
+    let empty_action = gtk::Button::builder()
+        .label("Choose folders…")
+        .tooltip_text("Open Settings (Ctrl+,)")
+        .action_name("win.settings")
+        .halign(gtk::Align::Center)
+        .build();
+    empty_action.add_css_class("pill");
+    empty_action.add_css_class("suggested-action");
     let empty = adw::StatusPage::builder()
         .icon_name("folder-symbolic")
         .title("No repositories found")
+        .child(&empty_action)
         .build();
 
     let stack = gtk::Stack::new();
@@ -385,6 +405,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         spinner,
         stack,
         empty: empty.clone(),
+        empty_action: empty_action.clone(),
+        unstarted: Cell::new(false),
         flow,
         status,
         trouble,
@@ -776,7 +798,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         };
         {
             let sync = Rc::clone(&sync);
-            window.connect_visible_dialog_notify(move |_| sync());
+            let ui = Rc::clone(&ui);
+            window.connect_visible_dialog_notify(move |window| {
+                sync();
+                if window.visible_dialog().is_none() {
+                    ui.keyboard_after_dialog();
+                }
+            });
         }
         let ui = Rc::clone(&ui);
         nav.connect_visible_page_notify(move |_| {
@@ -1384,23 +1412,44 @@ impl Ui {
         self.sync_tag_controls();
 
         let page = if repos.is_empty() && !self.scanning.get() { "empty" } else { "grid" };
+        // Nothing to list at all, as against nothing that passes the filter.
+        let nothing_at_all = self.repos.borrow().is_empty();
         if page == "empty" {
             // Why, where it can be said. "No repositories found" over a
             // filter that hides forty of them, or over a root that has been
             // moved, sent the reader looking in the wrong place.
             let amiss = self.roots_amiss();
-            let (title, why) = if !self.repos.borrow().is_empty() {
+            let (title, why) = if !nothing_at_all {
                 ("Nothing matches", "No repository on the grid passes the filter in force.".to_string())
             } else if amiss.is_empty() {
-                ("No repositories found", "Add a folder to scan in Settings (Ctrl+,).".to_string())
+                ("No repositories found", "No folder is set to be scanned.".to_string())
             } else {
                 ("No repositories found", amiss.join("\n"))
             };
             self.empty.set_title(title);
             self.empty.set_description(Some(&glib::markup_escape_text(&why)));
+            // A filter that hides everything is undone in the filter. A
+            // fleet with nothing in it is put right in Settings.
+            self.empty_action.set_visible(nothing_at_all);
         }
+        // Taken before the page changes: the button leaves the screen with
+        // the page, and the keyboard with the button.
+        let leaving_the_way = page != "empty" && self.empty_action.has_focus();
         self.stack.set_visible_child_name(page);
         self.update_status();
+        if page == "empty" && nothing_at_all {
+            self.unstarted.set(true);
+            self.offer_settings();
+        } else if nothing_at_all {
+            // A scan has begun and found nothing yet. Left where it was,
+            // the keyboard would be moved by GTK to whatever comes next,
+            // which is a button in the header.
+            if leaving_the_way {
+                self.focus_filter();
+            }
+        } else if self.unstarted.get() {
+            self.start_keyboard();
+        }
 
         if let Some(path) = focused {
             if let Some(index) = repos.iter().position(|repo| repo.path == path) {
@@ -2446,6 +2495,76 @@ impl Ui {
         }
         self.search.grab_focus();
         self.search.select_region(0, -1);
+    }
+
+    /// With nothing to list there is nothing to filter, so the keyboard goes
+    /// to the one thing on the page that leads somewhere, and Enter opens
+    /// Settings. From an empty filter or from nowhere only: a keyboard that
+    /// has been taken to a button in the header stays there, so does one in
+    /// a dialog, and so does one in a filter that is being typed in. The
+    /// fleet can go from under a sentence (a disk unmounted), and the space
+    /// that came next would have opened Settings.
+    fn offer_settings(&self) {
+        if !self.on_grid() || self.window.visible_dialog().is_some() {
+            return;
+        }
+        let free = match self.keyboard() {
+            None => true,
+            Some(had) => {
+                !had.is_mapped() || (had.is_ancestor(&self.search) && self.search.text().is_empty())
+            }
+        };
+        if free {
+            self.empty_action.grab_focus();
+        }
+    }
+
+    /// The first repositories have arrived in a window that had none to
+    /// list. The keyboard starts in the filter, as it does at launch,
+    /// wherever it was: on the button that led to Settings, or on the one in
+    /// the header that started the scan. Not from under a dialog, which has
+    /// the keyboard while it is open: then when it closes.
+    fn start_keyboard(&self) {
+        if !self.on_grid() || self.window.visible_dialog().is_some() {
+            return;
+        }
+        self.unstarted.set(false);
+        self.focus_filter();
+    }
+
+    /// A dialog has closed, and the keyboard goes back to what had it before
+    /// the dialog opened: libadwaita sees to that. Three times it does not
+    /// come out right, and this is for those.
+    ///
+    /// On the page that says there is nothing to list, the keyboard belongs
+    /// on the button there, which is the one thing on the page that leads
+    /// anywhere. Closed before it had been drawn, Settings left the keyboard
+    /// on a button in the header instead.
+    ///
+    /// When Settings has given the grid its first repositories, the button
+    /// the keyboard was on has left the screen with its page, and the
+    /// keyboard starts in the filter as it does at launch.
+    ///
+    /// And when what had the keyboard has gone for any other reason (a card
+    /// that was rebuilt under the tag editor), it was nowhere, and no key did
+    /// anything until the filter or a card had been clicked. The filter
+    /// again.
+    ///
+    /// A beat later, so that libadwaita has had its turn first.
+    fn keyboard_after_dialog(self: &Rc<Self>) {
+        let ui = Rc::clone(self);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+            if ui.window.visible_dialog().is_some() || !ui.on_grid() {
+                return;
+            }
+            if ui.empty_action.is_mapped() {
+                ui.empty_action.grab_focus();
+            } else if ui.unstarted.get() {
+                ui.start_keyboard();
+            } else if !ui.keyboard().is_some_and(|had| had.is_mapped()) {
+                ui.focus_filter();
+            }
+        });
     }
 
     /// Put the keyboard in the grid. `force` takes focus even from a text

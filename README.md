@@ -210,8 +210,8 @@ run commands there), give it this prompt:
 ```text
 Install omarepos from https://github.com/montonen/omarepos on this machine.
 
-1. Clone it to ~/code/omarepos, creating ~/code if it is not there. If
-   ~/code/omarepos exists already, stop and ask me.
+1. Clone it to ~/Work/omarepos, creating ~/Work if it is not there. If
+   ~/Work/omarepos exists already, stop and ask me.
 2. Read the "Install" section of README.md in the clone and do what it says:
    the packages (ask me before running anything with sudo), then
    `cargo install --path .`, the symlink into ~/.local/bin, the desktop entry
@@ -222,7 +222,7 @@ Install omarepos from https://github.com/montonen/omarepos on this machine.
    ~/.config/hypr/bindings.lua before editing it, then run
    `hyprctl reload && hyprctl configerrors` and show me what they say.
 4. Ask me which folders hold my git repositories. If the answer is anything
-   but ~/code alone, write them as `roots` in ~/.config/omarepos/config.toml,
+   but ~/Work alone, write them as `roots` in ~/.config/omarepos/config.toml,
    after the pattern of config.example.toml in the clone.
 5. Check that `~/.local/bin/omarepos --version` runs. Do not start the app,
    and change nothing else on the machine.
@@ -231,14 +231,16 @@ Then tell me what you installed and where, and anything you skipped.
 ```
 
 It is built from source, so give it a few minutes. To update later, ask the
-agent to pull in `~/code/omarepos` and run `cargo install --path .` again. A
+agent to pull in `~/Work/omarepos` and run `cargo install --path .` again. A
 window that was open through the update is still the old program, and says so
 when you bring it forward.
 
 ## Getting started
 
-Start it. With no configuration it looks for repositories under `~/code`,
-three levels down.
+Start it. With no configuration it looks for repositories under `~/Work`, the
+folder Omarchy sets up for work, three levels down. Where it finds none, the
+window says which folder it looked in and offers **Choose folders…**, with the
+keyboard on it, so `Enter` takes you to Settings.
 
 To look elsewhere, open **Settings** (`Ctrl+,`) and add a folder to scan or a
 single repository, or write the same thing in
@@ -246,8 +248,9 @@ single repository, or write the same thing in
 
 ```toml
 roots = [
+  "~/Work",
   "~/code",
-  { path = "~/work/acme", nested = true, tag = "acme" },
+  { path = "~/clients/acme", nested = true, tag = "acme" },
 ]
 extra_repos = ["~/.config/omarchy"]
 ```

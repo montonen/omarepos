@@ -14,7 +14,7 @@ cards are all one height: where a thing is says what it is. Top to bottom:
 | Tags | The repository's tags, each with the dot of its own colour; `new` on one found since you last looked | Keys, on the card with the keyboard |
 
 The folder and the remote are written without the repository's name, which is
-on the line above: `~/work/acme/ · github.com/acme/`. A remote called
+on the line above: `~/clients/acme/ · github.com/acme/`. A remote called
 something else is written whole, since the difference is then the thing to
 see. The full path and the address are in the tooltip, with the mix of
 languages (`lang:` in the filter still finds by it).
