@@ -151,12 +151,18 @@ step "30 days" "X choose 'Time window=2'; sleep 1.5"
 # The other view: every branch, which on these fixtures is more commits than
 # the branches that are checked out have, the merges fixture's two unmerged
 # branches among them. And back.
-before=$(X dump " commits")
+# What was counted is read off the page's status line. Not off every line
+# that says "commits": an author's tooltip is one of those, and it also says
+# "last commit 21 minutes ago", which is another string a minute later
+# whatever was counted. About one walk in twenty reported the figures changed
+# for that.
+figures() { X dump "om-statusbar"; }
+before=$(figures)
 step "every branch" "X choose 'Which branches=1'; sleep 1.6"
 X dump "all branches" | grep -q "all branches" || { WRONG=$((WRONG+1)); echo "WRONG: the page does not say it is counting all branches"; }
-[ "$(X dump " commits")" != "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: every branch counted the same as the checked-out ones ($before)"; }
+[ "$(figures)" != "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: every branch counted the same as the checked-out ones ($before)"; }
 step "checked-out branches again" "X choose 'Which branches=0'; sleep 1.5"
-[ "$(X dump " commits")" = "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: back on the checked-out branches the figures are not what they were"; }
+[ "$(figures)" = "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: back on the checked-out branches the figures are not what they were ($(figures); before: $before)"; }
 step "7 days" "X choose 'Time window=0'; sleep 1.2"
 step "an author" 'X press "Fixture"; sleep 0.4'
 step "back" "X keys Escape"
