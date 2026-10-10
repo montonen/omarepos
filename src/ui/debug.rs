@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! gdbus call --session --dest <bus name> \
-//!     --object-path /se/alphadev/Omarepos/window/1 \
+//!     --object-path /se/montonen/Omarepos/window/1 \
 //!     --method org.gtk.Actions.Activate dump '[]' '{}'
 //! ```
 

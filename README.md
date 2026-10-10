@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="data/se.alphadev.Omarepos.svg" width="76" alt=""><br>
+  <img src="data/se.montonen.Omarepos.svg" width="76" alt=""><br>
   omarepos
 </h1>
 
@@ -179,8 +179,8 @@ cd omarepos
 cargo install --path .
 mkdir -p ~/.local/bin
 ln -sf ~/.cargo/bin/omarepos ~/.local/bin/omarepos
-install -Dm644 data/se.alphadev.Omarepos.desktop ~/.local/share/applications/se.alphadev.Omarepos.desktop
-install -Dm644 data/se.alphadev.Omarepos.svg ~/.local/share/icons/hicolor/scalable/apps/se.alphadev.Omarepos.svg
+install -Dm644 data/se.montonen.Omarepos.desktop ~/.local/share/applications/se.montonen.Omarepos.desktop
+install -Dm644 data/se.montonen.Omarepos.svg ~/.local/share/icons/hicolor/scalable/apps/se.montonen.Omarepos.svg
 ```
 
 The symlink matters on Omarchy: the Hyprland/uwsm session `PATH` carries

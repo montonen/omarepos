@@ -36,7 +36,7 @@ use gtk::gdk;
 use gtk::glib;
 use gtk::prelude::*;
 
-const APP_ID: &str = "se.alphadev.Omarepos";
+const APP_ID: &str = "se.montonen.Omarepos";
 const USAGE: &str = "\
 omarepos — Omarchy-styled overview of your git repos
 

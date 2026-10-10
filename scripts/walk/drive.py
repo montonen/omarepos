@@ -43,10 +43,10 @@ ROOT = os.environ.get('OMAREPOS_WALK_ROOT', os.path.join(W, 'fleet'))
 WHERE = ['--root', ROOT] if ROOT else []
 BIN = os.path.join(REPO, 'target', 'debug', 'omarepos')
 PIDFILE = os.path.join(W, 'pid')
-OBJECT = '/se/alphadev/Omarepos/window/1'
+OBJECT = '/se/montonen/Omarepos/window/1'
 # Offscreen, GTK does not put the window on the bus. The application is there
 # on any display, and a debug build's `app.window` passes an action on.
-APP_OBJECT = '/se/alphadev/Omarepos'
+APP_OBJECT = '/se/montonen/Omarepos'
 OFFSCREEN = os.path.join(W, 'offscreen')
 DAEMON_PID = os.path.join(W, 'broadway.pid')
 DISPLAY = ':9'
@@ -169,7 +169,7 @@ def start():
     sh('hyprctl', 'dispatch', 'hl.dsp.exec_cmd("%s", { workspace = "special:omarepos-walk silent" })' % command)
     for _ in range(50):
         time.sleep(0.2)
-        new = [c for c in clients() if c['pid'] not in before and c['class'] == 'se.alphadev.Omarepos']
+        new = [c for c in clients() if c['pid'] not in before and c['class'] == 'se.montonen.Omarepos']
         if new:
             open(PIDFILE, 'w').write(str(new[0]['pid']))
             mine()
