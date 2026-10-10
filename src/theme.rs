@@ -416,6 +416,17 @@ impl Palette {
             let nearer = |a: Rgb, b: Rgb| if on_red(b) > on_red(a) { b } else { a };
             plain.into_iter().fold(card, nearer)
         });
+        // What a page puts forward as the thing to do (the commit button,
+        // the way to Settings on a window with nothing to list) is filled
+        // with the theme's accent, which is what Omarchy gives the selected
+        // and the primary. It was libadwaita's own blue in every theme. Its
+        // text is found the way the flag's is.
+        let accent = Self::rgb(&p.accent);
+        let on_accent = |text: Rgb| contrast(text, accent);
+        let primary = plain.into_iter().find(|&text| on_accent(text) >= LEGIBLE).unwrap_or_else(|| {
+            let nearer = |a: Rgb, b: Rgb| if on_accent(b) > on_accent(a) { b } else { a };
+            plain.into_iter().fold(page, nearer)
+        });
         // A card's left edge is the state of its repository: red for
         // trouble, yellow for work that is not committed, the accent for
         // commits that are nowhere else. It is 4px where the border is 1px,
@@ -724,6 +735,12 @@ window.omarepos headerbar button.om-quick-tag:checked {{
   border-radius: 4px;
   background-color: {red};
   color: {flag};
+}}
+
+/* The one thing a page puts forward to be done. */
+window.omarepos button.suggested-action {{
+  background-color: {accent};
+  color: {primary};
 }}
 
 /* What the card draws for itself it draws in the colour its widget has
@@ -1035,6 +1052,7 @@ popover.menu contents, popover contents {{
             accent = p.accent,
             red = p.red,
             flag = hex(flag),
+            primary = hex(primary),
             stepped_back = STEPPED_BACK,
             card_lit = CARD_LIT,
             card_focused = CARD_FOCUSED,
@@ -1902,6 +1920,19 @@ brown = "#743d1e"
         written.check();
         muted.check();
         flags.check();
+    }
+
+    /// The button a page puts forward is the theme's accent, and what is
+    /// written on it can be read there, in every stock theme.
+    #[test]
+    fn the_button_a_page_puts_forward_is_the_accent_and_can_be_read() {
+        for palette in palettes() {
+            let sheet = Sheet::of(&palette);
+            let rule = "window.omarepos button.suggested-action";
+            assert_eq!(sheet.value(rule, "background-color"), palette.accent, "{}", palette.name);
+            let read = ratio(sheet.solid(rule, "color"), sheet.solid(rule, "background-color"));
+            assert!(read >= 4.5, "{}: the button's text is {read:.2}:1 on its fill", palette.name);
+        }
     }
 
     /// A card has two layers in one place and shows one of them: the short
