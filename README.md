@@ -47,16 +47,17 @@ says what it is.
 | Name | The repository |
 | Where | The folder it lies in, and the remote it belongs to |
 | Branch | The branch, and on the right what is uncommitted: `+1 ~3 ?4` is one staged, three modified, four untracked |
-| Sync | `↑ 2 ahead` is what exists only here. `↓ 28 behind` is what is waiting, and **held back** is added when the refresh would have brought it in and something is in the way |
+| Sync | `↑ 3 ahead` is what exists only here. `↓ 28 behind` is what is waiting, and **held back** is added when the refresh would have brought it in and something is in the way |
 | Commit | The last commit: how old, what it says, and who wrote it when that was not you |
 | Lately | Commits a day over the last four weeks, yours solid and other people's fainter |
 | Tags | Your own labels, each with a dot in the tag's colour: one of eight, chosen by its name |
 
 Apart from the dot on a tag, colour is kept for what needs you. The left edge
 is yellow for uncommitted work, the accent colour for commits that exist
-nowhere else, and red for trouble. The card `Enter` would open, the first one
-here, shows the two commits before the last in place of the four weeks.
-[Reading a card](docs/cards.md) has the rest.
+nowhere else, and red for trouble. The card `Enter` would open from the
+filter, the first one in the picture at the top, shows the two commits before
+the last in place of the four weeks. [Reading a card](docs/cards.md) has the
+rest.
 
 ### Type, then Enter
 
@@ -173,7 +174,7 @@ sudo pacman -S --needed gtk4 libadwaita libgit2 git rust base-devel
 ```
 
 ```bash
-git clone https://github.com/jmagentjames/omarepos.git
+git clone https://github.com/montonen/omarepos.git
 cd omarepos
 cargo install --path .
 mkdir -p ~/.local/bin
@@ -284,4 +285,4 @@ fetch: with the refresh off, that is the last time you pressed `f`, `p` or
 
 ## License
 
-MIT, as `Cargo.toml` declares.
+MIT. See [LICENSE](LICENSE).
