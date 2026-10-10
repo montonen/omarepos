@@ -113,7 +113,7 @@ OMAREPOS_SHOTS_DIR=/some/scratch/dir scripts/shots/shoot.sh
 ```
 
 `fleet.sh` puts sixteen repositories in a home directory of its own, as
-`~/code` there: a copy of this one, and clones of the fifteen public
+`~/Work` there: a copy of this one, and clones of the fifteen public
 repositories that had the most stars on GitHub under a search for "omarchy"
 when the pictures were last taken. Those are cloned without signing in, and
 git is given a configuration that reaches no credential helper. So that there

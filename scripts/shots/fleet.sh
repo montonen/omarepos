@@ -14,7 +14,7 @@ set -e
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(dirname "$(dirname "$HERE")")
 W=${OMAREPOS_SHOTS_DIR:-$REPO/target/shots}
-CODE=$W/home/code
+CODE=$W/home/Work
 
 FLEET="
 omacom/omarchy

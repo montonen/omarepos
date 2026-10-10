@@ -16,7 +16,7 @@
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(dirname "$(dirname "$HERE")")
 W=${OMAREPOS_SHOTS_DIR:-$REPO/target/shots}
-CODE=$W/home/code
+CODE=$W/home/Work
 RAW=$W/raw
 OUT=${OMAREPOS_SHOTS_OUT:-$REPO/docs/img}
 THEMES=${OMARCHY_PATH:-/usr/share/omarchy}/themes
@@ -29,11 +29,11 @@ CARDS=${SHOTS_CARDS:-omarepos omacosy awesome-omarchy}
 mkdir -p "$RAW" "$OUT" "$W/config/omarepos" "$W/config/gtk-4.0" "$W/state/omarepos" "$W/state/omarchy/current"
 
 # ---- what the window is told
-# An ordinary window on ~/code, with the refresh a person would have switched
+# An ordinary window on ~/Work, with the refresh a person would have switched
 # on, last run four minutes ago: so nothing is due while the pictures are
 # taken, and a card can say "held back".
 cat > "$W/config/omarepos/config.toml" <<'EOF'
-roots = ["~/code"]
+roots = ["~/Work"]
 max_depth = 3
 
 [refresh]
