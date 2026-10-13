@@ -1,0 +1,42 @@
+# Build and test, on every push and every pull request.
+#
+# In an Arch container, since that is what Omarchy is: the packages the README
+# tells a person to install, at the versions a person would get today. The
+# tests build their own repositories under target/ and need git and nothing
+# else, no display and no session bus.
+#
+# The walk and the frames check (scripts/walk) are not run here. One needs
+# Hyprland and the other a display of its own that draws a frame a second.
+# They are run by hand, after a change to anything a person can click.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the run before it moot.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    # A pull request from a branch of this repository has been built already,
+    # by the push that made it. One from a fork has not.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 30
+    steps:
+      - name: Install what the README says to install
+        run: pacman -Syu --noconfirm --needed gtk4 libadwaita libgit2 git rust base-devel
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked

@@ -20,7 +20,9 @@ sudo pacman -S --needed gtk4 libadwaita libgit2 git rust base-devel
 
 `cargo test` builds its own repositories under `target/test-fixtures`, each
 with a bare remote beside it and a home directory of its own, and touches
-nothing else on the machine.
+nothing else on the machine. It needs `git` and no display. Every push and
+pull request is built and tested on GitHub
+(`.github/workflows/ci.yml`), in an Arch container with the packages above.
 
 A panic inside a GTK callback ends the program, and most of what a window
 does cannot be reached by a unit test. So there is a second kind of test, a
