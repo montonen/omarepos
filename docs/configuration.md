@@ -72,8 +72,8 @@ colours in a diff are the highlighter's.
 The roles are used the way Omarchy's own templates use them: `background` for
 the page, `lighter_background` for cards, `foreground` for text, `muted` for
 borders, `accent`, and `red` and `yellow` for what calls for attention.
-The button a page puts forward to be pressed, **Commit** or **Choose
-folders…**, is filled with the accent. Small
+The button a page puts forward to be pressed, **Choose folders…** on a
+window with nothing to list, is filled with the accent. Small
 print is the foreground at seven tenths, which is how those templates write
 muted text. It is not `light_foreground`, which in some themes is the brighter
 foreground and not the dimmer one.

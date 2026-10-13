@@ -19,7 +19,7 @@ moves from the filter into the cards.
 | Key | Action |
 | --- | --- |
 | `Ctrl+R` / `F5` | Rescan (local only). In a commit graph: read that repository again |
-| `Ctrl+Shift+R` | Run the refresh now: fetch, and fast-forward if that is switched on |
+| `Ctrl+Shift+R` | Run the refresh now: fetch every repository in scope |
 | `Ctrl+L` | Jump to the grid |
 | `Ctrl+F`, or `/` with the keyboard on a card | Focus the filter box |
 | `Ctrl+Shift+F` | Search commits across these repos |
@@ -27,7 +27,6 @@ moves from the filter into the cards.
 | `Down` in the filter | Move into the cards |
 | `Ctrl+A` | Select every repo shown; again to deselect |
 | `Esc` | Back out: a dialog or menu, the filter you are typing in, then the page, then the selection, then the filter |
-| `Esc` in the commit message | Step out of the field. The message stays |
 | `Ctrl+G` | Contributions for the selected repos, or all of them |
 | `Ctrl+Shift+A` | Clear the selection |
 | `lang:rust` in the filter | Narrow by language |
@@ -43,23 +42,19 @@ moves from the filter into the cards.
 | `l` on a focused card, or in a graph | Open a terminal there — lazygit |
 | `e` | Open it in your editor |
 | `o` | Open its page on the web — GitHub, or wherever the remote is |
-| `p` | Fetch and fast-forward that repo |
-| `f` | Fetch only, leaving your files alone |
+| `f` | Fetch that repo. Its branches and files are left alone |
 | `Tab` in a commit graph | Into the changed files |
 | `Ctrl+D` in a commit graph | Show or hide the pane below it |
-| `Space` in the changed files | Stage or unstage that file |
-| `c` in the changed files | Write a commit message |
-| `Enter` in the message | Commit what is staged |
 
-`l`, `e`, `o`, `p` and `f` act once for each press. A key held down, or one
-that sticks, does not open a terminal per repeat or start a second fetch.
+`l`, `e`, `o` and `f` act once for each press. A key held down, or one that
+sticks, does not open a terminal per repeat or start a second fetch.
 
 The filter matches repo name, path, branch and remote. Every word typed has to
 be found, in any order, so `acme billing` finds the billing repository under
 `acme`. `tag:work` and `lang:rust` narrow by tag and by language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
-unreadable, holding commits that are on no remote, or that the last fetch or
-update failed on.
+unreadable, holding commits that are on no remote, or that the last fetch
+failed on.
 
 ---
 

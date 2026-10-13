@@ -8,7 +8,7 @@ cards are all one height: where a thing is says what it is. Top to bottom:
 | Name | The repository | The **flag**, when there is trouble |
 | Where | The folder it lies in, and the remote it belongs to | |
 | Branch | The branch (or the commit a detached HEAD is on), and `+2 branches` when other local branches hold commits that are on no remote | What is uncommitted: `+1 ~3 ?4` is 1 staged, 3 modified, 4 untracked; `!2` is 2 in conflict; `clean`; stashes |
-| Sync | `↑` what exists only here: `2 ahead`, `3 unpublished`, `no remote` | `↓` what is waiting: `12 behind`, and `held back` when it will not arrive by itself |
+| Sync | `↑` what exists only here: `2 ahead`, `3 unpublished`, `no remote` | `↓` what is waiting: `12 behind` |
 | Commit | The last commit: how old, what it says, and who wrote it if that was not you. `↑` in front when it is on no remote | |
 | Lately | Commits a day over the last four weeks, today at the right, and under them `14 this week · 2 people` or `quiet for 3 weeks` | `remote tip 3h ago`, when behind |
 | Tags | The repository's tags, each with the dot of its own colour; `new` on one found since you last looked | Keys, on the card with the keyboard |
@@ -52,8 +52,8 @@ Where who you are is in doubt (the environment or `author.*` outranks
 tone.
 
 **The card with the keyboard** shows the two commits before the last in place
-of the four weeks, or, when it is flagged or held back, the reason in git's own
-words; and the keys that act on it. The card `Enter` would open from the filter
+of the four weeks, or, when it is flagged, the reason in git's own words; and
+the keys that act on it. The card `Enter` would open from the filter
 shows the same, and says `Enter`. Nothing changes size as the keyboard moves.
 
 "Ahead" is measured against the branch's upstream, and says nothing when there

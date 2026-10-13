@@ -150,10 +150,10 @@ fn main() -> glib::ExitCode {
     let quit = gtk::gio::SimpleAction::new("quit", None);
     {
         // By closing the windows, not by `app.quit()`. Quit ends the process
-        // there and then, under whatever git is in the middle of. A window
-        // that closes gets to hold the application until git is done (see
-        // the close handler in ui/window.rs), and with no window and nothing
-        // held the application ends by itself.
+        // there and then, under a fetch that may be running. A window that
+        // closes gets to hold the application until git has stopped (see the
+        // close handler in ui/window.rs), and with no window and nothing held
+        // the application ends by itself.
         let app = app.clone();
         quit.connect_activate(move |_, _| {
             for window in app.windows() {

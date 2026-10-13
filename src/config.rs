@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
@@ -145,9 +145,12 @@ pub struct Refresh {
     /// Run `git fetch` in each repository, updating what the remote has.
     /// Touches the network but never the working tree.
     pub fetch: bool,
-    /// Fast-forward the checked-out branch when it is clean and strictly
-    /// behind its upstream. Never merges, never rebases, never stashes.
-    pub fast_forward: bool,
+    /// Not a setting any more. Every file the Settings dialog wrote before
+    /// the fast-forward was taken out has this key, and a key nobody knows
+    /// fails the whole file: so it is still read, means nothing, and is not
+    /// written back.
+    #[serde(rename = "fast_forward")]
+    _fast_forward: Option<bool>,
     /// Limit the refresh to repositories carrying one of these tags. Empty
     /// means every repository in the grid.
     pub only_tags: Vec<String>,
@@ -162,7 +165,7 @@ impl Default for Refresh {
         Self {
             every_minutes: 0,
             fetch: false,
-            fast_forward: false,
+            _fast_forward: None,
             only_tags: Vec::new(),
             max_parallel: 4,
             timeout_seconds: 60,
@@ -259,37 +262,33 @@ pub fn last_refresh() -> Option<i64> {
         .and_then(|text| text.trim().parse().ok())
 }
 
-/// What the last pass could not do for a repository.
-///
-/// The two are kept apart because they send the user to different places: a
-/// fetch that failed is about the network or the credentials, and an update
-/// git refused is about something in the working tree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Trouble {
-    /// The fetch failed. A bare string on disk, which is all this file held
-    /// before refusals were recorded too.
-    Fetch(String),
-    /// Fetched, but git would not fast-forward.
-    Update { refused: String },
-}
-
-/// Repositories the last pass could not fetch or could not update. Kept with
-/// the refresh time, in the state directory: the failure outlives the session
-/// that discovered it, and a card that cannot say why it is stuck is the thing
-/// this exists to fix.
+/// Repositories the last fetch failed in, and what git said. Kept with the
+/// refresh time, in the state directory: the failure outlives the session
+/// that discovered it, and a card that cannot say why it is stale is the
+/// thing this exists to fix.
 pub fn fetch_errors_path() -> PathBuf {
     last_refresh_path().with_file_name("fetch-errors.toml")
 }
 
-pub fn load_fetch_errors() -> std::collections::BTreeMap<String, Trouble> {
-    std::fs::read_to_string(fetch_errors_path())
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
+    let read: std::collections::BTreeMap<String, toml::Value> =
+        std::fs::read_to_string(fetch_errors_path())
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default();
+    // A file from before the fast-forward was taken out can also hold what
+    // an update was refused for, written as a table. Those were never fetch
+    // failures, and are left behind here; read as text, one of them would
+    // have failed the whole file and lost the failures with it.
+    read.into_iter()
+        .filter_map(|(path, said)| match said {
+            toml::Value::String(said) => Some((path, said)),
+            _ => None,
+        })
+        .collect()
 }
 
-pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, Trouble>) {
+pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, String>) {
     let path = fetch_errors_path();
     if errors.is_empty() {
         let _ = std::fs::remove_file(&path);
@@ -373,10 +372,9 @@ impl Refresh {
         self.every_minutes > 0
     }
 
-    /// Fast-forwarding without fetching would only ever act on a stale remote
-    /// ref, so it implies a fetch.
+    /// Whether a pass fetches, or only reads local state again.
     pub fn will_fetch(&self) -> bool {
-        self.fetch || self.fast_forward
+        self.fetch
     }
 
     pub fn interval(&self) -> std::time::Duration {
@@ -488,10 +486,10 @@ impl Config {
         if self.roots.is_empty() {
             self.roots = Self::default().roots;
         }
-        // Fast-forwarding fetches first; there is nothing else for it to
-        // move to. A file with `fast_forward` on and `fetch` off ran exactly
-        // that way, while Settings drew the two switches as off and greyed.
-        if self.refresh.fast_forward {
+        // A file from before the fast-forward was taken out may have it on
+        // with `fetch` off, and that pair did fetch: the update needed it.
+        // So it goes on fetching, which is the half of it that is left.
+        if self.refresh._fast_forward == Some(true) {
             self.refresh.fetch = true;
         }
         // Every string here ends up in a label or an entry, and those take no
@@ -703,7 +701,6 @@ impl Config {
         out.push_str("[refresh]\n");
         out.push_str(&format!("every_minutes = {}\n", refresh.every_minutes));
         out.push_str(&format!("fetch = {}\n", refresh.fetch));
-        out.push_str(&format!("fast_forward = {}\n", refresh.fast_forward));
         out.push_str(&format!("only_tags = [{}]\n", list(&refresh.only_tags)));
         out.push_str(&format!("max_parallel = {}\n", refresh.max_parallel));
         out.push_str(&format!("timeout_seconds = {}\n", refresh.timeout_seconds));
@@ -1014,35 +1011,56 @@ mod tests {
     }
 
     #[test]
-    fn troubles_of_both_kinds_survive_being_written_and_read_back() {
+    fn fetch_failures_survive_being_written_and_read_back() {
         let _guard = isolate();
-        let mut troubles = BTreeMap::new();
-        // A refusal sorts before a fetch failure here, which is the order a
-        // TOML writer has to be careful with: a table ahead of a plain value.
-        troubles.insert(
-            "/a/held-back".to_string(),
-            Trouble::Update { refused: "would be overwritten by merge: .env".to_string() },
-        );
-        troubles.insert(
+        let mut failures = BTreeMap::new();
+        failures.insert(
             "/b/unreachable".to_string(),
-            Trouble::Fetch("fatal: could not read from remote repository".to_string()),
+            "fatal: could not read from remote repository".to_string(),
         );
-        save_fetch_errors(&troubles);
-        assert_eq!(load_fetch_errors(), troubles, "{}", read(&fetch_errors_path()));
+        save_fetch_errors(&failures);
+        assert_eq!(load_fetch_errors(), failures, "{}", read(&fetch_errors_path()));
 
         save_fetch_errors(&BTreeMap::new());
         assert!(!fetch_errors_path().exists(), "nothing wrong leaves no file behind");
     }
 
+    /// The file as a version that fast-forwarded left it: a fetch failure, a
+    /// plain string, and beside it what an update was refused for, a table.
     #[test]
-    fn a_file_from_before_refusals_were_recorded_still_reads() {
+    fn a_file_that_also_holds_refused_updates_keeps_its_fetch_failures() {
         let _guard = isolate();
-        write(&fetch_errors_path(), "\"/old/repo\" = \"timed out after 60s\"\n");
-        let read_back = load_fetch_errors();
-        assert_eq!(
-            read_back.get("/old/repo"),
-            Some(&Trouble::Fetch("timed out after 60s".to_string()))
+        write(
+            &fetch_errors_path(),
+            "\"/old/repo\" = \"timed out after 60s\"\n\n\
+             [\"/a/held-back\"]\nrefused = \"would be overwritten by merge: .env\"\n",
         );
+        let read_back = load_fetch_errors();
+        assert_eq!(read_back.get("/old/repo").map(String::as_str), Some("timed out after 60s"));
+        assert_eq!(read_back.len(), 1, "a refused update is not a fetch failure: {read_back:?}");
         save_fetch_errors(&BTreeMap::new());
+    }
+
+    /// Every config file Settings wrote before the fast-forward was taken out
+    /// has the key. The file still loads, the key means nothing, and it is
+    /// gone from the file the next time it is saved.
+    #[test]
+    fn a_config_that_still_says_fast_forward_loads_and_loses_the_key_when_saved() {
+        let _guard = isolate();
+        let path = Config::path();
+        write(
+            &path,
+            "roots = [\"~/Work\"]\n\n[refresh]\nevery_minutes = 15\nfetch = false\n\
+             fast_forward = true\nonly_tags = []\nmax_parallel = 4\ntimeout_seconds = 60\n",
+        );
+        let cfg = Config::load();
+        assert_eq!(cfg.load_error, None);
+        assert_eq!(cfg.refresh.every_minutes, 15);
+        assert!(cfg.refresh.fetch, "it fetched before, to update, and goes on fetching");
+
+        cfg.save().unwrap();
+        let saved = read(&path);
+        assert!(!saved.contains("fast_forward"), "{saved}");
+        assert!(saved.contains("fetch = true"), "{saved}");
     }
 }

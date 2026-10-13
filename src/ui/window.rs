@@ -10,7 +10,7 @@ use gtk::gio;
 use gtk::glib;
 use adw::prelude::*;
 
-use crate::config::{Config, Trouble};
+use crate::config::Config;
 use crate::meta::Meta;
 use crate::refresh::{self, Summary};
 use crate::git::RepoInfo;
@@ -148,8 +148,8 @@ struct Ui {
     /// which answers "no" until the window is on screen, and which a fetch
     /// turns as well.
     scanning: Cell<bool>,
-    /// Repositories whose cards no longer say what is true, because the app
-    /// wrote to them from another page. Read again when the grid is next in
+    /// Repositories whose cards no longer say what is true, because they
+    /// were fetched from another page. Read again when the grid is next in
     /// front.
     stale: RefCell<BTreeSet<PathBuf>>,
     /// What the keyboard is to be given back to: the widget it was on when
@@ -178,10 +178,10 @@ struct Ui {
     refresh_armed: Cell<u64>,
     /// Whether the "is a refresh overdue" question has been asked this run.
     checked_overdue: Cell<bool>,
-    /// Repositories the last refresh could not fetch or could not update, and
+    /// Repositories the last refresh could not fetch, and
     /// why. Keyed by the path as a string so it can be written out and read
     /// back.
-    fetch_errors: RefCell<BTreeMap<String, Trouble>>,
+    fetch_errors: RefCell<BTreeMap<String, String>>,
     /// The repositories the user has seen; see `config::known_repos_path`.
     /// `None` until the first scan has recorded what was already here.
     known: RefCell<Option<BTreeSet<String>>>,
@@ -489,19 +489,10 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
                 return glib::Propagation::Stop;
             }
 
-            // `p` as lazygit means it. Fetch and fast-forward, with every
-            // refusal the background pass already knows how to make.
-            if key == gdk::Key::p && ui::unmodified(state) {
-                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
-                    nav.pull_one(path, true, None);
-                }
-                return glib::Propagation::Stop;
-            }
-
-            // `f` fetches without touching the working tree.
+            // `f` fetches. It moves no branch and touches no file.
             if key == gdk::Key::f && ui::unmodified(state) {
                 if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
-                    nav.pull_one(path, false, None);
+                    nav.fetch_one(path, None);
                 }
                 return glib::Propagation::Stop;
             }
@@ -952,14 +943,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     // A new window means the application is not closing after all.
     crate::gitcmd::wind_down(false);
     {
-        // Closing the window does not cut git off. The window goes at once;
-        // the application stays, without one, until a fast-forward, a commit
-        // or a push that is under way has finished. It used to exit there and
-        // then: a fast-forward was stopped between two files, and a commit
-        // whose hook was still running was abandoned or finished unseen.
-        // Fetches are stopped, and the pass across the fleet called off:
-        // neither loses anything, and either could keep a closed application
-        // alive for an hour.
+        // Closing the window stops what git is doing, and does it properly.
+        // A fetch under way is told to stop and the pass across the fleet is
+        // called off: neither loses anything, and either could keep a closed
+        // application alive for an hour. The window goes at once; the
+        // application stays, without one, for the moment git takes to stop
+        // and tidy its lock files away.
         let ui = Rc::clone(&ui);
         let app = app.clone();
         window.connect_close_request(move |_| {
@@ -1242,10 +1231,9 @@ impl Ui {
         });
     }
 
-    /// What the warning toggle keeps. A repository the last fetch failed on,
-    /// or that an update was refused in, is on this list too: it carries the
-    /// reddest pill on the grid, and the toggle used to hide it for being
-    /// clean.
+    /// What the warning toggle keeps. A repository the last fetch failed on
+    /// is on this list too: it carries the reddest pill on the grid, and the
+    /// toggle used to hide it for being clean.
     fn needs_attention(&self, info: &RepoInfo) -> bool {
         info.error.is_some()
             || !info.tree.is_clean()
@@ -1376,26 +1364,13 @@ impl Ui {
         });
 
         *self.shown.borrow_mut() = repos.clone();
-        let auto_update = {
-            let cfg = self.cfg.borrow();
-            cfg.refresh.enabled() && cfg.refresh.fast_forward
-        };
-        // "Held back" is a statement about the refresh, and only true of a
-        // repository the refresh would have updated: one outside `only_tags`,
-        // or not yet seen, is not being held back by anything.
-        let in_scope: HashSet<PathBuf> =
-            crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref())
-                .0
-                .into_iter()
-                .collect();
         for (index, info) in repos.iter().enumerate() {
             let tags = self.meta.borrow().tags_for(&info.path).to_vec();
             let errors = self.fetch_errors.borrow();
             let ctx = card::Context {
                 tags: &tags,
                 selected: self.selected.borrow().contains(&info.path),
-                auto_update: auto_update && in_scope.contains(&info.path),
-                trouble: errors.get(&info.path.display().to_string()),
+                fetch_failed: errors.get(&info.path.display().to_string()).map(String::as_str),
                 unseen: !self.is_known(&info.path),
                 // The one Enter opens from the filter: `visible()` again,
                 // which is what the filter itself asks.
@@ -1506,19 +1481,12 @@ impl Ui {
             // Of the repositories on the grid: the record can hold one the
             // grid has since lost.
             let errors = self.fetch_errors.borrow();
-            let recorded = |wanted: fn(&Trouble) -> bool| {
-                repos
-                    .iter()
-                    .filter(|repo| errors.get(&repo.path.display().to_string()).is_some_and(wanted))
-                    .count()
-            };
-            let failed = recorded(|trouble| matches!(trouble, Trouble::Fetch(_)));
-            let held = recorded(|trouble| matches!(trouble, Trouble::Update { .. }));
+            let failed = repos
+                .iter()
+                .filter(|repo| errors.contains_key(&repo.path.display().to_string()))
+                .count();
             if failed > 0 {
                 parts.push(format!("{failed} not fetched"));
-            }
-            if held > 0 {
-                parts.push(format!("{held} not updated"));
             }
         }
         let shown = self.flow.observe_children().n_items();
@@ -1549,13 +1517,7 @@ impl Ui {
         if cfg.one_off() {
             parts.push("one-off look: no background refresh".to_string());
         } else if settings.enabled() {
-            let what = if settings.fast_forward {
-                "fast-forward"
-            } else if settings.fetch {
-                "fetch"
-            } else {
-                "rescan"
-            };
+            let what = if settings.fetch { "fetch" } else { "rescan" };
             // A scope that matches nothing makes the timer a no-op, and the
             // bar went on promising a fetch every few minutes. Not asked
             // while a scan is under way: the grid is not all there yet.
@@ -1641,7 +1603,7 @@ impl Ui {
             .is_none_or(|known| known.contains(&path.display().to_string()))
     }
 
-    /// The user has opened this repository, or asked for it to be updated.
+    /// The user has opened this repository, or asked for it to be fetched.
     fn accept(self: &Rc<Self>, path: &Path) {
         let fresh = match self.known.borrow_mut().as_mut() {
             Some(known) => known.insert(path.display().to_string()),
@@ -1699,17 +1661,16 @@ impl Ui {
         }
     }
 
-    /// Keep the record of what the last fetch or update of a repository could
-    /// not do, from one report. Every way a repository gets fetched goes
-    /// through here (the pass across the fleet, `p` and `f` on a card, and the
-    /// same keys on a graph page), so a card cannot go on saying "fetch failed"
-    /// about a repository that has since been fetched by hand. Returns whether
-    /// this is trouble the record did not already hold.
+    /// Keep the record of fetches that failed, from one report. Every way a
+    /// repository gets fetched goes through here (the pass across the fleet,
+    /// `f` on a card, and the same key on a graph page), so a card cannot go
+    /// on saying "fetch failed" about a repository that has since been
+    /// fetched by hand. Returns whether this is trouble the record did not
+    /// already hold.
     fn note_outcome(&self, report: &refresh::Report) -> bool {
         let key = report.path.display().to_string();
         let trouble = match &report.outcome {
-            refresh::Outcome::Failed(err) => Some(Trouble::Fetch(err.clone())),
-            refresh::Outcome::Refused(why) => Some(Trouble::Update { refused: why.clone() }),
+            refresh::Outcome::Failed(err) => Some(err.clone()),
             _ => None,
         };
         let mut errors = self.fetch_errors.borrow_mut();
@@ -1847,7 +1808,7 @@ impl Ui {
         // the last fetch away. It did, every interval, for as long as the
         // window stayed open: a wrong or expired credential offered to the
         // same server again and again, which is how accounts get locked.
-        // Asking by hand (`f`, `p`, Ctrl+Shift+R) still tries, and a fetch
+        // Asking by hand (`f`, Ctrl+Shift+R) still tries, and a fetch
         // that then works clears the record.
         let before = repos.len();
         let repos: Vec<PathBuf> = if manual {
@@ -1857,10 +1818,9 @@ impl Ui {
             repos
                 .into_iter()
                 .filter(|path| {
-                    !matches!(
-                        errors.get(&path.display().to_string()),
-                        Some(Trouble::Fetch(err)) if refused_by_remote(err)
-                    )
+                    !errors
+                        .get(&path.display().to_string())
+                        .is_some_and(|err| refused_by_remote(err))
                 })
                 .collect()
         };
@@ -1889,7 +1849,6 @@ impl Ui {
         let rx = refresh::spawn(
             repos,
             refresh::Options {
-                fast_forward: settings.fast_forward,
                 max_parallel: settings.max_parallel,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
                 // Nobody picked these one by one, whether the timer started
@@ -1930,8 +1889,8 @@ impl Ui {
                             new_trouble += 1;
                         }
                         // A graph page open on this repository draws what the
-                        // pass has just moved: the remote's branches, how far
-                        // behind HEAD is, what the push button would send.
+                        // pass has just moved: the remote's branches, and how
+                        // far behind them HEAD is.
                         if report.fetched && !matches!(report.outcome, refresh::Outcome::UpToDate)
                         {
                             ui.reload_graph_pages(&report.path);
@@ -1939,16 +1898,6 @@ impl Ui {
                         match &report.outcome {
                             refresh::Outcome::Failed(err) => note!(
                                 "omarepos: {} failed: {err} ({})",
-                                report.name,
-                                report.path.display()
-                            ),
-                            refresh::Outcome::Refused(why) => note!(
-                                "omarepos: {} fetched but not updated: {why} ({})",
-                                report.name,
-                                report.path.display()
-                            ),
-                            refresh::Outcome::FastForwarded(n) => note!(
-                                "omarepos: {} fast-forwarded {n} commits ({})",
                                 report.name,
                                 report.path.display()
                             ),
@@ -1991,7 +1940,7 @@ impl Ui {
                     ui.last_refresh.set(Some(finished));
                     crate::config::record_refresh(finished);
                 }
-                if manual || summary.updated > 0 || new_trouble > 0 {
+                if manual || new_trouble > 0 {
                     ui.toasts.add_toast(ui::toast(&summary.line()));
                 }
             }
@@ -2289,9 +2238,8 @@ impl Ui {
     }
 
     /// Escape backs out of whatever is in the way, nearest first: a dialog or
-    /// a menu, the filter you are typing in (or the commit message, which it steps out of and
-    /// leaves alone), then the page you are on, then the selection, then a
-    /// filter left in the box.
+    /// a menu, the filter you are typing in, then the page you are on, then
+    /// the selection, then a filter left in the box.
     ///
     /// Binding Escape on the window shadows the navigation view's own, so
     /// going back has to be handled here or it stops working at all.
@@ -2314,19 +2262,7 @@ impl Ui {
             }
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
                 if !editable.text().is_empty() {
-                    // A filter is cleared. A commit message is not a filter:
-                    // it is a sentence someone has just written, and the hand
-                    // that learnt Escape in vim presses it on finishing one.
-                    // That erased the message, and the next press left the
-                    // page. Where the page can take the keyboard out of the
-                    // field instead, it does, and the text stays.
-                    let stepped_out = self
-                        .nav
-                        .visible_page()
-                        .is_some_and(|page| page.activate_action("page.leave-field", None).is_ok());
-                    if !stepped_out {
-                        editable.set_text("");
-                    }
+                    editable.set_text("");
                     return;
                 }
             }
@@ -2483,7 +2419,7 @@ impl Ui {
     /// that what is typed next is the filter. This is where the keyboard
     /// starts: the window is opened to find a repository, the way a launcher
     /// is, and the letters that would name one mean other things on a card —
-    /// `p` updates the repository under the keyboard, `l` opens a terminal.
+    /// `f` fetches the repository under the keyboard, `l` opens a terminal.
     /// The grid is one Down away.
     ///
     /// Only with the grid in front and nothing over it. Behind a dialog or
@@ -2664,13 +2600,10 @@ impl Ui {
         let reschedule = {
             let ui = Rc::clone(self);
             // Refresh settings move nothing on disk, so there is no rescan.
-            // They do change what a card says: "held back" is a statement
-            // about the refresh, and it stayed on cards after the refresh
-            // had been switched off or pointed at other tags. The cards are
-            // drawn again from what is already in memory.
+            // The cards are drawn again from what is already in memory.
             Rc::new(move || {
                 // A pass under way was started with the settings as they
-                // were. Switching fast-forward off, or the refresh off, while
+                // were. Switching fetching off, or the refresh off, while
                 // the status bar reads "fetching 3/44" has to mean something
                 // for the other forty-one; the next pass reads the settings
                 // afresh.
@@ -2821,25 +2754,10 @@ impl Ui {
             ui.nav
                 .push(&ui::stats::page(vec![path], name, ui.commit_opener()));
         });
-        let on_pull: Rc<dyn Fn(bool, Rc<dyn Fn(bool)>)> = {
+        let on_fetch: Rc<dyn Fn(Rc<dyn Fn(bool)>)> = {
             let ui = Rc::clone(self);
             let path = path.to_path_buf();
-            Rc::new(move |fast_forward, done| ui.pull_one(path.clone(), fast_forward, Some(done)))
-        };
-        let on_written: Rc<dyn Fn()> = {
-            let ui = Rc::clone(self);
-            let path = path.to_path_buf();
-            Rc::new(move || {
-                ui.stale.borrow_mut().insert(path.clone());
-            })
-        };
-        let on_pushed: Rc<dyn Fn()> = {
-            let ui = Rc::clone(self);
-            let path = path.to_path_buf();
-            Rc::new(move || {
-                ui.stale.borrow_mut().insert(path.clone());
-                ui.reload_graph_pages(&path);
-            })
+            Rc::new(move |done| ui.fetch_one(path.clone(), Some(done)))
         };
         ui::graph::Host {
             detail_open,
@@ -2853,23 +2771,16 @@ impl Ui {
                 Rc::new(move || ui.open_web(&path))
             },
             on_contributions,
-            on_pull,
-            on_written,
-            on_pushed,
+            on_fetch,
             toasts: self.toasts.clone(),
         }
     }
 
-    /// Fetch one repository, and fast-forward it too when asked, saying what
-    /// happened: the pass the timer runs, narrowed to the repository in hand.
-    /// The card's `p` and `f` come here, and so do a graph page's, which hands
-    /// in `done` to hear whether the remote was reached.
-    fn pull_one(
-        self: &Rc<Self>,
-        path: PathBuf,
-        fast_forward: bool,
-        done: Option<Rc<dyn Fn(bool)>>,
-    ) {
+    /// Fetch one repository, saying what happened: the pass the timer runs,
+    /// narrowed to the repository in hand. The card's `f` comes here, and so
+    /// does a graph page's, which hands in `done` to hear whether the remote
+    /// was reached.
+    fn fetch_one(self: &Rc<Self>, path: PathBuf, done: Option<Rc<dyn Fn(bool)>>) {
         if self.refreshing.get() || self.scanning.get() {
             self.toasts
                 .add_toast(ui::toast("Already busy: a scan or a fetch is under way"));
@@ -2895,7 +2806,6 @@ impl Ui {
         let rx = refresh::spawn(
             vec![path.clone()],
             refresh::Options {
-                fast_forward,
                 max_parallel: 1,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
                 pass: refresh::Pass::One,
@@ -2991,15 +2901,15 @@ impl Ui {
     }
 
     /// Catch the grid up with what has happened to repositories behind its
-    /// back: those the app wrote to from another page, and those handed to a
-    /// terminal or an editor. Nothing did this before. Commit and push in the
-    /// app, press Escape, and the card still said dirty and "2 ahead" until
-    /// the next rescan; with the timer off, which is how it comes, that was
-    /// until Ctrl+R.
+    /// back: those fetched from another page, and those handed to a terminal
+    /// or an editor. Nothing did this before. Commit in the terminal `l`
+    /// opened, come back, and the card still said dirty until the next
+    /// rescan; with the timer off, which is how it comes, that was until
+    /// Ctrl+R.
     ///
     /// `handed_too` is for a return to the window or to the grid, when the
     /// terminals have had their chance. The end of a scan only owes the
-    /// repositories that were written to while it ran.
+    /// repositories that were fetched while it ran.
     fn read_again(self: &Rc<Self>, handed_too: bool) {
         // Only with the grid in front. A page shows its own repository and
         // reads it again itself, and the cards keep until they are looked at.

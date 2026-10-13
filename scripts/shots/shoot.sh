@@ -29,9 +29,9 @@ CARDS=${SHOTS_CARDS:-omarepos omacosy awesome-omarchy}
 mkdir -p "$RAW" "$OUT" "$W/config/omarepos" "$W/config/gtk-4.0" "$W/state/omarepos" "$W/state/omarchy/current"
 
 # ---- what the window is told
-# An ordinary window on ~/Work, with the refresh a person would have switched
-# on, last run four minutes ago: so nothing is due while the pictures are
-# taken, and a card can say "held back".
+# An ordinary window on ~/Work, with the timer a person would have switched
+# on, last run four minutes ago: so no fetch is due while the pictures are
+# taken, and the status bar says when the last one was.
 cat > "$W/config/omarepos/config.toml" <<'EOF'
 roots = ["~/Work"]
 max_depth = 3
@@ -39,7 +39,6 @@ max_depth = 3
 [refresh]
 every_minutes = 30
 fetch = true
-fast_forward = true
 EOF
 echo $(( $(date +%s) - 240 )) > "$W/state/omarepos/last-refresh"
 # The desktop's own font, icons and header buttons, as Omarchy sets them, and
@@ -109,7 +108,7 @@ grid
 size 1280x800
 open_repo quattro; X split 440; still
 shot graph
-# ---- work in progress: staged, not staged, and the box that commits
+# ---- work in progress: staged, not staged and untracked, with a diff
 open_repo disktree; X split 250; still
 shot changes
 # ---- every repository's history, searched at once

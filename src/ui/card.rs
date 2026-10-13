@@ -33,7 +33,7 @@ use std::rc::Rc;
 use gtk::pango;
 use gtk::prelude::*;
 
-use crate::config::{Trouble, tildify};
+use crate::config::tildify;
 use crate::git::{ACTIVITY_DAYS, Activity, Commit, RepoInfo};
 use crate::ui::{Action, relative_time};
 
@@ -41,15 +41,11 @@ use crate::ui::{Action, relative_time};
 pub struct Context<'a> {
     pub tags: &'a [String],
     pub selected: bool,
-    /// Whether the background refresh is set to fast-forward. Only then is it
-    /// true to say a repository is being held back rather than merely behind.
-    pub auto_update: bool,
-    /// What the last refresh pass said, when it had something to complain
-    /// about. Otherwise the failure only reaches stderr, which under a desktop
-    /// launcher nobody reads.
-    pub trouble: Option<&'a Trouble>,
+    /// What git said when the last fetch of it failed. Otherwise the failure
+    /// only reaches stderr, which under a desktop launcher nobody reads.
+    pub fetch_failed: Option<&'a str>,
     /// Found since the user last looked. Nothing unattended fetches it until
-    /// it has been opened, or updated by hand.
+    /// it has been opened, or fetched by hand.
     pub unseen: bool,
     /// The first card on the grid, which is the one Enter opens from the
     /// filter. It shows what the card with the keyboard shows.
@@ -64,7 +60,7 @@ pub fn build(
     on_action: Rc<dyn Fn(Action, &RepoInfo)>,
     on_select: Rc<dyn Fn(&RepoInfo, bool)>,
 ) -> gtk::Widget {
-    let Context { tags, selected, auto_update, trouble, unseen, top_hit } = *ctx;
+    let Context { tags, selected, fetch_failed, unseen, top_hit } = *ctx;
     let now = now();
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -121,7 +117,7 @@ pub fn build(
         .build();
     name.add_css_class("om-name");
     title.append(&name);
-    let flagged = flag(info, trouble);
+    let flagged = flag(info, fetch_failed);
     if let Some(flag) = &flagged {
         let label = gtk::Label::new(Some(&flag.says));
         label.add_css_class("om-flag");
@@ -162,7 +158,7 @@ pub fn build(
     card.append(&state);
 
     // 4. What is only here, and what is waiting.
-    card.append(&sync_row(info, auto_update, trouble, &gutter));
+    card.append(&sync_row(info, fetch_failed, &gutter));
 
     let rule = gtk::Separator::new(gtk::Orientation::Horizontal);
     rule.add_css_class("om-rule");
@@ -205,10 +201,7 @@ pub fn build(
     before.set_can_target(false);
     // Why, where there is a why: the words that were in a tooltip, on the
     // one card that is being looked at.
-    let reason = flagged
-        .as_ref()
-        .map(|flag| flag.why.clone())
-        .or_else(|| held_back(info, auto_update, trouble).map(|(_, why)| why));
+    let reason = flagged.as_ref().map(|flag| flag.why.clone());
     before.append(&match recent.get(1) {
         Some(commit) => commit_row(commit, now, &gutter),
         None => row(&gutter, None),
@@ -461,17 +454,17 @@ fn whereabouts(info: &RepoInfo) -> String {
     }
     // "Commits as", this used to say, of a reading taken without asking git.
     // It is the configuration, so it is called that; who a commit is recorded
-    // as is git's to say, and the commit box is where git is asked.
+    // as is git's to say, and `git var GIT_AUTHOR_IDENT` in the repository is
+    // how to ask it.
     if let Some(identity) = &info.identity {
         tip.push_str(&format!("\n\nConfigured to commit as {identity}"));
         match &info.identity_doubt {
             Some(doubt) => tip.push_str(&format!(
                 "\nBut git may record someone else: {doubt}. \
-                 The commit box, under Local changes, asks git."
+                 `git var GIT_AUTHOR_IDENT` there says who."
             )),
             None => tip.push_str(
-                "\n(user.name and user.email, read without running git. \
-                 The commit box, under Local changes, asks git.)",
+                "\n(user.name and user.email, read without running git.)",
             ),
         }
     }
@@ -666,53 +659,17 @@ fn outgoing(info: &RepoInfo) -> Option<(String, String)> {
     (!says.is_empty()).then(|| (says.join(" · "), why.join("\n")))
 }
 
-/// Whether what is waiting on the remote will not arrive by itself, and why.
-fn held_back(
-    info: &RepoInfo,
-    auto_update: bool,
-    trouble: Option<&Trouble>,
-) -> Option<(&'static str, String)> {
-    if let Some(Trouble::Update { refused }) = trouble {
-        return Some((
-            "held back",
-            format!("The last refresh fetched this repository and did not update it:\n{refused}"),
-        ));
-    }
-    if info.behind == 0 || !auto_update {
-        return None;
-    }
-    let reason = info.update_blocked_by()?;
-    let mut why = format!(
-        "These {} commits will not arrive on their own: {reason}.\n\
-         The background refresh skips this repository until that is resolved.",
-        info.behind
-    );
-    if reason == "uncommitted changes" {
-        why.push_str(
-            "\nPress p to update it yourself. git keeps your changes where the update \
-             does not touch the same files, and refuses, changing nothing, where it does.",
-        );
-    }
-    Some(("held back", why))
-}
-
 /// What exists only here on the left, what is waiting to come in on the
 /// right. Empty when the two are level, which is most of the time.
-fn sync_row(
-    info: &RepoInfo,
-    auto_update: bool,
-    trouble: Option<&Trouble>,
-    gutter: &gtk::SizeGroup,
-) -> gtk::Box {
+fn sync_row(info: &RepoInfo, fetch_failed: Option<&str>, gutter: &gtk::SizeGroup) -> gtk::Box {
     let out = if info.error.is_some() { None } else { outgoing(info) };
     let mark = out.as_ref().map(|_| arrow("↑", "out"));
     let row = row(gutter, mark.as_ref().map(|mark| mark.upcast_ref()));
     let (says, why) = out.unwrap_or_default();
-    let held = held_back(info, auto_update, trouble);
     // What is waiting never gives way. What is only here does, to it.
     let behind = if info.behind > 0 { format!("x {} behind", info.behind) } else { String::new() };
     let unread = if info.history_unreadable.is_some() { "history unreadable" } else { "" };
-    let room = room_beside(&[&behind, held.as_ref().map_or("", |(says, _)| says), unread]);
+    let room = room_beside(&[&behind, unread]);
     let left = text(&says, "om-out", pango::EllipsizeMode::End, room);
     left.set_hexpand(true);
     if !why.is_empty() {
@@ -720,14 +677,13 @@ fn sync_row(
     }
     row.append(&left);
 
-    let failed = matches!(trouble, Some(Trouble::Fetch(_)));
     let incoming = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let dot = || text("·", "om-caption", pango::EllipsizeMode::None, 0);
-    if info.behind > 0 || held.is_some() {
-        // The arrow goes red with whatever stands in its way: it is the one
-        // mark on this side, and a fetch that failed means the count beside
-        // it is as old as the last fetch that worked.
-        incoming.append(&arrow("↓", if held.is_some() || failed { "bad" } else { "" }));
+    if info.behind > 0 {
+        // The arrow goes red when the last fetch failed: it is the one mark
+        // on this side, and the count beside it is then as old as the last
+        // fetch that worked.
+        incoming.append(&arrow("↓", if fetch_failed.is_some() { "bad" } else { "" }));
     }
     if info.behind > 0 {
         let behind = text(&format!("{} behind", info.behind), "om-in", pango::EllipsizeMode::None, 0);
@@ -738,14 +694,6 @@ fn sync_row(
             if info.behind == 1 { "is" } else { "are" }
         )));
         incoming.append(&behind);
-    }
-    if let Some((says, why)) = &held {
-        if info.behind > 0 {
-            incoming.append(&dot());
-        }
-        let label = text(says, "om-bad", pango::EllipsizeMode::None, 0);
-        label.set_tooltip_text(Some(why));
-        incoming.append(&label);
     }
     if let Some(why) = &info.history_unreadable {
         if incoming.first_child().is_some() {
@@ -1060,7 +1008,7 @@ fn keys() -> [gtk::Box; 2] {
         group
     };
     let letters = group("om-keys");
-    for letter in ["l", "e", "o", "p", "f"] {
+    for letter in ["l", "e", "o", "f"] {
         letters.append(&keycap(letter));
     }
     let enter = group("om-enter");
@@ -1079,7 +1027,7 @@ struct Flag {
 /// the first of a repository that cannot be read, files in conflict, a
 /// working tree whose state is not known, and a fetch that failed. Work that
 /// is merely unfinished is not trouble, and has the card's left edge.
-fn flag(info: &RepoInfo, trouble: Option<&Trouble>) -> Option<Flag> {
+fn flag(info: &RepoInfo, fetch_failed: Option<&str>) -> Option<Flag> {
     if let Some(err) = &info.error {
         return Some(Flag { says: "unreadable".into(), why: err.clone() });
     }
@@ -1093,7 +1041,7 @@ fn flag(info: &RepoInfo, trouble: Option<&Trouble>) -> Option<Flag> {
             why: format!("What is uncommitted here is not known: the index could not be read.\n{why}"),
         });
     }
-    if let Some(Trouble::Fetch(err)) = trouble {
+    if let Some(err) = fetch_failed {
         return Some(Flag {
             says: "fetch failed".into(),
             why: format!("The last refresh could not fetch this repository:\n{err}"),
@@ -1279,32 +1227,31 @@ mod tests {
     #[test]
     fn the_flag_goes_to_the_worst_trouble_and_to_one() {
         let _guard = isolate();
-        let fetch = Trouble::Fetch("could not resolve host".into());
-        let update = Trouble::Update { refused: "would overwrite".into() };
-        let says = |info: &RepoInfo, trouble: Option<&Trouble>| flag(info, trouble).map(|flag| flag.says);
+        let fetch = Some("could not resolve host");
+        let says = |info: &RepoInfo, failed: Option<&str>| flag(info, failed).map(|flag| flag.says);
 
         let mut info = repo();
         assert_eq!(says(&info, None), None);
-        // Unfinished work is not trouble, and neither is an update git refused.
+        // Unfinished work is not trouble, and neither is being behind.
         info.tree.unstaged = 3;
         info.ahead = 2;
         info.behind = 5;
-        assert_eq!(says(&info, Some(&update)), None);
+        assert_eq!(says(&info, None), None);
 
-        assert_eq!(says(&info, Some(&fetch)).as_deref(), Some("fetch failed"));
+        assert_eq!(says(&info, fetch).as_deref(), Some("fetch failed"));
         info.tree.unreadable = Some("bad index".into());
-        assert_eq!(says(&info, Some(&fetch)).as_deref(), Some("status unreadable"));
+        assert_eq!(says(&info, fetch).as_deref(), Some("status unreadable"));
         info.tree.conflicted = 2;
-        assert_eq!(says(&info, Some(&fetch)).as_deref(), Some("2 conflicts"));
+        assert_eq!(says(&info, fetch).as_deref(), Some("2 conflicts"));
         info.tree.conflicted = 1;
-        assert_eq!(says(&info, Some(&fetch)).as_deref(), Some("1 conflict"));
+        assert_eq!(says(&info, fetch).as_deref(), Some("1 conflict"));
         info.error = Some("not a repository".into());
-        assert_eq!(says(&info, Some(&fetch)).as_deref(), Some("unreadable"));
+        assert_eq!(says(&info, fetch).as_deref(), Some("unreadable"));
 
         // The flag's tooltip carries what was said, word for word.
         let mut info = repo();
         info.error = None;
-        assert!(flag(&info, Some(&fetch)).unwrap().why.ends_with("could not resolve host"));
+        assert!(flag(&info, fetch).unwrap().why.ends_with("could not resolve host"));
     }
 
     #[test]
@@ -1360,30 +1307,6 @@ mod tests {
         assert_eq!(says(&info).as_deref(), Some("1000+ unpublished"));
         info.remote = None;
         assert_eq!(says(&info).as_deref(), Some("no remote"));
-    }
-
-    #[test]
-    fn held_back_is_said_only_of_what_the_refresh_would_have_updated() {
-        let _guard = isolate();
-        let mut info = repo();
-        info.upstream = Some("origin/main".into());
-        info.behind = 3;
-        info.tree.unstaged = 1;
-        assert_eq!(counts(&info), "~1");
-
-        let (says, why) = held_back(&info, true, None).expect("uncommitted changes hold it back");
-        assert_eq!(says, "held back");
-        assert!(why.contains("uncommitted changes") && why.contains("Press p"), "{why}");
-        // Not when nothing would have updated it anyway, and not when level.
-        assert_eq!(held_back(&info, false, None), None);
-        info.behind = 0;
-        assert_eq!(held_back(&info, true, None), None);
-
-        // What git refused is said whatever the counts are now.
-        let refused = Trouble::Update { refused: "would overwrite notes.txt".into() };
-        let (_, why) = held_back(&info, false, Some(&refused)).unwrap();
-        assert!(why.ends_with("would overwrite notes.txt"), "{why}");
-        assert_eq!(held_back(&info, true, Some(&Trouble::Fetch("offline".into()))), None);
     }
 
     #[test]

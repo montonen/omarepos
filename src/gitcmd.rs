@@ -1,12 +1,11 @@
 //! Running `git` itself.
 //!
-//! Anything that writes goes through here rather than through libgit2. libgit2
-//! can build an index entry and a commit object, but it does not run hooks and
-//! it does not sign — and it does not read the credential helpers, `insteadOf`
-//! rewrites or `includeIf gitdir:` identities a user has configured once and
+//! One command is run from here, a fetch, and it goes through `git` rather
+//! than through libgit2. libgit2 does not read the credential helpers, the
+//! `insteadOf` rewrites or the ssh settings a user has configured once and
 //! expects everywhere. Driving the same `git` they drive means their setup
-//! applies unchanged, and a thing they cannot do by hand is not something
-//! omarepos pretends it can do either.
+//! applies unchanged, and a repository they cannot fetch by hand is not one
+//! omarepos pretends it can fetch either.
 //!
 //! Two things are added to their setup, both so that nothing waits on a prompt
 //! nobody will answer: `GIT_TERMINAL_PROMPT=0`, and ssh's batch options, which
@@ -18,7 +17,7 @@
 //! and `SSH_ASKPASS` are tried in that order, and `GIT_TERMINAL_PROMPT` gates
 //! none of them. For something the user asked for, a window asking for their
 //! password is the right answer and is left alone. For a pass nobody is
-//! watching ([`run_fenced`]) it is a dialog per repository, every interval,
+//! watching ([`transfer_fenced`]) it is a dialog per repository, every interval,
 //! on the screen of somebody who asked for nothing, so there the askpass
 //! programs are switched off as well.
 
@@ -31,18 +30,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How much is under way that the process must not exit in the middle of:
-/// every git command, and a refresh of one repository from its fetch to its
-/// fast-forward.
+/// How many git commands are running.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 /// Set while the last window is closing with git still at work.
 static WINDING_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Held for as long as something is running that must be let finish. The
-/// application used to exit the moment its window closed, whatever git was in
-/// the middle of: a fast-forward cut off between files, a commit whose hook
-/// was still running, a push nobody then heard the end of. The window still
-/// goes at once. The process now stays until [`busy`] says no.
+/// Held for as long as a git command is running. The application used to
+/// exit the moment its window closed, whatever git was in the middle of. The
+/// window still goes at once; the process stays until [`busy`] says no, which
+/// for a fetch that has been told to stop is a moment: long enough for git to
+/// take its lock files away.
 pub struct Hold(());
 
 impl Hold {
@@ -64,9 +61,8 @@ pub fn busy() -> bool {
 }
 
 /// Say that the application is closing, or has stopped closing. While it is,
-/// a fetch under way is stopped and no fast-forward is begun: a fetch is not
-/// worth keeping a closed application alive for, up to an hour, and loses
-/// nothing by being stopped. Every write is left to finish.
+/// a fetch under way is stopped: it is not worth keeping a closed application
+/// alive for, up to an hour, and loses nothing by being stopped.
 pub fn wind_down(closing: bool) {
     WINDING_DOWN.store(closing, Ordering::SeqCst);
 }
@@ -78,7 +74,7 @@ pub fn winding_down() -> bool {
 /// The variables that tell git which repository to act on, whatever
 /// directory it is run in: what `git rev-parse --local-env-vars` lists. One
 /// inherited from wherever the application was started (a shell inside a
-/// hook, an alias, a `git rebase --exec`) sent every stage, commit and push
+/// hook, an alias, a `git rebase --exec`) sent whatever was run from here
 /// to that repository and not to the one on screen. No command run from here
 /// is given them, and `main` takes them out of the application's own
 /// environment at launch, so that a terminal it opens does not have them
@@ -124,6 +120,13 @@ const KEEP: usize = 1 << 20;
 /// `index.lock` behind and every later command in that repository fails on it.
 /// The signal goes to git's whole process group, so a hook or filter it
 /// started stops with it.
+///
+/// Nothing the application runs is limited this way any more. Its one command
+/// is a fetch, which is given up on by silence ([`transfer`]). The tests of
+/// the runner itself still are: they use a commit and its hooks as the command
+/// that prints too much, hangs or refuses, and a commit reports no progress to
+/// go by.
+#[cfg(test)]
 pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     exec(dir, args, Limit::Whole(timeout), true)
 }
@@ -131,6 +134,7 @@ pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, Strin
 /// As [`run`], for a pass nobody is watching. Two differences: whose word is
 /// taken for the ssh command (see [`ssh_command`]), and that nothing is
 /// allowed to ask (see [`UNASKED`]).
+#[cfg(test)]
 pub fn run_fenced(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     exec(dir, args, Limit::Whole(timeout), false)
 }
@@ -169,6 +173,7 @@ pub fn transfer_fenced(
 #[derive(Clone, Copy)]
 enum Limit {
     /// This long, start to finish, whatever it is doing.
+    #[cfg(test)]
     Whole(Duration),
     /// For as long as it keeps saying something, with no gap longer than
     /// `quiet`; and however talkative, no longer than `ceiling`.
@@ -183,6 +188,7 @@ impl Limit {
             (started.elapsed() >= limit).then(|| format!("timed out after {}s", limit.as_secs()))
         };
         match self {
+            #[cfg(test)]
             Limit::Whole(timeout) => timed_out(timeout),
             Limit::WhileTalking { quiet, ceiling } => {
                 if heard.elapsed() >= quiet {
@@ -221,7 +227,7 @@ const BATCH: &str = "-o BatchMode=yes -o ConnectTimeout=10";
 /// The variable used to be set to plain `ssh` with the batch options, always.
 /// But it outranks `core.sshCommand`, which is how a per-client key is usually
 /// chosen (often through the same `includeIf` that sets the identity), so a
-/// fetch or a push from here went out with the default key: failing where a
+/// fetch from here went out with the default key: failing where a
 /// hand-typed one works, or worse, succeeding as the wrong account. The batch
 /// options are now added to whatever the user configured.
 ///
@@ -298,9 +304,9 @@ fn verb<'a>(args: &[&'a str]) -> &'a str {
     ""
 }
 
-/// Whether this is `fetch` or `push`.
+/// Whether this is a `fetch`, the one command here that does.
 fn talks_to_a_remote(args: &[&str]) -> bool {
-    matches!(verb(args), "fetch" | "push")
+    verb(args) == "fetch"
 }
 
 fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<String, String> {
@@ -345,7 +351,7 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
                     stop(&mut child);
                     return Err(why);
                 }
-                if winding_down() && verb(args) == "fetch" {
+                if winding_down() {
                     stop(&mut child);
                     return Err("stopped: omarepos was closing".to_string());
                 }
@@ -430,9 +436,9 @@ const SAID_LINES: usize = 40;
 
 /// Pick what is worth showing out of git's output.
 ///
-/// The first line is not it. A rejected push opens with `To <url>`, which says
-/// nothing; the reason is further down in `! [rejected]` or `error:`. Prefer a
-/// line of git's own that carries a complaint.
+/// The first line is not it. A fetch opens with `From <url>`, which says
+/// nothing; the reason is further down in `! [rejected]`, `error:` or
+/// `fatal:`. Prefer a line of git's own that carries a complaint.
 ///
 /// When there is none, what is left is somebody else talking: a hook that
 /// refused, in its own words, which is the thing the caller most needs to
@@ -451,10 +457,6 @@ fn explain(stderr: &str, stdout: &str) -> String {
         .split(ends)
         .chain(stderr.split(ends))
         .filter(|line| !line.trim().is_empty())
-        // git's closing remark after a hook or the remote has already said
-        // why. On its own it sends the reader to look for a reason that was
-        // on the line above.
-        .filter(|line| !line.trim().to_lowercase().starts_with("error: failed to push some refs"))
         .collect();
 
     let complaint = lines.iter().position(|line| {
@@ -918,7 +920,8 @@ mod tests {
         }
     }
 
-    /// The README promises a hook's refusal "quoted back as git wrote it".
+    /// Where git has no complaint of its own, what is shown is whoever did the
+    /// refusing, in their words and all of them.
     #[test]
     fn a_hook_that_refuses_is_quoted_in_full_and_not_talked_over() {
         let _guard = isolate();
@@ -933,39 +936,15 @@ mod tests {
         stage_something(&dir);
         let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
         assert_eq!(said, "> lint-staged\nsrc/app.ts\n  12:3  error  no-unused-vars\n1 problem");
-
-        // A pre-push hook: git follows it with "error: failed to push some
-        // refs", which used to be what was shown.
-        let f = fleet("gitcmd-hook-pre-push");
-        commit_file(&f.work, "mine.txt", "mine\n", "ready");
-        hook(&f.work, "pre-push", "echo 'pre-push: 3 tests failing, fix them before pushing'\nexit 1");
-        let said = run(&f.work, &["push", "origin", "main"], PATIENT).unwrap_err();
-        assert_eq!(said, "pre-push: 3 tests failing, fix them before pushing");
     }
     /// What the window's close handler relies on: `busy` is true for exactly
-    /// as long as a command runs, a commit with a slow hook is let finish
-    /// while the application winds down, and a fetch is not.
+    /// as long as a fetch runs, and a fetch under way when the application
+    /// winds down is stopped, not waited for.
     #[test]
-    fn closing_waits_for_a_write_and_stops_a_fetch() {
+    fn closing_stops_a_fetch() {
         let _guard = isolate();
         let dir = repo("gitcmd-closing");
-        hook(&dir, "pre-commit", "sleep 1");
-        write(&dir.join("README.md"), "two\n");
-        git(&dir, &["add", "README.md"]);
         assert!(!busy());
-
-        let worker = {
-            let dir = dir.clone();
-            std::thread::spawn(move || run(&dir, &["commit", "-m", "second"], PATIENT))
-        };
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(busy(), "the commit's hook is still running");
-        wind_down(true);
-        let committed = worker.join().unwrap();
-        wind_down(false);
-        assert!(committed.is_ok(), "a write is let finish: {committed:?}");
-        assert!(!busy());
-        assert_eq!(git(&dir, &["log", "-1", "--format=%s"]), "second");
 
         // A fetch from a remote that takes its time answering.
         let remote = scratch("gitcmd-closing-remote");
@@ -982,6 +961,7 @@ mod tests {
             std::thread::spawn(move || run(&dir, &["fetch", "--quiet"], PATIENT))
         };
         std::thread::sleep(Duration::from_millis(300));
+        assert!(busy(), "the fetch is still running");
         wind_down(true);
         let fetched = worker.join().unwrap();
         wind_down(false);

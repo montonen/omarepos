@@ -5,7 +5,7 @@
 
 <p align="center">
   <strong>Every git repository on your machine, on one screen.</strong><br>
-  A keyboard-first overview for <a href="https://omarchy.org">Omarchy</a>: what is uncommitted, what is unpushed
+  A keyboard-first, read-only overview for <a href="https://omarchy.org">Omarchy</a>: what is uncommitted, what is unpushed
   and what is waiting to be pulled, in the theme you are using.
 </p>
 
@@ -13,7 +13,7 @@
   <a href="#a-tour">Tour</a> ·
   <a href="#install">Install</a> ·
   <a href="#keyboard">Keyboard</a> ·
-  <a href="#what-it-will-and-will-not-do">What it will and will not do</a> ·
+  <a href="#read-only">Read-only</a> ·
   <a href="docs/README.md">Documentation</a>
 </p>
 
@@ -26,9 +26,9 @@ last commit, and four weeks of activity. **A repository that is clean and level
 with its remote is grey, and a coloured edge means there is something to do.**
 
 From a card it is one key to the repository's commit graph, a terminal, your
-editor or its page on the web. From the graph you can stage, commit and push.
-And the whole fleet can be fetched on a timer and fast-forwarded where that is
-unambiguously safe. There is nothing in it that discards work.
+editor or its page on the web. It reads, and it fetches, when you ask or on a
+timer. That is all it does to a repository: no branch moves and no file
+changes because omarepos was open.
 
 <sub>Pictured: this repository and fifteen public Omarchy projects, in a
 scratch home directory of their own. [How the pictures are taken](docs/development.md#the-readmes-pictures).</sub>
@@ -47,7 +47,7 @@ says what it is.
 | Name | The repository |
 | Where | The folder it lies in, and the remote it belongs to |
 | Branch | The branch, and on the right what is uncommitted: `+1 ~3 ?4` is one staged, three modified, four untracked |
-| Sync | `↑ 2 ahead` is what exists only here. `↓ 28 behind` is what is waiting, and **held back** is added when the refresh would have brought it in and something is in the way |
+| Sync | `↑ 2 ahead` is what exists only here. `↓ 28 behind` is what is waiting on the remote |
 | Commit | The last commit: how old, what it says, and who wrote it when that was not you |
 | Lately | Commits a day over the last four weeks, yours solid and other people's fainter |
 | Tags | Your own labels, each with a dot in the tag's colour: one of eight, chosen by its name |
@@ -79,16 +79,15 @@ branches named on their commits. The pane below shows what the selected commit
 changed, as a tree of files and a highlighted diff, and follows the cursor as
 you walk the history. More in [Commit graph](docs/commit-graph.md).
 
-### Stage, commit, push
+### What is uncommitted
 
-![Local changes: a staged file, an unstaged one and an untracked one, and the commit box](docs/img/changes.png)
+![Local changes: a staged file, an unstaged one and an untracked one, with the diff of the first](docs/img/changes.png)
 
-Uncommitted work is the first row of the graph. `Tab` goes into the changed
-files, `Space` stages or unstages one, `c` goes to the message, `Enter`
-commits, and **Push** sends the branch when it is ahead. All of it runs
-through your own `git`, so your hooks, your signing and your per-directory
-identities apply. Whole files only: for hunks, `l` opens a terminal in the
-repository, in lazygit when it is installed.
+Uncommitted work is the first row of the graph: what is staged, what is not,
+what is in conflict and what is untracked, each file with its diff. `Tab` goes
+into the list. It is a view, and nothing in it changes anything. To stage,
+commit or push, `l` opens a terminal in the repository, in lazygit when it is
+installed, and the list is current again when you come back.
 
 ### Every history, searched at once
 
@@ -110,16 +109,14 @@ with a mailmap honoured. A row opens to the commits themselves. A second view
 counts every branch and not only the checked-out ones. More in
 [Contributions](docs/contributions.md).
 
-### A refresh that knows when to leave things alone
+### Fetching, and nothing more
 
-Off until you give it an interval. A timer in the window then reads the fleet
-again, fetches it when `fetch` is on, and with `fast_forward` on moves the
-checked-out branch of each repository where nothing is in the way. A
-repository that is behind and has uncommitted changes or commits of its own is
-fetched and left where it was: its card says **held back**, with the reason on
-hover and on the card that has the keyboard. The timer never pushes, runs no
-hooks, and only enters repositories you have already seen. More in
-[Background refresh](docs/refresh.md).
+`f` fetches the repository under the keyboard, and `Ctrl+Shift+R` the whole
+grid, or the tags you have limited the refresh to. A timer in the window can
+do the same every few minutes; it is off until you give it an interval. A
+fetch records what the remote has, so "behind" stays true. It moves no branch
+and touches no file. The timer runs no hooks and only enters repositories you
+have already seen. More in [Fetching](docs/refresh.md).
 
 ### Your theme
 
@@ -132,34 +129,26 @@ restarting. The lanes of a graph and the dots on tags and authors keep a fixed
 set of eight colours, which a theme's own handful of hues could not keep
 apart. More in [Configuration and theme](docs/configuration.md#theme).
 
-## What it will and will not do
+## Read-only
 
-A tool that looks at every repository you have, and can write to them, should
-say exactly what it does.
+A tool pointed at every repository you have should be able to say what it
+does to them in a sentence. omarepos reads them, and it fetches.
 
-- **Reading never writes to a repository and never talks to a remote.** What
-  is shown is read from disk with libgit2. The one question put to `git`
-  itself is who a commit would be recorded as, for the name beside the Commit
-  button.
-- **Besides fetching, it does five things to a repository:** stage a file,
-  unstage a file, commit what is staged, push the branch, and fast-forward the
-  checked-out branch. The timer does the last only where the working tree is
-  clean. `p` leaves it to git, which keeps your edits where the update does
-  not touch the same files and refuses, changing nothing, where it does.
-- **It cannot discard an edit.** There is no checkout, no reset of a branch,
-  no clean, no amend and no stash. The only merge it runs is `--ff-only`, and
-  nothing is rebased or forced.
-- **Pushing happens on a button press and never on the timer.** One branch at
-  a time: never forced, never `--all`, never tags.
-- **Writes go through the `git` you use yourself,** with your credential
-  helpers, SSH setup and identities. A repository you cannot fetch by hand is
-  one omarepos does not pretend it can fetch either.
+- **Reading never runs `git`, never writes to a repository and never talks to
+  a remote.** What is shown is read from disk with libgit2.
+- **Fetching is the one thing it does to a repository.** On `f`, on
+  `Ctrl+Shift+R`, or on a timer you switch on. It goes through the `git` you
+  use yourself, with your credential helpers and SSH setup: a repository you
+  cannot fetch by hand is one omarepos does not pretend it can fetch either.
+- **Nothing else.** It does not stage, commit, push, merge, fast-forward,
+  rebase, stash, check out or reset. There is nothing in it that could
+  discard an edit or publish one.
+- **For everything that changes a repository, it hands over.** `l` opens a
+  terminal there, in lazygit when it is installed, and `e` your editor.
 - **Tags are omarepos's own.** Nothing is written into your repositories to
   keep them.
 
-The reasoning, and the cases at the edges, are in
-[Reading and writing](docs/reading-and-writing.md) and
-[Background refresh](docs/refresh.md#what-it-will-and-will-not-do).
+More in [Read-only](docs/read-only.md) and [Fetching](docs/refresh.md).
 
 ## Install
 
@@ -270,12 +259,12 @@ most of the work:
 | `Down` in the filter | Move into the cards |
 | `Enter` on a card | Open its commit graph |
 | `l` · `e` · `o` | Open a terminal there (lazygit), your editor, or its page on the web |
-| `p` · `f` | Fetch and fast-forward that repository · fetch only |
+| `f` | Fetch that repository |
 | `Space` on a card | Tick it, to scope the search and contributions |
 | `Ctrl+Shift+F` | Search commits across the repositories |
 | `Ctrl+G` | Contributions |
-| `Ctrl+R` · `Ctrl+Shift+R` | Rescan, local only · run the refresh now |
-| `Tab` in a graph, then `Space` · `c` · `Enter` | Into the changed files, then stage or unstage · write the message · commit |
+| `Ctrl+R` · `Ctrl+Shift+R` | Rescan, local only · fetch the whole grid |
+| `Tab` in a graph | Into the changed files |
 | `Ctrl+,` | Settings |
 | `Esc` | Back out, one step at a time |
 
@@ -288,12 +277,12 @@ More of them are in [Usage](docs/usage.md).
 | [Usage](docs/usage.md) | Command line, the keys, how the filter matches |
 | [Reading a card](docs/cards.md) | Each row of a card, what the colours mean, the four weeks |
 | [Repositories and tags](docs/repositories.md) | Scan roots, workspace folders, tags |
-| [Commit graph](docs/commit-graph.md) | The graph, pushing, staging and committing, what a commit changed |
+| [Commit graph](docs/commit-graph.md) | The graph, what is uncommitted, what a commit changed |
 | [Searching commits](docs/search.md) | What is matched, and how far back |
 | [Contributions](docs/contributions.md) | What is counted, and the all-branches view |
-| [Background refresh](docs/refresh.md) | The timer, what it updates and what it leaves alone, and why it runs `git` |
+| [Fetching](docs/refresh.md) | `f`, the timer, what runs unattended and what does not, and why it runs `git` |
 | [Configuration and theme](docs/configuration.md) | `config.toml`, and how the Omarchy theme is used |
-| [Reading and writing](docs/reading-and-writing.md) | What is read, the few things that are written, and why pushing is a button |
+| [Read-only](docs/read-only.md) | What is read, the one thing that is done to a repository, and what omarepos keeps for itself |
 | [Development](docs/development.md) | Building, the tests, the walk, the source layout, the pictures |
 
 ## Development
@@ -313,10 +302,9 @@ details, and the source layout.
 ## Status
 
 Early, and in daily use by one person. The grid, the commit graph with its
-diff pane, contributions, commit search, the background refresh and the
-stage-commit-push path are all there. Ahead and behind are as fresh as the last
-fetch: with the refresh off, that is the last time you pressed `f`, `p` or
-`Ctrl+Shift+R`.
+diff pane, contributions, commit search and fetching are all there. Ahead and
+behind are as fresh as the last fetch: with the timer off, that is the last
+time you pressed `f` or `Ctrl+Shift+R`.
 
 ## License
 

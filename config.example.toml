@@ -22,7 +22,6 @@ follow_omarchy_theme = true
 [refresh]
 every_minutes = 0
 fetch = false          # `git fetch`: network, but never your working tree
-fast_forward = false   # update the code, clean fast-forwards only
 only_tags = []         # blank means every repository
 max_parallel = 4
 timeout_seconds = 60

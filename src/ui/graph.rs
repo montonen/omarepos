@@ -1,7 +1,6 @@
 //! The per-repository commit graph page.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -51,31 +50,15 @@ pub struct Host {
     pub on_web: Rc<dyn Fn()>,
     /// Opens the contributions page scoped to this repository.
     pub on_contributions: Rc<dyn Fn(PathBuf)>,
-    /// Fetch this repository, and fast-forward it too when the flag is set.
-    /// The window runs it and says what happened: it has the settings, knows
-    /// whether something else is already running, and keeps the record of
-    /// what a fetch could not do. The page had a copy of its own, with its own
-    /// timeout, no guard against a second one, and no word to the card. It
-    /// calls back with whether the remote was reached.
-    pub on_pull: Rc<dyn Fn(bool, Rc<dyn Fn(bool)>)>,
-    /// The page staged or committed: the card behind it is out of date.
-    pub on_written: Rc<dyn Fn()>,
-    /// A push from here finished, one way or the other.
-    pub on_pushed: Rc<dyn Fn()>,
-    /// The window's toasts. They are over every page, so what a push came to
-    /// is still on screen when this page has been left.
+    /// Fetch this repository. The window runs it and says what happened: it
+    /// has the settings, knows whether something else is already running, and
+    /// keeps the record of what a fetch could not do. The page had a copy of
+    /// its own, with its own timeout, no guard against a second one, and no
+    /// word to the card. It calls back with whether the remote was reached.
+    pub on_fetch: Rc<dyn Fn(Rc<dyn Fn(bool)>)>,
+    /// The window's toasts. They are over every page, so what was said is
+    /// still on screen when this page has been left.
     pub toasts: adw::ToastOverlay,
-}
-
-thread_local! {
-    /// Repositories with a push from this window under way. Kept apart from
-    /// any one page's widgets: a page closed and opened again during a push
-    /// must not offer the same push a second time.
-    static PUSHING: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
-}
-
-fn pushing(repo: &Path) -> bool {
-    PUSHING.with(|set| set.borrow().contains(repo))
 }
 
 /// Whether the keyboard is on `widget` or on something inside it.
@@ -102,9 +85,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         web,
         on_web,
         on_contributions,
-        on_pull,
-        on_written,
-        on_pushed,
+        on_fetch,
         toasts,
     } = host;
 
@@ -134,19 +115,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         contributions.connect_clicked(move |_| on_contributions(path.clone()));
     }
     header.pack_end(&contributions);
-
-    // Publishing is a deliberate act, so it lives on a button a person presses
-    // — never on the timer that fetches. See ADR-0005.
-    let push_content = adw::ButtonContent::builder()
-        .icon_name("send-to-symbolic")
-        .label("Push")
-        .build();
-    let push = gtk::Button::builder()
-        .child(&push_content)
-        .has_frame(false)
-        .sensitive(false)
-        .build();
-    header.pack_end(&push);
 
     let detail_toggle = gtk::ToggleButton::builder()
         .icon_name("view-paged-symbolic")
@@ -201,33 +169,17 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         .build();
     status.add_css_class("om-statusbar");
 
-    // A write in the pane can change the history this page is drawing, so the
-    // page reloads rather than quietly going stale under the user.
+    // The page reads itself again when its repository has been fetched, and
+    // when the window is returned to: what it draws changes under it, in the
+    // terminal or the editor it hands the repository to.
     let reload_page: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    // The commit a search result opened the page on. A commit made here spends
-    // it: what a commit changes is at the tip, and a page still windowed
-    // around the old hit cut the new commit out of its own list. A push or a
-    // fetch keeps it, so the reader is not thrown off the commit they came for.
+    // The commit a search result opened the page on. It is kept across every
+    // reload, so that the reader is not thrown off the commit they came for.
     let wanted: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(target));
-    let on_changed: Rc<dyn Fn(bool)> = {
-        let reload_page = Rc::clone(&reload_page);
-        let wanted = Rc::clone(&wanted);
-        Rc::new(move |committed: bool| {
-            // Staging changes what the card counts, too.
-            on_written();
-            if !committed {
-                return;
-            }
-            wanted.borrow_mut().take();
-            if let Some(reload) = reload_page.borrow().clone() {
-                reload();
-            }
-        })
-    };
     // The detail goes *below* the graph rather than beside it: the window is
     // often half a tiled screen, where a vertical split leaves neither half
     // usable, and height is the one thing such a window has to spare.
-    let (detail, load_pane, focus_files) = crate::ui::commit::pane(on_changed);
+    let (detail, load_pane, focus_files) = crate::ui::commit::pane();
     // What the pane was last asked to show, whether or not it was open to be
     // shown it. Closed, the pane was only hidden: every move of the cursor
     // still read the commit, rebuilt the file list and highlighted the first
@@ -330,34 +282,25 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                     }
                     glib::Propagation::Stop
                 }
-                gtk::gdk::Key::p | gtk::gdk::Key::f => {
+                gtk::gdk::Key::f => {
                     if presses.first(key) {
-                        let fast_forward = key == gtk::gdk::Key::p;
                         // The spinner that shows a fetch is on the grid's
                         // header, which this page is in front of.
                         let before = status.label();
-                        status.set_label(if fast_forward {
-                            "Fetching, then updating…"
-                        } else {
-                            "Fetching…"
-                        });
+                        status.set_label("Fetching…");
                         let status = status.clone();
                         let reload = Rc::clone(&reload);
-                        on_pull(
-                            fast_forward,
-                            Rc::new(move |reached| {
-                                // A fetch moves the remote's branches even when
-                                // it leaves HEAD alone, and the labels, the
-                                // ahead and behind figures and the push button
-                                // are all read from those. Only a fast-forward
-                                // used to redraw, so "fetched, 3 behind"
-                                // appeared over a graph that showed none of it.
-                                match reload.borrow().clone() {
-                                    Some(reload) if reached => reload(),
-                                    _ => status.set_label(&before),
-                                }
-                            }),
-                        );
+                        on_fetch(Rc::new(move |reached| {
+                            // A fetch moves the remote's branches, and the
+                            // labels and the ahead and behind figures are
+                            // read from those: without drawing again,
+                            // "fetched, 3 behind" appeared over a graph that
+                            // showed none of it.
+                            match reload.borrow().clone() {
+                                Some(reload) if reached => reload(),
+                                _ => status.set_label(&before),
+                            }
+                        }));
                     }
                     glib::Propagation::Stop
                 }
@@ -432,7 +375,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     // Which commit each row stands for. Made once, and the two handlers that
     // read it connected once, here. Every populate used to connect its own
     // pair with its own list, and a list box keeps its handlers when its rows
-    // are taken out: after a commit or a push, Enter copied the sha the row
+    // are taken out: after a reload, Enter copied the sha the row
     // used to hold and then the one it holds now, and each move of the cursor
     // loaded two commits into the pane.
     let ids: Rc<RefCell<Vec<Target>>> = Rc::new(RefCell::new(Vec::new()));
@@ -471,25 +414,19 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         });
     }
 
-    // One slot for the focus watcher, and one for the push button's handler:
-    // populate runs again after every write, and a second handler on the
-    // button would send the same commits twice on the next click.
+    // One slot for the focus watcher: populate runs again on every reload,
+    // and a second watcher would read the repository twice on each return.
     let watcher: Watcher = Rc::new(RefCell::new(None));
-    let push_handler: Rc<RefCell<Option<glib::SignalHandlerId>>> = Rc::new(RefCell::new(None));
     // Whether the page has been filled before. Arriving puts the keyboard on
     // the list; a reload under a reader must leave it where they have it.
     let arrived = Rc::new(Cell::new(false));
 
-    // Populating is separate from loading, so a commit can ask for it again.
+    // Populating is separate from loading, so a reload can ask for it again.
     let populate: Rc<dyn Fn(Result<Graph, String>)> = {
         let rows_box = rows_box.clone();
         let stack = stack.clone();
         let status = status.clone();
-        let push = push.clone();
-        let push_content = push_content.clone();
-        let toasts = toasts.clone();
         let reload = Rc::clone(&reload_page);
-        let push_handler = Rc::clone(&push_handler);
         let empty = empty.clone();
         let load_detail = Rc::clone(&load_detail);
         let detail = detail.clone();
@@ -497,7 +434,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         let watcher = Rc::clone(&watcher);
         let ids = Rc::clone(&ids);
         let arrived = Rc::clone(&arrived);
-        let on_pushed = Rc::clone(&on_pushed);
         Rc::new(move |result: Result<Graph, String>| {
             // Where the selection and the keyboard were, before the rows go.
             let kept = rows_box.selected_row().and_then(|row| {
@@ -514,7 +450,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 Ok(graph) => graph,
                 Err(err) => {
                     stop_watching(&watcher);
-                    push.set_sensitive(false);
                     empty.set_title("Could not read this repository");
                     empty.set_description(Some(&glib::markup_escape_text(&err)));
                     stack.set_visible_child_name("empty");
@@ -531,7 +466,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 && graph.working_changes == 0
                 && graph.working_unreadable.is_none()
             {
-                push.set_sensitive(false);
                 empty.set_title("No commits");
                 empty.set_description(Some("This repository has no history yet."));
                 stack.set_visible_child_name("empty");
@@ -611,8 +545,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             let asked_for = graph.target.map(|index| index - from + offset);
             // Arriving: on the commit asked for, or on the working tree when
             // there is one, or on the newest commit. After a reload: where the
-            // selection was, when that commit is still in the list. A push or
-            // a fetch should not throw the reader back to the top.
+            // selection was, when that commit is still in the list. A fetch
+            // should not throw the reader back to the top.
             let stayed = match (&kept, arriving) {
                 (Some(Target::Commit(id)), false) => slice
                     .iter()
@@ -636,10 +570,10 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // The keyboard goes where the selection is. Every key this
             // page answers to is bound on the list, and a page pushed
             // while it was still loading had nothing to focus but the
-            // header bar: the top row looked chosen, and `l`, `p` and Tab
+            // header bar: the top row looked chosen, and `l`, `f` and Tab
             // did nothing until Down had been pressed once. Not when the
             // keyboard is at work in the pane below, though. A reload
-            // after a commit must not pull it out of the message box.
+            // must not pull it out of the list of changed files.
             if !in_pane {
                 if let Some(row) = landing {
                     // Once the list has been laid out, focusing the row
@@ -662,10 +596,9 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                 // `shown` is where HEAD was when the page was read: its name
                 // and its commit. When either has changed (a branch switched,
                 // a commit made, in the terminal this page offers on `l`) the
-                // whole page is read again, not just the count. The history,
-                // the ahead and behind figures and the push button all hang
-                // off HEAD, and would otherwise go on describing where it
-                // used to be.
+                // whole page is read again, not just the count. The history
+                // hangs off HEAD, and would otherwise go on describing where
+                // it used to be.
                 let shown = (graph.head.clone(), graph.tip.clone());
                 let reload = Rc::clone(&reload);
                 let rows = rows_box.clone();
@@ -706,8 +639,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                         }
                         // The tree went clean somewhere else while its row was
                         // the one selected. Hiding the row does not move the
-                        // selection off it, and the pane went on offering the
-                        // old files, their stage buttons and a commit box.
+                        // selection off it, and the pane went on showing the
+                        // old files.
                         // Step to the newest commit, which loads it.
                         match rows.row_at_index(1) {
                             Some(first) => {
@@ -727,16 +660,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                     }),
                 );
             }
-
-            arm_push(
-                &push,
-                &push_content,
-                &graph,
-                &load_path,
-                &toasts,
-                Rc::clone(&push_handler),
-                Rc::clone(&on_pushed),
-            );
 
             stack.set_visible_child_name("graph");
             status.set_label(&summary(&graph, from, to));
@@ -796,14 +719,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             });
         }
         group.add_action(&reload_for);
-        // Escape in the commit message: out of the field, with the message
-        // left as it is. The window owns Escape and asks for this.
-        let leave_field = gtk::gio::SimpleAction::new("leave-field", None);
-        {
-            let focus_files = Rc::clone(&focus_files);
-            leave_field.connect_activate(move |_, _| focus_files());
-        }
-        group.add_action(&leave_field);
         page.insert_action_group("page", Some(&group));
     }
 
@@ -863,103 +778,6 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
         parts.push(format!("not drawn, unreadable: {}", graph.unreadable_refs.join(", ")));
     }
     parts.join("  ·  ")
-}
-
-/// Set the push button up for what this repository can actually do, and say in
-/// the tooltip why when it can do nothing.
-fn arm_push(
-    push: &gtk::Button,
-    content: &adw::ButtonContent,
-    graph: &Graph,
-    repo: &Path,
-    toasts: &adw::ToastOverlay,
-    handler: Rc<RefCell<Option<glib::SignalHandlerId>>>,
-    on_pushed: Rc<dyn Fn()>,
-) {
-    if let Some(previous) = handler.borrow_mut().take() {
-        push.disconnect(previous);
-    }
-    // A push that is still running. This runs on every reload, and a commit
-    // made in the pane reloads the page: the button came back armed with a
-    // push under way, and nothing stood between it and a second one.
-    if pushing(repo) {
-        content.set_label("Pushing…");
-        push.set_sensitive(false);
-        push.set_tooltip_text(Some("A push is under way"));
-        return;
-    }
-    let plan = graph.push.as_ref().ok();
-    let refusal = match &graph.push {
-        Err(nowhere) => Some(nowhere.clone()),
-        Ok(plan) => crate::commit::why_not_push(plan, graph.ahead, graph.behind),
-    };
-    let publish = plan.is_some_and(|plan| plan.publish);
-
-    content.set_label(&match (publish, graph.ahead) {
-        // A branch that has never been pushed is published, not pushed — the
-        // word matters, because it is the act that makes it visible.
-        (true, _) => "Publish".to_string(),
-        (false, 0) => "Push".to_string(),
-        (false, n) => format!("Push {n}"),
-    });
-    push.set_sensitive(refusal.is_none());
-    push.set_tooltip_text(Some(&match (&refusal, plan) {
-        (Some(reason), _) => reason.clone(),
-        (None, Some(plan)) if plan.publish => {
-            format!("Publish {} to {}", plan.branch, plan.remote)
-        }
-        (None, Some(plan)) => format!(
-            "Send {} {} on {} to {}",
-            graph.ahead,
-            if graph.ahead == 1 { "commit" } else { "commits" },
-            plan.branch,
-            graph.upstream.as_deref().unwrap_or(&plan.remote)
-        ),
-        (None, None) => "Push".to_string(),
-    }));
-
-    let Some(armed) = plan.cloned() else { return };
-    let repo = repo.to_path_buf();
-    let toasts = toasts.clone();
-    let content = content.clone();
-    let id = push.connect_clicked(move |button| {
-        if !PUSHING.with(|set| set.borrow_mut().insert(repo.clone())) {
-            return;
-        }
-        // Said on the button: a pre-push hook can be a test suite, and for
-        // two minutes the only sign of the push was a button gone grey.
-        button.set_sensitive(false);
-        button.set_tooltip_text(Some("A push is under way"));
-        content.set_label("Pushing…");
-        // What goes to git is the plan the button was drawn from, and only if
-        // the repository still gives that plan when the worker asks again.
-        let rx = crate::commit::spawn_push(repo.clone(), armed.clone());
-        let repo = repo.clone();
-        let toasts = toasts.clone();
-        let on_pushed = Rc::clone(&on_pushed);
-        glib::spawn_future_local(async move {
-            let outcome = rx.recv().await;
-            PUSHING.with(|set| set.borrow_mut().remove(&repo));
-            match outcome {
-                Ok(Ok(line)) => toasts.add_toast(crate::ui::toast(&line)),
-                // The page was out of date, or git refused: a pre-push hook's
-                // refusal is quoted, not paraphrased. Either stays up until
-                // it has been read.
-                Ok(Err(crate::commit::PushError::Stale(why))) => {
-                    crate::ui::complain(&toasts, &why)
-                }
-                Ok(Err(crate::commit::PushError::Git(err))) => {
-                    crate::ui::complain(&toasts, &err)
-                }
-                Err(_) => {}
-            }
-            // The window has every open page of this repository read it
-            // again, this one included if it is still there. The button is
-            // then set from the repository, not from a guess made here.
-            on_pushed();
-        });
-    });
-    *handler.borrow_mut() = Some(id);
 }
 
 fn stop_watching(watcher: &Watcher) {

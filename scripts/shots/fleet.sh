@@ -102,12 +102,14 @@ for repo in $FLEET; do
 done
 
 # A fleet where everything is level and clean has nothing to show. So, on
-# these copies only: one as it was two days ago with an edit in it, which is
-# what "held back" is said of (the pictures are taken with the refresh set to
-# fast-forward, so a clean copy that was merely behind would be a picture of
-# something that does not happen); uncommitted work in two more; one on a
-# branch of its own and one on a release.
-git -C "$CODE/omacosy" reset -q --hard "$(git -C "$CODE/omacosy" rev-list -1 --before="2 days ago" "origin/$(main omacosy)")"
+# these copies only: three as they were a day or two ago, with what has
+# happened since still to pull (omarepos fetches and never pulls, so behind is
+# where a copy stays until somebody does); uncommitted work in three, one of
+# them behind as well; one on a branch of its own and one on a release.
+as_it_was() { git -C "$CODE/$1" reset -q --hard "$(git -C "$CODE/$1" rev-list -1 --before="$2" "origin/$(main "$1")")"; }
+as_it_was omarchy "1 day ago"
+as_it_was try-omarchy "2 days ago"
+as_it_was omacosy "2 days ago"
 echo >> "$CODE/omacosy/README.md"
 echo >> "$CODE/aether/README.md"; echo >> "$CODE/aether/go.mod"; echo "ideas" > "$CODE/aether/NOTES.md"
 # The one whose changes a picture opens: an install prefix and a line width,

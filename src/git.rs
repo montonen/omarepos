@@ -191,8 +191,8 @@ pub struct RepoInfo {
     /// under the wrong name.
     ///
     /// It is what is configured, not who git will record, and the card words
-    /// it that way. Only git knows the second, and nothing runs git during a
-    /// scan; the commit box asks it ([`crate::commit::identity`]).
+    /// it that way. Only git knows the second, and nothing here runs git to
+    /// ask.
     pub identity: Option<String>,
     /// What is in plain sight that makes git likely to record somebody other
     /// than `identity`; see [`identity_doubt`].
@@ -206,36 +206,6 @@ pub struct RepoInfo {
 }
 
 impl RepoInfo {
-    /// Why an automatic fast-forward would refuse to touch this repository.
-    /// Mirrors the checks the refresher makes, so a card can say up front what
-    /// the refresher would otherwise only say to the log.
-    pub fn update_blocked_by(&self) -> Option<&'static str> {
-        if self.bare || self.unborn {
-            return Some("nothing to update");
-        }
-        if self.detached {
-            return Some("detached HEAD");
-        }
-        if self.upstream.is_none() {
-            return Some("no upstream");
-        }
-        if self.ahead > 0 {
-            return Some("unpushed commits of its own");
-        }
-        // The refresher takes a status it cannot read as a reason not to
-        // proceed, so the card must not promise that it will.
-        if self.tree.unreadable.is_some() {
-            return Some("its working tree could not be read");
-        }
-        // Untracked files do not hold a fast-forward back. The exception, an
-        // incoming file of the same name, is one only git can see coming: it
-        // refuses, and the refusal is shown on the card when it happens.
-        if self.tree.staged + self.tree.unstaged + self.tree.conflicted > 0 {
-            return Some("uncommitted changes");
-        }
-        None
-    }
-
     /// Sort key for "most recent activity first". Not `activity`: that is
     /// the field with the last four weeks in it.
     pub fn last_active(&self) -> i64 {
@@ -300,13 +270,13 @@ pub struct Found {
 ///
 /// Discovery takes any directory with a `.git` in it, and a `.git` can say
 /// that its files live somewhere else. `core.worktree` in its config makes
-/// both libgit2 and git treat another directory as the work tree: status is
-/// read from there, `git add` stages from there, and a fast-forward writes
-/// there, into a place the user never pointed this application at. A `.git`
-/// that is a file can likewise name another repository's git directory. A
+/// both libgit2 and git treat another directory as the work tree: status and
+/// the working-tree view are read from there, a place the user never pointed
+/// this application at. A `.git` that is a file can likewise name another
+/// repository's git directory, and a fetch would be written into that. A
 /// directory that arrived under a scan root from somewhere else (an archive, a
 /// synced folder) only has to contain one of these to turn "refresh the
-/// fleet" into "write files anywhere this user can".
+/// fleet" into reading, and fetching into, anywhere this user can.
 ///
 /// So a repository is used only when its work tree is the directory it was
 /// found in, and its git directory is either inside that directory or one of
@@ -1878,9 +1848,6 @@ mod tests {
         assert_eq!(info.error, None);
         assert_eq!(info.head, "main");
         assert_eq!(info.history_unreadable, None);
-        // The refresher will not fast-forward over a status it cannot read,
-        // and the card has to agree with it.
-        assert_eq!(info.update_blocked_by(), Some("its working tree could not be read"));
 
         // An index cut short, which is what a crash leaves.
         let f = fleet("inspect-cut-index");
@@ -2012,9 +1979,15 @@ mod tests {
 
     // ---- who commits here, as far as can be read without asking git --------
 
-    /// Who git itself says a commit made here would be recorded as.
+    /// Who git itself says a commit made here would be recorded as: its
+    /// answer is "Name <mail> 1700000000 +0000", and this is the part before
+    /// the time.
     fn recorded_as(repo: &Path) -> String {
-        crate::commit::identity(repo).unwrap()
+        let said = git(repo, &["var", "GIT_AUTHOR_IDENT"]);
+        match said.split_once('>') {
+            Some((who, _)) => format!("{who}>"),
+            None => said,
+        }
     }
 
     #[test]

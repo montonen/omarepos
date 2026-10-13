@@ -9,7 +9,7 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
 
-use crate::commit::{self, Cancel, Detail, Group, Node, Target, Write};
+use crate::commit::{self, Cancel, Detail, Group, Node, Target};
 use crate::ui::{absolute_time, relative_time};
 
 /// Holding Down through a graph walks a commit per frame. Waiting for the
@@ -18,14 +18,13 @@ const SETTLE_MS: u64 = 120;
 
 /// Build the pane. The returned closure loads a commit into it; calling it
 /// again abandons whatever was still loading.
-/// `on_changed` fires after a write: `true` when a commit was made, which means
-/// the history the caller is showing is now out of date.
 /// Returns the pane, a loader, and a way to put the keyboard into it — a
 /// two-pane layout where Tab walks five hundred commit rows instead of moving
 /// to the next region is not navigable.
-pub fn pane(
-    on_changed: Rc<dyn Fn(bool)>,
-) -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
+///
+/// It is a view. It shows what a commit changed, or what the working tree
+/// holds that is not committed, and changes neither.
+pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
     let header = gtk::Box::new(gtk::Orientation::Vertical, 2);
     header.set_margin_top(10);
     header.set_margin_start(14);
@@ -74,7 +73,6 @@ pub fn pane(
 
     let files = gtk::ListBox::new();
     let files_for_focus = files.clone();
-    let files_for_keys = files.clone();
     files.set_selection_mode(gtk::SelectionMode::Browse);
     files.add_css_class("om-results");
     files.set_margin_top(10);
@@ -135,50 +133,7 @@ pub fn pane(
         .build();
     totals.add_css_class("om-statusbar");
 
-    // The message box belongs with the files it commits, not with the diff.
-    let message = gtk::Entry::builder()
-        .placeholder_text("Commit message…")
-        .hexpand(true)
-        .build();
-    message.add_css_class("om-search");
-    let commit_button = gtk::Button::with_label("Commit");
-    commit_button.add_css_class("suggested-action");
-    // Who the commit will be recorded as, before it is made. With an identity
-    // per client directory, the wrong one is otherwise found out afterwards,
-    // on the remote.
-    let who = gtk::Label::builder()
-        .ellipsize(pango::EllipsizeMode::Middle)
-        .max_width_chars(30)
-        .build();
-    who.add_css_class("om-meta");
-    // What the last write here came to: "Committing…" while one runs, and a
-    // refusal in git's or a hook's own words. On a line of its own, which the
-    // loader never writes to. These used to go to the totals line under the
-    // pane, and the loader writes that on every read: "Committed" was put
-    // there and replaced in the same turn of the main loop, so it was never
-    // drawn at all, and a hook's reason for refusing lasted until the window
-    // was next come back to, which is the way back from fixing what the hook
-    // complained about.
-    let outcome = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .visible(false)
-        .build();
-    outcome.add_css_class("om-summary");
-    let commit_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    commit_line.append(&message);
-    commit_line.append(&who);
-    commit_line.append(&commit_button);
-    let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    commit_box.add_css_class("om-commit");
-    commit_box.append(&outcome);
-    commit_box.append(&commit_line);
-    commit_box.set_visible(false);
-
-    let left = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    left.append(&scroller);
-    left.append(&commit_box);
-    inner.set_start_child(Some(&left));
+    inner.set_start_child(Some(&scroller));
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("om-detail");
@@ -213,113 +168,6 @@ pub fn pane(
     // it from the viewport it is put in. Taken away for a moment each time
     // the list is rebuilt in place, and remembered here to be given back.
     let follows: Rc<OnceCell<Option<gtk::Adjustment>>> = Rc::new(OnceCell::new());
-    let staged_count = Rc::new(Cell::new(0usize));
-    // One write at a time. git reads the index again after a pre-commit hook
-    // has run, so a file staged while "Committing…" was on screen went into a
-    // commit whose message had been written without it.
-    let busy = Rc::new(Cell::new(false));
-
-    // Reloading after a write: the same path the pane already uses, so there is
-    // one way for its contents to arrive.
-    let reload: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-
-    {
-        let viewer = Rc::clone(&viewer);
-        let staged_count = Rc::clone(&staged_count);
-        let reload = Rc::clone(&reload);
-        let message = message.clone();
-        let outcome = outcome.clone();
-        let on_changed = Rc::clone(&on_changed);
-        let busy = Rc::clone(&busy);
-        let files_for_commit = files.clone();
-        commit_button.connect_clicked(move |button| {
-            let Some(repo) = viewer.working() else { return };
-            let text = message.text().to_string();
-            if let Some(reason) = commit::why_not_commit(&repo, staged_count.get(), &text) {
-                report(&outcome, &reason);
-                return;
-            }
-            if busy.replace(true) {
-                report(&outcome, "Still staging. Try again in a moment.");
-                return;
-            }
-            button.set_sensitive(false);
-            files_for_commit.set_sensitive(false);
-            report(&outcome, "Committing…");
-
-            let rx = commit::spawn_commit(repo, text);
-            let button = button.clone();
-            let busy = Rc::clone(&busy);
-            let files_for_commit = files_for_commit.clone();
-            let message = message.clone();
-            let outcome = outcome.clone();
-            let reload = Rc::clone(&reload);
-            let on_changed = Rc::clone(&on_changed);
-            glib::spawn_future_local(async move {
-                let result = rx.recv().await;
-                button.set_sensitive(true);
-                files_for_commit.set_sensitive(true);
-                busy.set(false);
-                // Switching off the button that was pressed takes the
-                // keyboard away from it, and switching it on again does not
-                // give it back: after a refusal the keyboard was nowhere.
-                if button.root().is_some_and(|root| root.focus().is_none()) {
-                    button.grab_focus();
-                }
-                let reread = || {
-                    if let Some(reload) = reload.borrow().clone() {
-                        reload();
-                    }
-                };
-                match result {
-                    Ok(Ok(sha)) => {
-                        message.set_text("");
-                        let done = match sha.as_str() {
-                            "" => "Committed".to_string(),
-                            sha => format!("Committed {sha}"),
-                        };
-                        // As a toast, where a push and a pull report theirs:
-                        // after the commit that leaves the tree clean, this
-                        // box and its line are no longer on screen.
-                        report(&outcome, if announce(&button, &done) { "" } else { &done });
-                        reread();
-                        on_changed(true);
-                    }
-                    // A hook that refuses is quoted rather than paraphrased.
-                    // The line holds the first of what it said; the rest is in
-                    // the tooltip. And the tree is read again: a hook that
-                    // refuses has often rewritten a file first, which is then
-                    // staged as it was and modified as it is, and the list
-                    // went on showing neither that nor a `+` to stage the fix.
-                    Ok(Err(err)) => {
-                        report(&outcome, &err);
-                        reread();
-                    }
-                    Err(_) => report(&outcome, "The commit could not be started"),
-                }
-            });
-        });
-    }
-
-    {
-        // Enter in the message commits, as it does in every box with one
-        // button beside it. It did nothing: the only way from the message to
-        // the commit was Tab, past the name, and then Enter. Not while a
-        // commit is running, when the button is switched off; a click sent
-        // from here would not ask.
-        // Weakly: the button's own handler holds the message, to read it, and
-        // a handler on the message that held the button would make a ring of
-        // the two, each kept alive by a closure on the other, and with them
-        // the file list the button's handler also holds.
-        let commit_button = commit_button.downgrade();
-        message.connect_activate(move |_| {
-            let Some(commit_button) = commit_button.upgrade() else { return };
-            if commit_button.is_sensitive() {
-                commit_button.emit_clicked();
-            }
-        });
-    }
-
     {
         let viewer = Rc::clone(&viewer);
         let rebuilding = Rc::clone(&rebuilding);
@@ -337,9 +185,6 @@ pub fn pane(
         let generation = Rc::clone(&generation);
         let running = Rc::clone(&running);
         let showing = Rc::clone(&showing);
-        let reload = Rc::clone(&reload);
-        let staged_count = Rc::clone(&staged_count);
-        let on_changed = Rc::clone(&on_changed);
         let viewer = Rc::clone(&viewer);
         Rc::new(move |repo: PathBuf, target: Target| {
             let mine = {
@@ -350,8 +195,8 @@ pub fn pane(
             if let Some(cancel) = running.borrow_mut().take() {
                 cancel.stop();
             }
-            // Asked for what was asked for last: a re-read, after a write
-            // here or on the way back to the window. There is no cursor to
+            // Asked for what was asked for last: a re-read, on the way back
+            // to the window or after a fetch. There is no cursor to
             // wait for then, and nothing on screen is replaced before there
             // is something to replace it with.
             let asked = (repo.clone(), target.clone());
@@ -370,13 +215,6 @@ pub fn pane(
             let files = files.clone();
             let scroller = scroller.clone();
             let totals = totals.clone();
-            let commit_box = commit_box.clone();
-            let outcome = outcome.clone();
-            let staged_count = Rc::clone(&staged_count);
-            let reload = Rc::clone(&reload);
-            let on_changed = Rc::clone(&on_changed);
-            let busy = Rc::clone(&busy);
-            let who = who.clone();
             let viewer = Rc::clone(&viewer);
             let rebuilding = Rc::clone(&rebuilding);
             let rebuilds = Rc::clone(&rebuilds);
@@ -402,30 +240,6 @@ pub fn pane(
                 }
 
                 let working = target == Target::Working;
-                if working {
-                    let who = who.clone();
-                    let repo = repo.clone();
-                    glib::spawn_future_local(async move {
-                        match commit::spawn_identity(repo).recv().await {
-                            Ok(Ok(identity)) => {
-                                who.set_label(&format!("as {identity}"));
-                                who.set_tooltip_text(Some(&format!(
-                                    "A commit made here is recorded as {identity}"
-                                )));
-                            }
-                            Ok(Err(why)) => {
-                                who.set_label("no identity");
-                                who.set_tooltip_text(Some(&why));
-                            }
-                            Err(_) => {}
-                        }
-                    });
-                }
-                if let Ok(detail) = &result {
-                    // From the counts taken before the list was capped:
-                    // Commit takes everything staged, listed or not.
-                    staged_count.set(detail.counts.staged);
-                }
 
                 // Whether the rows on screen are this commit's already, and
                 // whether they still say what is true of it.
@@ -449,23 +263,18 @@ pub fn pane(
                     return;
                 }
 
-                // A re-read that did find something new, which after a stage
-                // or an unstage is every time. The user is somewhere in this
-                // list, and is put back there once it has been rebuilt.
+                // A re-read that did find something new: a file staged or
+                // edited in the terminal while the window was away. The user
+                // is somewhere in this list, and is put back there once it
+                // has been rebuilt.
                 let place = same.then(|| Place::of(&files));
                 let offset = scroller.vadjustment().value();
                 if !same {
                     folds.borrow_mut().clear();
-                    // What a write came to was said about the list this one
-                    // replaces.
-                    report(&outcome, "");
                     // And another commit's files start at the top, wherever
                     // the last one's were scrolled to.
                     scroller.vadjustment().set_value(0.0);
                 }
-                // The message box goes when this is not the working tree, and
-                // after the commit that emptied the tree the keyboard is in it.
-                let typing = focus_inside(&commit_box).is_some();
 
                 *viewer.listed.borrow_mut() = Some(Listed {
                     repo: repo.clone(),
@@ -476,55 +285,6 @@ pub fn pane(
                 rebuilds.set(rebuilds.get() + 1);
                 let built = rebuilds.get();
                 files.remove_all();
-                commit_box.set_visible(working);
-
-                // Staging only exists for the working tree; a commit's files
-                // are already committed.
-                let writer: Option<Rc<dyn Fn(Write, String)>> = working.then(|| {
-                    let viewer = Rc::clone(&viewer);
-                    let reload = Rc::clone(&reload);
-                    let on_changed = Rc::clone(&on_changed);
-                    let outcome = outcome.clone();
-                    let busy = Rc::clone(&busy);
-                    Rc::new(move |what: Write, file: String| {
-                        let Some(repo) = viewer.working() else { return };
-                        if busy.replace(true) {
-                            return;
-                        }
-                        let busy = Rc::clone(&busy);
-                        let rx = commit::spawn_write(repo, what, vec![file]);
-                        let reload = Rc::clone(&reload);
-                        let on_changed = Rc::clone(&on_changed);
-                        let outcome = outcome.clone();
-                        glib::spawn_future_local(async move {
-                            let result = rx.recv().await;
-                            busy.set(false);
-                            let reread = || {
-                                if let Some(reload) = reload.borrow().clone() {
-                                    reload();
-                                }
-                            };
-                            match result {
-                                Ok(Ok(())) => {
-                                    // Whatever the line said was about the
-                                    // index as it was before this.
-                                    report(&outcome, "");
-                                    reread();
-                                    on_changed(false);
-                                }
-                                // git refusing to stage a file it was shown
-                                // as able to stage means the list is out of
-                                // date: the file is gone, or something else
-                                // has the index. So it is read again here too.
-                                Ok(Err(err)) => {
-                                    report(&outcome, &err);
-                                    reread();
-                                }
-                                Err(_) => {}
-                            }
-                        });
-                    }) as Rc<dyn Fn(Write, String)>
-                });
 
                 match &result {
                     Ok(detail) => {
@@ -589,12 +349,12 @@ pub fn pane(
                             // keyboard is put back on a row by its name.
                             let mut above: Vec<String> = Vec::new();
                             for node in commit::tree(&in_group) {
-                                let row = row(&node, writer.as_ref());
-                                // The files of a group that holds nothing
-                                // back step back with its heading. Only the
-                                // heading did, which left the untracked files
-                                // drawn as loudly as the changes that matter.
-                                if group != Group::Committed && !group.blocks_update() {
+                                let row = row(&node);
+                                // Untracked files step back with their
+                                // heading. Only the heading did, which left
+                                // them drawn as loudly as the changes to files
+                                // git already knows.
+                                if group == Group::Untracked {
                                     row.add_css_class("om-aside");
                                 }
                                 if let Node::Dir { name, depth } = &node {
@@ -664,7 +424,7 @@ pub fn pane(
                 // does not count: a working tree of nothing but a dozen
                 // untracked files opens with its one group folded, and used
                 // to open with a hidden row selected, its diff on show under
-                // no name, and Tab and Space going to a file never seen.
+                // no name, and Tab going to a file never seen.
                 // Coming back to the same commit, it is the row the user was
                 // on, or the nearest to it of those that are left.
                 let rows: HashMap<String, gtk::ListBoxRow> = named_rows(&files).into_iter().collect();
@@ -689,11 +449,10 @@ pub fn pane(
                 rebuilding.set(false);
                 viewer.show(chosen.as_ref());
 
-                // And the keyboard, if it was in the list, or in the message
-                // box that has just gone. On the selected row it stays with
-                // the selection, which is what the arrow keys keep it with;
-                // on a heading, a folder or another file's button it goes
-                // back there, or as near as there still is. Straight away,
+                // And the keyboard, if it was in the list. On the selected
+                // row it stays with the selection, which is what the arrow
+                // keys keep it with; on a heading or a folder it goes back
+                // there, or as near as there still is. Straight away,
                 // not once the list has been laid out: a key pressed in
                 // between would go nowhere.
                 let keyboard = place.as_ref().and_then(|place| {
@@ -704,11 +463,7 @@ pub fn pane(
                         place.back(Some(at), &rows, is_shown).or_else(|| chosen.clone())
                     })
                 });
-                let back_to = match &keyboard {
-                    Some(row) => Some(row.clone()),
-                    None if typing && !working => Some(chosen.clone()),
-                    None => None,
-                };
+                let back_to = keyboard.clone();
                 // A row that has just been made has no place in the list
                 // yet, and until the list is laid out it measures as sitting
                 // at the very top. The list and the viewport around it both
@@ -761,67 +516,6 @@ pub fn pane(
         })
     };
 
-    {
-        // Reloading is just loading again, so there is one way for the pane's
-        // contents to arrive.
-        // Weakly: the loader itself holds this slot, so a strong reference
-        // back to it would be a ring nothing could ever free.
-        let load = Rc::downgrade(&load);
-        let showing = Rc::clone(&showing);
-        *reload.borrow_mut() = Some(Rc::new(move || {
-            let current = showing.borrow().clone();
-            if let (Some((repo, target)), Some(load)) = (current, load.upgrade()) {
-                load(repo, target);
-            }
-        }));
-    }
-
-    {
-        // Space stages the focused file and `c` moves to the message, the two
-        // reflexes anyone arriving from lazygit already has. The controller is
-        // on the list, so neither fires while the message is being typed.
-        let message = message.clone();
-        let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed(move |controller, key, _, state| {
-            if !crate::ui::unmodified(state) {
-                return glib::Propagation::Proceed;
-            }
-            if key == gtk::gdk::Key::c {
-                // Mapped, and not `get_visible()`: that reads the entry's own
-                // flag, which nothing ever clears. It is the box around the
-                // entry that is hidden, for every commit that is not the
-                // working tree, and GTK will give the focus to a widget it is
-                // not showing. `c` on an ordinary commit's files sent the
-                // keyboard into an entry nobody could see.
-                if message.is_mapped() {
-                    message.grab_focus();
-                    return glib::Propagation::Stop;
-                }
-                return glib::Propagation::Proceed;
-            }
-            if key != gtk::gdk::Key::space {
-                return glib::Propagation::Proceed;
-            }
-            let focused = controller
-                .widget()
-                .and_downcast::<gtk::ListBox>()
-                .and_then(|list| list.focus_child());
-            match focused.as_ref().and_then(find_button) {
-                Some(button) => {
-                    button.emit_clicked();
-                    glib::Propagation::Stop
-                }
-                None => glib::Propagation::Proceed,
-            }
-        });
-        files_for_keys.add_controller(keys);
-    }
-
-    // No Tab handler on the file list: the natural order already runs row,
-    // stage button, next row, and on to the message box. Intercepting Tab here
-    // jumped straight to the message and made the stage buttons unreachable
-    // from the keyboard entirely.
-
     let focus_files: Rc<dyn Fn()> = {
         let files = files_for_focus;
         Rc::new(move || {
@@ -835,7 +529,8 @@ pub fn pane(
             // Browse selection keeps a row current, so focusing the list lands
             // on the file already being shown. Failing that, on the first row
             // there is, which is a heading when every group is folded: Space
-            // there unfolds it. Never on a row that is folded away.
+            // there unfolds it, as it does any button. Never on a row that is
+            // folded away.
             let row = files
                 .selected_row()
                 .filter(|row| row.get_visible())
@@ -850,9 +545,6 @@ pub fn pane(
     (root.upcast(), load, focus_files)
 }
 
-/// A heading above each kind of change. Untracked is marked as not blocking an
-/// update, because the question people bring to this view is usually "what do I
-/// have to clean up", and untracked files are not the answer.
 /// A heading above each kind of change, which folds its files away. Untracked
 /// files are often the bulk of a list and the least of anyone's concerns, so
 /// past a handful the group starts folded.
@@ -868,14 +560,14 @@ fn group_heading(
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
     // As it was left, if this commit has been on show before. The list is
-    // rebuilt after every stage and whenever the working tree is found
-    // changed, and each time a group the user had opened shut again. Once
+    // rebuilt whenever the working tree is found changed, and each time a
+    // group the user had opened shut again. Once
     // drawn, a group stays as it is until the user says otherwise: it does not
     // fold itself either, when an eleventh untracked file turns up.
     let open = *folds
         .borrow_mut()
         .entry(group)
-        .or_insert(group.blocks_update() || count <= FOLD_UNTRACKED_PAST);
+        .or_insert(group != Group::Untracked || count <= FOLD_UNTRACKED_PAST);
     let chevron = gtk::Image::from_icon_name(if open {
         "pan-down-symbolic"
     } else {
@@ -895,12 +587,6 @@ fn group_heading(
     title.add_css_class("om-name");
     line.append(&title);
 
-    if !group.blocks_update() {
-        let note = gtk::Label::new(Some("does not block an update"));
-        note.add_css_class("om-meta");
-        line.append(&note);
-    }
-
     for member in &members {
         member.set_visible(open);
     }
@@ -908,12 +594,6 @@ fn group_heading(
     // A button, so the group folds from the keyboard as well as the pointer.
     let toggle = gtk::Button::builder().child(&line).build();
     toggle.add_css_class("om-stat-head");
-    toggle.set_tooltip_text(Some(if group.blocks_update() {
-        "These changes stop the background refresh from updating this repository"
-    } else {
-        "Untracked files do not hold an update back. Where an incoming commit adds a file of \
-         the same name, git refuses rather than overwrite it, and the card says which"
-    }));
     let shown = Cell::new(open);
     let folds = Rc::clone(folds);
     toggle.connect_clicked(move |_| {
@@ -946,7 +626,7 @@ fn group_heading(
     row.set_activatable(false);
     // So that the keyboard can be put back on it after the list is rebuilt.
     row.set_widget_name(&format!("group:{}", side_token(group)));
-    if !group.blocks_update() {
+    if group == Group::Untracked {
         row.add_css_class("om-aside");
     }
     row
@@ -977,14 +657,6 @@ struct Viewer {
 }
 
 impl Viewer {
-    /// The repository, when it is its working tree that is listed.
-    fn working(&self) -> Option<PathBuf> {
-        match self.listed.borrow().as_ref() {
-            Some(Listed { repo, target: Target::Working, .. }) => Some(repo.clone()),
-            _ => None,
-        }
-    }
-
     /// Show the diff of the file `row` stands for, or nothing for no row.
     ///
     /// Asked for the file that is already on show, which is what a re-read of
@@ -1076,7 +748,7 @@ impl Place {
     fn of(files: &gtk::ListBox) -> Self {
         let selected = files.selected_row();
         let focused = focus_inside(files).and_then(|widget| {
-            // The row itself, or the stage button inside it.
+            // The row itself, or the heading's button inside it.
             widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
                 widget
                     .ancestor(gtk::ListBoxRow::static_type())
@@ -1151,12 +823,11 @@ fn first_row(files: &gtk::ListBox, wanted: impl Fn(&gtk::ListBoxRow) -> bool) ->
 /// the list as it was, `from` the row the user was on, and `there` says
 /// whether a row of that name is in the new list to be gone to.
 ///
-/// The same row, if it is still there. A file that has just been staged is
-/// not: it has left its group. Then the next file of that group, below or
-/// failing that above, which is the next one to stage, and where the cursor
-/// stays in lazygit. When the group has run out, the same file in the group
-/// it went to, so that the key that staged it would unstage it and nothing
-/// else. And only then whatever is nearest.
+/// The same row, if it is still there. A file that was staged in a terminal
+/// while the window was away is not: it has left its group. Then the next
+/// file of that group, below or failing that above. When the group has run
+/// out, the same file in the group it went to. And only then whatever is
+/// nearest.
 fn way_back(names: &[String], from: usize, there: impl Fn(&str) -> bool) -> Option<String> {
     let was = names.get(from)?.as_str();
     if there(was) {
@@ -1218,38 +889,9 @@ fn tell(label: &gtk::Label, text: &str) {
     label.set_tooltip_text(more.then_some(text));
 }
 
-/// Say what a write came to on the line kept for that, which takes no room
-/// while it has nothing to say.
-fn report(outcome: &gtk::Label, text: &str) {
-    tell(outcome, text);
-    outcome.set_visible(!text.trim().is_empty());
-}
-
-/// Raise a toast on the page `from` is part of. Whether there was a page to
-/// raise it on: the pane does not own one, and is not told which it is in.
-fn announce(from: &impl IsA<gtk::Widget>, text: &str) -> bool {
-    let overlay = from
-        .ancestor(adw::ToastOverlay::static_type())
-        .and_downcast::<adw::ToastOverlay>();
-    match overlay {
-        Some(overlay) => {
-            overlay.add_toast(crate::ui::toast(text));
-            true
-        }
-        None => false,
-    }
-}
-
 fn describe(detail: &Detail) -> String {
     if detail.author.is_empty() {
-        let blocking = if detail.counts.blocks_update() {
-            // Not "until these are committed": on a branch that is behind, the
-            // commit is what makes the update impossible.
-            "the background refresh leaves this repository alone while these are here"
-        } else {
-            "nothing here blocks an update"
-        };
-        return format!("uncommitted  ·  {blocking}");
+        return "uncommitted".to_string();
     }
     let mut parts = vec![
         detail.author.clone(),
@@ -1451,22 +1093,6 @@ fn colour_tag(buffer: &gtk::TextBuffer, colour: Rgb) -> gtk::TextTag {
     tag.set_foreground_rgba(Some(&rgba(colour)));
     buffer.tag_table().add(&tag);
     tag
-}
-
-/// The stage button inside a file row. Rows are a handful of widgets wide, so
-/// walking them is cheaper than threading a reference out to the key handler.
-fn find_button(widget: &gtk::Widget) -> Option<gtk::Button> {
-    if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
-        return Some(button);
-    }
-    let mut child = widget.first_child();
-    while let Some(current) = child {
-        if let Some(found) = find_button(&current) {
-            return Some(found);
-        }
-        child = current.next_sibling();
-    }
-    None
 }
 
 /// Pick a syntax for a path.
@@ -1678,7 +1304,7 @@ fn prefix(origin: char) -> &'static str {
     }
 }
 
-fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBoxRow {
+fn row(node: &Node) -> gtk::ListBoxRow {
     match node {
         Node::Dir { name, depth } => {
             let label = gtk::Label::builder()
@@ -1731,32 +1357,6 @@ fn row(node: &Node, on_write: Option<&Rc<dyn Fn(Write, String)>>) -> gtk::ListBo
                 .build();
             churn.add_css_class("om-meta");
             line.append(&churn);
-
-            // A conflicted file gets no button, and so no Space either: to
-            // stage it is to tell git the conflict is settled.
-            if let Some(on_write) = on_write.filter(|_| file.group != Group::Conflicted) {
-                // Whole files only. Staging a hunk is a different tool.
-                let staged = file.group == Group::Staged;
-                let button = gtk::Button::builder()
-                    .icon_name(if staged {
-                        "list-remove-symbolic"
-                    } else {
-                        "list-add-symbolic"
-                    })
-                    .tooltip_text(if staged { "Unstage this file" } else { "Stage this file" })
-                    .has_frame(false)
-                    .valign(gtk::Align::Center)
-                    .build();
-                let on_write = Rc::clone(on_write);
-                let path = file.path.clone();
-                button.connect_clicked(move |_| {
-                    on_write(
-                        if staged { Write::Unstage } else { Write::Stage },
-                        path.clone(),
-                    );
-                });
-                line.append(&button);
-            }
 
             let mut tip = file.path.clone();
             if let Some(from) = &file.from {

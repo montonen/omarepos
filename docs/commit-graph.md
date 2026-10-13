@@ -21,106 +21,26 @@ they actually did.
 Every branch is walked, not just the one checked out, so a commit that only exists
 on a side branch still appears.
 
-## Pushing
-
-The header carries a **Push N** button, enabled when the branch is ahead of its
-upstream and nothing is in the way. A branch that has never been pushed says
-**Publish** instead: one with no upstream configured and no branch of its name
-on the remote, and only when the repository has exactly one remote — guessing
-which remote to publish to is not a guess worth making.
-
-Never forced, never `--all`, never tags, never another branch, and never from
-the grid across a selection. That is not left to git's defaults: the push names
-its one source and one destination in full
-(`git push --no-follow-tags -- <remote> refs/heads/<branch>:<upstream ref>`), so
-`push.default`, `push.followTags` and a `remote.<name>.push` refspec have no say
-in what is sent.
-
-The button is drawn from a page that may have been open a while, with a
-terminal one key away. So the repository is asked again at the moment of the
-click, and nothing is sent unless it still gives the same answer: HEAD on the
-same branch, the branch at the same commit, pushing to the same place. Otherwise
-the page says what changed and reads itself again. Coming back to the window
-does the same check, so a branch switched in lazygit shows up before the button
-is reached.
-
-It is refused, with the reason, when the branch is behind (fast-forward first),
-has nothing ahead, has no upstream and no single remote, or HEAD is detached.
-Four setups it will not push for at all, and says so: a branch that tracks a
-branch of another name (what `git switch -c fix origin/main` leaves you with —
-git's own default refuses that push too, and for the same reason: it would put
-`fix` on `main`), a branch that tracks one remote but is set to push to another
-(`remote.pushDefault`, `pushRemote`), a remote configured as a mirror, and a
-branch that tracks a local branch. Those want a terminal. A `pre-push` hook's refusal is quoted back as git wrote it.
-
-"No upstream" is not taken to mean "never published". A branch whose upstream
-is configured and gone (deleted on the remote when its pull request merged,
-or never fetched by a single-branch clone) is not offered **Publish**: a push
-would create the branch again, and whether to is not a button. Neither is a
-branch with no upstream whose name the remote already has.
-
-And commits that were on the remote and have been taken off it are not pushed
-back. When the remote's branch is wound back or rewritten, the commits you
-still have count as "ahead" like any others; the button used to read "Push 2".
-It now says what happened, names the commit the remote used to end at, and
-leaves putting them back to a terminal.
-
 ## What is uncommitted
 
 A **Local changes** row sits above the history whenever the working tree has
 anything in it, drawn dashed and hollow because it is not a commit. Selecting it
-fills the same pane with everything uncommitted, grouped:
+fills the same pane with everything uncommitted, in four groups: Staged, Not
+staged, Conflicted and Untracked.
 
-| Group | Holds back the background refresh |
-| --- | --- |
-| Staged, Not staged, Conflicted | yes |
-| **Untracked** | **no** |
-
-"Holds back" is about the pass across the fleet, which will not update under
-uncommitted work. `p` on the repository asks git instead, and git manages more
-than that: it fast-forwards over changes the incoming commits do not touch and
-keeps them, and refuses — naming the files, changing nothing — where they
-overlap.
+It is a view. Nothing in it stages, commits or resolves anything: for that,
+`l` opens a terminal in the repository, in lazygit when it is installed, and
+the list is current again when you come back.
 
 Each group folds. Untracked starts folded past ten files, where it stops being
-information and starts being noise.
+information and starts being noise. Untracked files are shown stepped back and
+labelled, apart from the changes to files git already knows. Untracked
+directories are recursed into, since "two untracked things" is what the card
+already says and this view exists to say which.
 
-The `+` beside a file stages it, `−` unstages it, and the box below commits what
-is staged: `c` puts the keyboard in the message, `Enter` commits, `Esc` steps
-back out and leaves the message. After a stage the keyboard is on the next
-file of the same group, so a run of files is `Space`, `Space`, `Space`. What a
-write came to, a hook's refusal included, stays on a line of its own above the
-message until the next one. The list is read again when the window is
-returned to, and keeps your place: the selected file, the keyboard, which
-groups are folded and how far it was scrolled. A file that is staged and then edited again has two rows, and each
-shows its own half: the Staged row is exactly what the commit will take. The
-name beside the Commit button is who git will record it as. A submodule whose
-checkout has moved is not listed, and neither it nor a repository nested inside
-this one can be staged from here. Whole files only — staging a hunk is the heart of a committing tool
-and omarepos is not one; `Open in terminal` starts lazygit for that. The commit
-is refused, with the reason, when nothing is staged, the message is empty, the
-repository is mid-merge or mid-rebase, there are unresolved conflicts, HEAD is
-detached, or the branch is behind its upstream.
-
-That last one is deliberate. A commit on a branch that is behind leaves it
-diverged, and the ways out of that are a rebase or a merge, neither of which
-omarepos does — so it will not start what it cannot finish. Press `p` first:
-the update goes through with your changes in place unless it touches the same
-files.
-
-A conflicted file has no `+`. Staging is how git is told a conflict has been
-resolved, so the button would settle a merge by accident, markers and all.
-Conflicts want a terminal.
-
-All of it runs through `git` rather than libgit2, so hooks run, commits are
-signed if you sign them, and the identity is whichever `includeIf gitdir:`
-resolves for that directory.
-
-That split is the point. Untracked files never stop a fast-forward — git refuses
-rather than overwriting one — so they are shown stepped back and labelled,
-rather than padding the same list as the changes that really are holding a
-repository behind. Untracked directories are recursed into, since "two untracked
-things" is what the card already says and this view exists to say which.
+A file that is staged and then edited again has two rows, and each shows its
+own half: the Staged row is exactly what a commit would take. A submodule whose
+checkout has moved is not listed.
 
 An untracked file has nothing to diff against, so its contents are shown as
 added, the way `git diff --no-index` would.
@@ -135,19 +55,18 @@ commit whose blobs were never fetched has rows marked `unreadable` and a diff
 that says why, where it used to say `+0 −0` and "No textual changes".
 
 The working tree changes outside the app, so it is re-read whenever the window
-regains focus — edit in your editor, come back, and the list is current. HEAD
-is looked at in the same glance: when the branch or its tip has moved, because
-of a commit made in the terminal `l` opened or a checkout, the whole page is
-read again. When the tree went clean while "Local changes" was the row
-selected, the selection steps to the newest commit.
+regains focus — edit in your editor, come back, and the list is current, with
+your place kept: the selected file, the keyboard, which groups are folded and
+how far it was scrolled. HEAD is looked at in the same glance: when the branch
+or its tip has moved, because of a commit made in the terminal `l` opened or a
+checkout, the whole page is read again. When the tree went clean while "Local
+changes" was the row selected, the selection steps to the newest commit.
 
-The grid is kept honest the same way. A stage, a commit or a push made on a
-page marks that repository's card to be read again when the grid is next in
-front, and so is every repository handed to a terminal or an editor, each time
-the window is returned to. One card is re-read, not the fleet. And a graph page
-that is open while the window's own refresh fetches or fast-forwards its
-repository reads itself again, so its labels and its push button are not left
-describing the state before the pass.
+The grid is kept honest the same way. Every repository handed to a terminal or
+an editor is marked to be read again, each time the window is returned to. One
+card is re-read, not the fleet. And a graph page that is open while the
+window's own refresh fetches its repository reads itself again, so its labels
+are not left describing the state before the pass.
 
 ## What a commit changed
 

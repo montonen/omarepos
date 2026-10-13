@@ -312,16 +312,6 @@ pub fn settings(
     }
 
     // --- background refresh ------------------------------------------------
-    // A file can say `fast_forward = true` and leave `fetch` false, or out.
-    // The timer reads that as both and goes ahead; the two switches below,
-    // built from the fields as written, read "Fetch from the remote" off over
-    // a fast-forward switch that was on and greyed out. The one control that
-    // stops the app moving working trees could not be reached, under a switch
-    // saying nothing was fetched. So the pair is made to say what the timer
-    // does before it is shown. Nothing is written for that; the next change
-    // made here writes it.
-    fetch_implied(&mut cfg.borrow_mut().refresh);
-
     let every = adw::SpinRow::with_range(0.0, 1440.0, 5.0);
     every.set_title("Refresh every");
     every.set_subtitle("Minutes. Zero turns it off.");
@@ -334,17 +324,6 @@ pub fn settings(
         .active(cfg.borrow().refresh.fetch)
         .build();
     refresh_group.add(&fetch);
-
-    let fast_forward = adw::SwitchRow::builder()
-        .title("Update the code when it is safe")
-        .subtitle(
-            "Fast-forward only, and only a clean tree with no commits of its own. \
-             Runs no git hooks.",
-        )
-        .active(cfg.borrow().refresh.fast_forward)
-        .sensitive(cfg.borrow().refresh.fetch)
-        .build();
-    refresh_group.add(&fast_forward);
 
     let scope = adw::EntryRow::builder()
         .title("Only repos tagged")
@@ -370,33 +349,15 @@ pub fn settings(
     {
         let cfg = Rc::clone(&cfg);
         let on_change = Rc::clone(&on_refresh);
-        let fast_forward = fast_forward.clone();
         fetch.connect_active_notify(move |switch| {
-            let on = switch.is_active();
-            cfg.borrow_mut().refresh.fetch = on;
-            // Fast-forwarding without fetching could only ever act on a stale
-            // remote ref, so the two travel together.
-            if !on {
-                cfg.borrow_mut().refresh.fast_forward = false;
-                fast_forward.set_active(false);
-            }
-            fast_forward.set_sensitive(on);
-            persist(&cfg);
-            on_change();
-        });
-    }
-    {
-        let cfg = Rc::clone(&cfg);
-        let on_change = Rc::clone(&on_refresh);
-        fast_forward.connect_active_notify(move |switch| {
-            cfg.borrow_mut().refresh.fast_forward = switch.is_active();
+            cfg.borrow_mut().refresh.fetch = switch.is_active();
             persist(&cfg);
             on_change();
         });
     }
     // The scope was the one refresh setting that did nothing until Enter or
-    // the tick was pressed, and it is the last row of the four: the switches
-    // above it are live by the time it is typed into. Typed and left, the
+    // the tick was pressed, and it is the last row of the three: the switch
+    // above it is live by the time it is typed into. Typed and left, the
     // text stayed in the row and the saved scope stayed empty, which means
     // every repository. So it is also taken when the keyboard leaves the row,
     // and when the dialog closes.
@@ -514,13 +475,6 @@ pub fn settings(
 enum Field {
     Terminal,
     Editor,
-}
-
-/// Fast-forwarding implies a fetch: it could only ever act on a stale remote
-/// ref otherwise, and `Refresh::will_fetch` is where the timer takes that
-/// from. Make the stored pair say the same.
-fn fetch_implied(refresh: &mut Refresh) {
-    refresh.fetch = refresh.will_fetch();
 }
 
 /// Take what the "Only repos tagged" row holds as the refresh scope. Returns
@@ -1028,31 +982,13 @@ mod tests {
         assert!(!set_nested(&mut cfg, path, true));
     }
 
-    /// `fast_forward = true` with `fetch` left out is one line in a file the
-    /// README invites editing. The timer fetched and fast-forwarded on it;
-    /// the dialog showed fetching off.
-    #[test]
-    fn fast_forward_without_fetch_is_shown_as_what_the_timer_does_with_it() {
-        let mut by_hand = Refresh { every_minutes: 15, fast_forward: true, ..Refresh::default() };
-        assert!(!by_hand.fetch && by_hand.will_fetch());
-        fetch_implied(&mut by_hand);
-        assert!(by_hand.fetch && by_hand.fast_forward);
-
-        // Nothing else is read into a pair that already agrees with itself.
-        let mut off = Refresh::default();
-        fetch_implied(&mut off);
-        assert!(!off.fetch && !off.fast_forward);
-        let mut fetch_only = Refresh { fetch: true, ..Refresh::default() };
-        fetch_implied(&mut fetch_only);
-        assert!(fetch_only.fetch && !fetch_only.fast_forward);
-    }
-
     /// What leaving the row, or closing the dialog, does with the text in
     /// "Only repos tagged".
     #[test]
     fn the_refresh_scope_is_taken_from_the_row_once_it_has_been_typed_in() {
         let by_hand = ["work", "Side Projects"].map(str::to_string).to_vec();
-        let mut refresh = Refresh { only_tags: by_hand.clone(), ..Refresh::default() };
+        let mut refresh = Refresh::default();
+        refresh.only_tags = by_hand.clone();
 
         // Opened and closed: the row holds what it was filled in with, and a
         // list the editor would have split is left as it was written.

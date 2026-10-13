@@ -912,19 +912,13 @@ textview.om-diff text {{
   font-size: 0.82rem;
 }}
 
-/* A group whose changes do not block an update steps back from the ones that
-   do — the view is usually being read to answer "what must I clean up". It
+/* The untracked group steps back from the ones above it: those are changes
+   to files git tracks, which is what the view is usually being read for. It
    steps back as far as a card does and no further. The 0.70 written here
    was never drawn; it would have put the heading at 3.34:1 on rose-pine and
    the note beside it at 2.72. */
 list.om-results > row.om-aside {{
   opacity: {stepped_back};
-}}
-
-.om-commit {{
-  padding: 8px 10px;
-  border-top: 1px solid @om_border;
-  background-color: @om_bg;
 }}
 
 .om-status {{

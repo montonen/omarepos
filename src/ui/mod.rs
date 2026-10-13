@@ -36,7 +36,7 @@ pub enum Action {
 /// told otherwise, and most of what this application says in one came from
 /// somewhere else: git's complaint, a hook's output, a branch or directory
 /// name. An ampersand in any of those left the toast blank, which lost the one
-/// sentence explaining why a push was refused.
+/// sentence explaining why a fetch had failed.
 pub fn toast(text: &str) -> adw::Toast {
     adw::Toast::builder().title(text).use_markup(false).build()
 }
@@ -81,7 +81,7 @@ pub fn say(overlay: &adw::ToastOverlay, text: &str) {
 }
 
 /// A toast for something that went wrong. It stays until it is dismissed: five
-/// seconds is not long enough to read why a push was refused when the eye was
+/// seconds is not long enough to read why a fetch failed when the eye was
 /// on the terminal next door, and when it had gone there was nothing left on
 /// screen to say that anything had been.
 pub fn complain(overlay: &adw::ToastOverlay, text: &str) {
@@ -96,19 +96,16 @@ pub fn complain(overlay: &adw::ToastOverlay, text: &str) {
     overlay.add_toast(toast);
 }
 
-/// What fetching or updating one repository came to, worded to follow the
-/// repository's name: "billing: 3 commits pulled". One wording, because the
-/// card and the graph page ask the same question and used to answer it in two
-/// sets of words.
+/// What fetching one repository came to, worded to follow the repository's
+/// name: "billing: fetched, 3 behind". One wording, because the card and the
+/// graph page ask the same question and used to answer it in two sets of
+/// words.
 pub fn outcome_text(outcome: &crate::refresh::Outcome) -> String {
     use crate::refresh::Outcome;
     match outcome {
-        Outcome::FastForwarded(1) => "1 commit pulled".to_string(),
-        Outcome::FastForwarded(n) => format!("{n} commits pulled"),
-        Outcome::UpToDate => "up to date".to_string(),
+        Outcome::UpToDate => "fetched, nothing new".to_string(),
         Outcome::Behind(n) => format!("fetched, {n} behind"),
-        Outcome::Skipped(skip) => format!("left alone: {}", skip.reason()),
-        Outcome::Refused(why) => format!("fetched, not updated. {why}"),
+        Outcome::Skipped(skip) => format!("not fetched: {}", skip.reason()),
         Outcome::Failed(err) => err.clone(),
     }
 }

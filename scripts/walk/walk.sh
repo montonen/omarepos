@@ -50,6 +50,23 @@ tags() { : > "$W/config/omarepos/repos.toml"; local i=0 n; n=$(echo "$1" | wc -w
   for r in alpha beta gamma merges lots widgets; do i=$((i+1)); t=$(echo "$1" | cut -d' ' -f$(( (i-1) % n + 1 )))
     printf '[repos."%s/fleet/%s"]\ntags = ["%s"]\n\n' "$W" "$r" "$t" >> "$W/config/omarepos/repos.toml"; done; }
 
+# ---- what must be the same afterwards
+# omarepos reads, and it fetches. So whatever is pressed below, no fixture's
+# branches, tags, index or files may be any different at the end: only what
+# it knows of its remote may. Taken with git told not to tidy the index as it
+# looks, or the looking would be the change.
+as_found() { local r; for r in "$W"/fleet/*/; do ( cd "$r" || exit
+  echo "== $(basename "$r")"
+  git symbolic-ref -q HEAD || git rev-parse -q --verify HEAD || echo "no commit"
+  git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags
+  GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 -uall 2>&1
+  git stash list | wc -l
+  [ -f .git/index ] && sha256sum < .git/index
+  find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum
+) 2>&1; done; }
+export GIT_CONFIG_GLOBAL="$W/gitconfig" GIT_CONFIG_NOSYSTEM=1
+as_found > "$W/as-found.txt"
+
 boot
 # ---- where the keyboard starts: in the filter, to be typed into at once
 keyboard() { X dump "keyboard:" | grep -q "$1" || { WRONG=$((WRONG+1)); echo "WRONG: $2"; }; }
@@ -86,7 +103,7 @@ asks $N 1 "o on a card did not ask for its page"
 N=$(asked); step "card menu: open on the web" 'X press "!Open on git.example.invalid"'
 asks $N 1 "the card's menu did not ask for the page"
 WAIT=2 step "f on a card" "X keys ctrl+l f"
-WAIT=2 step "p on a card" "X keys ctrl+l p"
+step "p on a card, which is no key now" "X keys ctrl+l p"
 WAIT=4 step "refresh the fleet" "X keys ctrl+shift+r"
 step "rescan" "X keys ctrl+r; sleep 1"
 step "card menu: contributions" 'X press "!Contributions"; sleep 1.2'
@@ -102,16 +119,13 @@ for repo in $REPOS; do
   for row in 0 1 2 3 4 5 6 7; do WAIT=0.45 step "$repo: file row $row" "X pick 1:$row"; done
   step "$repo: fold a group" 'X press "Untracked"'
   step "$repo: unfold it" 'X press "Untracked"'
-  step "$repo: stage a file" "X pick 0:0; X keys Tab space; sleep 0.8"
-  step "$repo: unstage it" "X keys space; sleep 0.8"
-  step "$repo: c and Escape" "X keys c; X type 'a message'; X keys Escape"
-  step "$repo: commit with nothing staged" "X keys c Return; sleep 0.6; X keys Escape"
+  step "$repo: the keys that used to stage and commit" "X pick 0:0; X keys Tab space c Return; sleep 0.5"
   step "$repo: close the pane" "X keys ctrl+d"
   step "$repo: move with the pane closed" "X pick 0:2; X pick 0:1"
   step "$repo: open the pane" "X keys ctrl+d; sleep 0.5"
   step "$repo: reload" "X keys ctrl+r; sleep 0.9"
   WAIT=2 step "$repo: fetch" "X pick 0:1; X keys f"
-  WAIT=2 step "$repo: update" "X pick 0:1; X keys p"
+  step "$repo: p, which is no key now" "X pick 0:1; X keys p"
   step "$repo: o" "X pick 0:1; X keys o"
   step "$repo: shortcuts" "X keys shift+question; sleep 0.3; X keys Escape"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
@@ -131,8 +145,11 @@ N=$(asked); step "widgets: o" "X pick 0:0; X keys o"
 asks $N 1 "o in a graph did not ask for the page"
 step "widgets: back" "X keys Escape Escape Escape"
 
-# ---- a commit made and pushed from the pane
-step "alpha: stage, commit, push" "open_repo alpha; X pick 0:0; X keys Tab space; sleep 0.8; X keys c; X type 'walked'; X keys Return; sleep 1.5; X press 'Push'; sleep 2"
+# ---- nothing on a graph page writes: no button to stage, commit or push.
+# "Commit" whole, since a card's menu has "Commit graph" and that is a page.
+step "alpha: open" "open_repo alpha; X pick 0:0; X keys Tab"
+said=$(X dump-all | grep -oE 'Button "(Push|Publish|Stage|Unstage)[^"]*"|Button "Commit"' | head -1)
+[ -z "$said" ] || { WRONG=$((WRONG+1)); echo "WRONG: a graph page still has a $said"; }
 step "back to the grid" "X keys Escape Escape Escape"
 
 # ---- commit search
@@ -220,7 +237,7 @@ step "settings" "X act settings; sleep 0.6"
 for r in "Look inside repositories=on" "Show the containing repository=on" "Show the containing repository=off" \
   "Look inside repositories=off" "Tag what is found here=WORK" "Tag what is found here=two words" "Tag what is found here=" \
   "Levels below each root=1" "Levels below each root=8" "Terminal=" "Run in the terminal=" "Editor=" "Refresh every=5" \
-  "Fetch from the remote=on" "Update the code when it is safe=on" "Update the code when it is safe=off" \
+  "Fetch from the remote=on" \
   "Fetch from the remote=off" "Only repos tagged=JM" "Only repos tagged=" "Follow the Omarchy theme=off" \
   "Follow the Omarchy theme=on" "Refresh every=0"; do WAIT=0.7 step "settings: $r" "X row '$r'"; done
 step "settings: remove the root" 'X press "!Remove this root"; sleep 0.6; X respond remove; sleep 0.6'
@@ -239,5 +256,11 @@ step "a root that is not there, and one that is a file" "printf 'roots = [\"/non
 step "settings on that" "X act settings; sleep 0.5; X keys Escape"
 
 X stop
+# ---- and nothing was written
+as_found > "$W/as-left.txt"
+if ! cmp -s "$W/as-found.txt" "$W/as-left.txt"; then
+  WRONG=$((WRONG+1)); echo "WRONG: a fixture is not as it was found:"
+  diff "$W/as-found.txt" "$W/as-left.txt" | head -20
+fi
 echo "steps: $STEPS   stopped: $DEATHS   wrong: $WRONG"
 [ "$DEATHS" = 0 ] && [ "$WRONG" = 0 ]

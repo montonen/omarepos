@@ -80,14 +80,6 @@ pub struct Graph {
     /// and carries on with the rest, and so does the walk; but a branch left
     /// out of the graph without a word reads as a branch that is not there.
     pub unreadable_refs: Vec<String>,
-    /// Where the checked-out branch stands against its upstream, and what that
-    /// upstream is. `None` when there is no branch or no upstream.
-    pub ahead: usize,
-    pub behind: usize,
-    pub upstream: Option<String>,
-    /// What a push of the checked-out branch would send and where, or the
-    /// sentence explaining why there is nowhere for one to go.
-    pub push: Result<crate::commit::PushPlan, String>,
 }
 
 /// How far the walk will go past `limit` to reach a commit it was asked for.
@@ -181,10 +173,6 @@ pub fn build(
                     working_changes,
                     working_unreadable,
                     unreadable_refs,
-                    ahead: 0,
-                    behind: 0,
-                    upstream: None,
-                    push: here.and_then(|()| crate::commit::push_plan(&repo)),
                 });
             }
             // Nothing but a detached HEAD.
@@ -271,8 +259,6 @@ pub fn build(
         }
     }
 
-    let (ahead, behind, upstream) = divergence(&repo);
-
     let lanes = rows
         .iter()
         .map(|r| r.incoming.len().max(r.outgoing.len()).max(r.lane + 1))
@@ -292,41 +278,7 @@ pub fn build(
         working_changes,
         working_unreadable,
         unreadable_refs,
-        ahead,
-        behind,
-        upstream,
-        push: here.and_then(|()| crate::commit::push_plan(&repo)),
     })
-}
-
-/// The name of the only remote, when there is exactly one.
-pub(crate) fn only_remote(repo: &Repository) -> Option<String> {
-    let remotes = repo.remotes().ok()?;
-    if remotes.len() != 1 {
-        return None;
-    }
-    remotes.iter().next()?.ok().flatten().map(str::to_string)
-}
-
-/// How far the checked-out branch is from its upstream.
-fn divergence(repo: &Repository) -> (usize, usize, Option<String>) {
-    let Ok(head) = repo.head() else { return (0, 0, None) };
-    if repo.head_detached().unwrap_or(false) {
-        return (0, 0, None);
-    }
-    let Ok(name) = head.shorthand() else { return (0, 0, None) };
-    let Ok(branch) = repo.find_branch(name, git2::BranchType::Local) else {
-        return (0, 0, None);
-    };
-    let Ok(upstream) = branch.upstream() else { return (0, 0, None) };
-    let label = upstream.name().ok().flatten().map(str::to_string);
-    let (Some(local), Some(remote)) = (branch.get().target(), upstream.get().target()) else {
-        return (0, 0, label);
-    };
-    match repo.graph_ahead_behind(local, remote) {
-        Ok((ahead, behind)) => (ahead, behind, label),
-        Err(_) => (0, 0, label),
-    }
 }
 
 /// What one look at a repository says: how much is uncommitted, and where
@@ -381,10 +333,9 @@ fn head_of(repo: &Repository) -> (Option<String>, Option<String>) {
 /// `here` is whether the repository is this directory's. One that is not has
 /// no working tree that is ours to read, and that is not a failure to read it.
 ///
-/// A status that failed used to be a count of zero, the same as a clean tree.
-/// The refresher takes the same failure the other way, as a reason not to
-/// fast-forward; so a repository could be skipped on every pass for changes
-/// that the page for it said were not there.
+/// A status that failed used to be a count of zero, the same as a clean tree:
+/// a repository whose changes could not be read had a page that said there
+/// were none.
 fn working_tree(repo: &Repository, here: bool) -> (usize, Option<String>) {
     if !here {
         return (0, None);

@@ -39,8 +39,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("l", "Open a terminal there — lazygit"),
             ("e", "Open it in your editor"),
             ("o", "Open its page on the web — GitHub, or wherever the remote is"),
-            ("p", "Fetch and fast-forward it"),
-            ("f", "Fetch only, leaving your files alone"),
+            ("f", "Fetch it — your branches and files stay as they are"),
         ],
     ),
     (
@@ -57,10 +56,6 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Changed files",
         &[
             ("↑ ↓", "Move; the diff follows"),
-            ("Space", "Stage or unstage this file"),
-            ("c", "Write a commit message"),
-            ("Enter in the message", "Commit what is staged"),
-            ("Esc in the message", "Step out of it; the message stays"),
         ],
     ),
     (
@@ -69,10 +64,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+G", "Contributions"),
             ("Ctrl+Shift+F", "Search commits"),
             ("Ctrl+R  or  F5", "Rescan what is on disk"),
-            (
-                "Ctrl+Shift+R",
-                "Run the refresh now: fetch, and fast-forward if that is switched on",
-            ),
+            ("Ctrl+Shift+R", "Fetch every repository in scope, now"),
         ],
     ),
 ];
