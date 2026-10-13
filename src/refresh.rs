@@ -759,9 +759,15 @@ mod tests {
     /// before the fetch returns instead of in the background. git guesses the
     /// number of loose objects from one directory of the 256, so that is the
     /// one to fill.
+    ///
+    /// The `gc` task is asked for by name. It was what the housekeeping came
+    /// to by default up to git 2.55; 2.56 goes about it another way unless
+    /// told, one that two loose objects do not set off, and a fetch there
+    /// read no index and ran nothing, which left this with nothing to test.
     fn due_for_housekeeping(repo: &Path) {
         git(repo, &["config", "gc.auto", "1"]);
         git(repo, &["config", "gc.autoDetach", "false"]);
+        git(repo, &["config", "maintenance.gc.enabled", "true"]);
         let counted = repo.join(".git/objects/17");
         let store = Repository::open(repo).unwrap();
         for i in 0..20_000 {
