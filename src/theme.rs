@@ -838,13 +838,14 @@ flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected {{
 
 /* A card has two layers in the one place and shows one of them. At rest it
    is the short one, `om-less`. The long one, `om-more`, is shown where the
-   card is being acted on: with `om-keys` on the card the keyboard is on, and
-   with `om-enter` on the filter's top hit while the filter is typed in. They
-   change places by opacity, which leaves the layout alone, so nothing in the
-   grid moves when the keyboard does.
+   card is being acted on: with `om-keys` on the card the keyboard is on,
+   with `om-enter` on the filter's top hit while the filter is typed in, and
+   by itself on the card under the pointer. They change places by opacity,
+   which leaves the layout alone, so nothing in the grid moves when the
+   keyboard or the pointer does.
 
    In this order. The keyboard is in the filter or on a card and never both,
-   and should the two rules meet all the same, they agree on the layer. */
+   and should the rules meet all the same, they agree on the layer. */
 .om-card .om-more,
 .om-card .om-keys,
 .om-card .om-enter {{
@@ -870,6 +871,19 @@ flowbox.om-flow.om-typing .om-card.om-top-hit .om-enter {{
 }}
 
 flowbox.om-flow.om-typing .om-card.om-top-hit .om-less {{
+  opacity: 0;
+}}
+
+/* Under the pointer, once it is the pointer that is choosing a card: it has
+   been moved, or the wheel turned, since the keyboard was last used, which is
+   what `om-pointer` says. A pointer left where it was lies over some card
+   every time the window opens, and that card stays as it is. No keys here:
+   they go to the card the keyboard is on, wherever the pointer is. */
+flowbox.om-flow.om-pointer .om-card:hover .om-more {{
+  opacity: 1;
+}}
+
+flowbox.om-flow.om-pointer .om-card:hover .om-less {{
   opacity: 0;
 }}
 
@@ -1961,6 +1975,28 @@ brown = "#743d1e"
                 if property == "opacity" && selector.ends_with(layer) {
                     let agrees = value == sheet.value(&lit, "opacity");
                     assert!(agrees || rank(selector) < rank(&lit), "`{selector}` undoes the focus");
+                }
+            }
+        }
+
+        // The card under a pointer that is choosing shows the long layer as
+        // well, and none of the keys: those go to the card the keyboard is on.
+        let pointed = "flowbox.om-flow.om-pointer .om-card:hover";
+        let under_the_pointer = [".om-less", ".om-more"];
+        assert_eq!(under_the_pointer.map(|layer| shown(pointed, layer)), [0.0, 1.0]);
+        assert!(more(top_hit) < more(pointed));
+        // And only such a pointer. One that was left over a card when the
+        // window opened is over a card all the same, and `:hover` is all a
+        // stylesheet knows of either: no rule may swap the layers for that.
+        for (selector, property, _) in &sheet.rules {
+            let layer = [".om-less", ".om-more", ".om-keys", ".om-enter"]
+                .into_iter()
+                .find(|layer| selector.ends_with(layer));
+            if property == "opacity" && selector.contains(":hover") {
+                if let Some(layer) = layer {
+                    let asked = selector.contains(".om-pointer");
+                    assert!(asked, "`{selector}` changes a card that is only lying under the pointer");
+                    assert!(under_the_pointer.contains(&layer), "`{selector}` shows keys under the pointer");
                 }
             }
         }

@@ -56,6 +56,13 @@ of the four weeks, or, when it is flagged, the reason in git's own words; and
 the keys that act on it. The card `Enter` would open from the filter
 shows the same, and says `Enter`. Nothing changes size as the keyboard moves.
 
+**The card under the pointer** shows the same two commits, or the reason, once
+you have moved the pointer or turned the wheel. A pointer that was left over
+the window when it opened changes nothing, and neither does one lying where
+it was while you type or use the arrow keys: the card under it shows its four
+weeks until the pointer is touched again. It shows no keys. Those act on the
+card the keyboard is on, wherever the pointer is.
+
 "Ahead" is measured against the branch's upstream, and says nothing when there
 is none. So a card also says when HEAD has commits that exist on no remote at
 all — `3 unpublished` for a branch that was never pushed or whose upstream is

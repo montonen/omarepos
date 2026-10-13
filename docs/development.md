@@ -53,9 +53,10 @@ of yours: everything goes over D-Bus to actions that only a debug build has,
 and only when it is started with `OMAREPOS_DUMP=<file>` (`src/ui/debug.rs`).
 `scripts/walk/drive.py` is the same thing by hand: `dump` what is on screen
 as text, `press` a button by what it says, hand the app a `key`, set a
-settings `row`, `pick` a list row, `paint`, and `shot` for a picture of the
-window as a PNG, which is the one way to see what a change looks like without
-putting the window on screen. A release build has none of it.
+settings `row`, `pick` a list row, `point` a pointer it does not have at a
+card, `paint`, and `shot` for a picture of the window as a PNG, which is the
+one way to see what a change looks like without putting the window on screen.
+A release build has none of it.
 
 One thing a walk cannot see is what waits for a frame, because a window on a
 hidden workspace is sent none: a change of width across a breakpoint starts

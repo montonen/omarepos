@@ -56,7 +56,8 @@ Apart from the dot on a tag, colour is kept for what needs you. The left edge
 is yellow for uncommitted work, the accent colour for commits that exist
 nowhere else, and red for trouble. The card `Enter` would open from the
 filter, the first one here, shows the two commits before the last in place of
-the four weeks. [Reading a card](docs/cards.md) has the rest.
+the four weeks, as does the card the keyboard or the pointer is on.
+[Reading a card](docs/cards.md) has the rest.
 
 ### Type, then Enter
 

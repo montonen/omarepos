@@ -21,6 +21,8 @@ compositor, so the desktop it runs on is not disturbed.
     drive.py resize WxH         offscreen only: a tiling compositor decides for itself
     drive.py shot FILE.png [2]  a picture of the window as it is laid out; 2 for twice the size
     drive.py split N            the divider of a split page, N pixels from its top
+    drive.py point N            the pointer over card N of the grid; "off" takes it away
+    drive.py wheel              the wheel, turned over the grid
     drive.py act NAME [ARG]     any window action
 
 A hidden workspace sends a window no frames, so nothing there is laid out or
@@ -270,10 +272,10 @@ def main(argv):
     elif cmd == 'shot':
         scale = rest[1] + ':' if len(rest) > 1 else ''
         act('shot', scale + os.path.abspath(first))
-    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize', 'split'):
+    elif cmd in ('type', 'row', 'pick', 'choose', 'respond', 'press', 'resize', 'split', 'point'):
         act(cmd, first)
-    elif cmd == 'paint':
-        act('paint')
+    elif cmd in ('paint', 'wheel'):
+        act(cmd)
     else:
         raise SystemExit(__doc__)
 

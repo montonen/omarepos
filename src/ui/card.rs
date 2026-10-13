@@ -219,8 +219,9 @@ pub fn build(
     });
 
     // Both are there all the time, one over the other, and the stylesheet
-    // shows the one or the other with the keyboard's focus. Nothing is built
-    // or measured as the focus moves, so nothing on the grid moves either.
+    // shows the one or the other: the second on the card the keyboard is on,
+    // and on the one under a pointer that has been moved. Nothing is built
+    // or measured as either moves, so nothing on the grid moves with them.
     let zone = gtk::Overlay::new();
     zone.set_child(Some(&lately));
     zone.add_overlay(&before);
@@ -239,7 +240,7 @@ pub fn build(
         new.set_valign(gtk::Align::Center);
         new.set_tooltip_text(Some(
             "Found since you last looked. The refresh across the fleet leaves it alone until \
-             you have opened it, or pressed p or f on it: running git in a repository means \
+             you have opened it, or pressed f on it: running git in a repository means \
              doing what its own config says, and nobody has looked at this one yet.",
         ));
         foot.append(&new);

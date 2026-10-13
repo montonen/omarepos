@@ -116,6 +116,14 @@ struct Ui {
     /// under a stationary pointer, which GTK reports as motion; ignoring
     /// motion briefly after a keypress keeps that from undoing the mode.
     last_key: Cell<Option<std::time::Instant>>,
+    /// True while it is the pointer that is choosing a card: it has been
+    /// moved, or the wheel turned, since a key last went to the grid or the
+    /// filter was typed in. The card under it then shows what the card with
+    /// the keyboard shows. Lying over a card is not enough: a pointer left
+    /// where it was is over one every time the window opens.
+    pointer_nav: Cell<bool>,
+    /// Where in the window the pointer was when it was last seen to move.
+    pointer_at: Cell<Option<(f64, f64)>>,
     scroller: gtk::ScrolledWindow,
     /// Lower-cased tags the grid is narrowed to; empty means no tag filter.
     tag_filter: RefCell<BTreeSet<String>>,
@@ -399,6 +407,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         tag_syncing: Cell::new(false),
         keyboard_nav: Cell::new(false),
         last_key: Cell::new(None),
+        pointer_nav: Cell::new(false),
+        pointer_at: Cell::new(None),
         scroller: scroller.clone(),
         tag_filter: RefCell::new(BTreeSet::new()),
         untagged_only: Cell::new(false),
@@ -466,7 +476,12 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     {
         let ui = Rc::clone(&ui);
-        search.connect_search_changed(move |_| ui.rebuild());
+        search.connect_search_changed(move |_| {
+            // The cards are about to change places under a pointer that is
+            // wherever it was left when the typing began.
+            ui.pointer_rests();
+            ui.rebuild();
+        });
     }
     {
         // Space ticks the focused card, so the grid can be worked through
@@ -555,8 +570,27 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         // Moving the pointer hands control back to it.
         let motion = gtk::EventControllerMotion::new();
         let nav = Rc::clone(&ui);
-        motion.connect_motion(move |_, _, _| nav.leave_keyboard_nav());
+        motion.connect_motion(move |_, x, y| {
+            nav.leave_keyboard_nav();
+            // Where in the window, and not where on the grid: that changes
+            // when the grid scrolls under a pointer nobody has touched.
+            let on_the_grid = gtk::graphene::Point::new(x as f32, y as f32);
+            let in_the_window = nav.flow.compute_point(&nav.window, &on_the_grid);
+            nav.pointer_seen(in_the_window.map(|at| (f64::from(at.x()), f64::from(at.y()))));
+        });
         ui.flow.add_controller(motion);
+    }
+    {
+        // And so does turning the wheel, which moves the cards under it.
+        // Seen here and passed on: the scrolling is not this one's to do.
+        let wheel =
+            gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        let nav = Rc::clone(&ui);
+        wheel.connect_scroll(move |_, _, _| {
+            nav.pointer_chooses();
+            glib::Propagation::Proceed
+        });
+        ui.flow.add_controller(wheel);
     }
     {
         let ui = Rc::clone(&ui);
@@ -2220,6 +2254,52 @@ impl Ui {
         if !self.keyboard_nav.replace(true) {
             self.flow.add_css_class("om-keyboard");
         }
+        self.pointer_rests();
+    }
+
+    /// The pointer is over the grid, at `at` in the window. That is not yet
+    /// the pointer moving: GTK says so again, from the same place, each time
+    /// the cards move under it, and a scroll, a rescan and a change of width
+    /// all move them. The first sighting is no movement either. A window
+    /// opens under a pointer more often than not.
+    fn pointer_seen(&self, at: Option<(f64, f64)>) {
+        let Some(at) = at else { return };
+        let was = self.pointer_at.get();
+        if was.is_some_and(|was| !pointer_moved(was, at)) {
+            return;
+        }
+        self.pointer_at.set(Some(at));
+        // Not in the moment after a key, as with leaving the keyboard's turn
+        // below: a hand on the arrow keys is not a hand on the mouse.
+        if was.is_some() && !self.key_just_pressed() {
+            self.pointer_chooses();
+        }
+    }
+
+    /// Whether a key went to the grid within the last moment.
+    fn key_just_pressed(&self) -> bool {
+        self.last_key
+            .get()
+            .is_some_and(|when| when.elapsed() < std::time::Duration::from_millis(300))
+    }
+
+    /// The pointer has been moved, or the wheel turned: it is what chooses a
+    /// card now, and the card under it shows what the one with the keyboard
+    /// shows. The stylesheet does it, told by the class.
+    fn pointer_chooses(&self) {
+        if self.keyboard_nav.replace(false) {
+            self.flow.remove_css_class("om-keyboard");
+        }
+        if !self.pointer_nav.replace(true) {
+            self.flow.add_css_class("om-pointer");
+        }
+    }
+
+    /// The keyboard is in use, and the pointer is wherever it was left.
+    fn pointer_rests(&self) {
+        if self.pointer_nav.replace(false) {
+            self.flow.remove_css_class("om-pointer");
+        }
     }
 
     fn leave_keyboard_nav(&self) {
@@ -2228,10 +2308,8 @@ impl Ui {
         }
         // Motion arriving right after a keypress is the grid scrolling beneath
         // a pointer that has not actually moved.
-        if let Some(when) = self.last_key.get() {
-            if when.elapsed() < std::time::Duration::from_millis(300) {
-                return;
-            }
+        if self.key_just_pressed() {
+            return;
         }
         self.keyboard_nav.set(false);
         self.flow.remove_css_class("om-keyboard");
@@ -2322,6 +2400,10 @@ impl Ui {
         if !self.on_grid() {
             return;
         }
+        // Wherever the pointer was put while another page was in front, it
+        // has not been moved here.
+        self.pointer_at.set(None);
+        self.pointer_rests();
         let focus = gtk::prelude::GtkWindowExt::focus(&self.window);
         let in_grid = focus.as_ref().is_some_and(|focus| focus.is_ancestor(&self.flow));
         let typing = focus.is_some_and(|focus| focus.is::<gtk::Editable>());
@@ -2534,6 +2616,10 @@ impl Ui {
             }
         }
         if let Some(child) = self.flow.child_at_index(0) {
+            // Asked for with a key, which makes it the keyboard's turn.
+            if force {
+                self.pointer_rests();
+            }
             // As in `rebuild`: through the box, so its cursor comes too. GTK
             // leaves the cursor alone for a card that already holds the focus,
             // so the focus is let go of first.
@@ -3053,6 +3139,15 @@ fn noun(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
+/// Whether a pointer last seen at `was` and now at `at`, both in the window,
+/// has been moved. By a few pixels: where it is comes through a float each
+/// way, so the same place does not always come back as the same number, and
+/// a mouse on a desk that is being typed at is not being moved either.
+fn pointer_moved(was: (f64, f64), at: (f64, f64)) -> bool {
+    const SLACK: f64 = 3.0;
+    (was.0 - at.0).abs() >= SLACK || (was.1 - at.1).abs() >= SLACK
+}
+
 /// A parsed filter: free text, plus the `tag:` and `lang:` terms pulled out of
 /// it. Each kind of term is matched against its own field, so a word can only
 /// match where the user aimed it.
@@ -3160,6 +3255,22 @@ fn now_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GTK reports a pointer again whenever the cards move under it, from the
+    /// place it was already in. Only a report from somewhere else is the
+    /// pointer having been moved.
+    #[test]
+    fn a_pointer_seen_again_in_the_same_place_has_not_moved() {
+        let at = (412.0, 388.5);
+        assert!(!pointer_moved(at, at));
+        // What a place loses and gains on its way through a float.
+        assert!(!pointer_moved(at, (412.0004, 388.4997)));
+        // A mouse that shivers where it lies.
+        assert!(!pointer_moved(at, (413.0, 387.5)));
+        assert!(pointer_moved(at, (416.0, 388.5)));
+        assert!(pointer_moved(at, (412.0, 380.0)));
+        assert!(pointer_moved(at, (30.0, 900.0)));
+    }
 
     #[test]
     fn two_words_both_have_to_be_there_in_either_order() {

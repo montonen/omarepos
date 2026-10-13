@@ -79,6 +79,25 @@ keyboard GtkText "a second launch did not put the keyboard in the filter"
 step "type over what was there" "X type alpha; sleep 0.4"
 X dump | grep -q 'SearchEntry "alpha"' || { WRONG=$((WRONG+1)); echo "WRONG: a second launch did not select what was in the filter"; }
 step "clear it" "X keys Escape"
+# ---- the pointer: lying over a card is not choosing one, being moved is, and
+# the keyboard takes the choosing back. `point` is a pointer nobody has; see
+# src/ui/debug.rs.
+choosing() { X dump "choosing:" | grep -qx "choosing: $1" || { WRONG=$((WRONG+1)); echo "WRONG: $2 ($(X dump choosing:))"; }; }
+choosing nothing "something is choosing a card before a key or the pointer has"
+step "the pointer, lying over a card" "X point 1"
+choosing nothing "a pointer that has not moved is choosing a card"
+step "the pointer, moved to another card" "X point 2"
+choosing pointer "a pointer that was moved is not choosing a card"
+X dump "[pointer" | grep -q "om-card" || { WRONG=$((WRONG+1)); echo "WRONG: no card is under the pointer"; }
+step "the pointer, seen again where it is" "X point 2"
+choosing pointer "a pointer seen twice in one place stopped choosing"
+step "a key on the grid" "X keys ctrl+l space space"
+choosing keyboard "a key on the grid did not take the choosing from the pointer"
+step "the wheel, turned" "X wheel"
+choosing pointer "turning the wheel did not hand the choosing to the pointer"
+step "the filter, typed in" "X keys ctrl+f; X type a; sleep 0.5"
+choosing nothing "typing in the filter left the pointer choosing"
+step "the pointer, moved again and taken away" "X point 0; X point off; X keys Escape"
 # ---- the grid
 for n in 0 1 2 3 4; do step "sort order $n" "X choose $n"; done
 step "attention toggle on" 'X press "Show only repos needing attention"'

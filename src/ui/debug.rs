@@ -361,6 +361,78 @@ pub fn install(window: &adw::ApplicationWindow) {
     });
     window.add_action(&split);
 
+    // The pointer, put over a card: `point` with the card's number on the
+    // grid, counted from nought, or "off" to take it away. No pointer reaches
+    // a window nobody is looking at, so this says what one would: the card is
+    // marked as being under it, and the grid's own handler is told where it
+    // is. Once is a pointer that is there. Again, on another card, is a
+    // pointer that has been moved. `wheel` is the wheel turned where it is.
+    let point = gio::SimpleAction::new("point", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    point.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let Some(flow) = first_flow(window.upcast_ref()) else {
+            note!("omarepos: there is no grid to point at");
+            return;
+        };
+        let over = gtk::StateFlags::PRELIGHT;
+        let mut index = 0;
+        while let Some(child) = flow.child_at_index(index) {
+            child.unset_state_flags(over);
+            if let Some(card) = child.child() {
+                card.unset_state_flags(over);
+            }
+            index += 1;
+        }
+        if wanted == "off" {
+            return;
+        }
+        let Some(child) = wanted.parse::<i32>().ok().and_then(|n| flow.child_at_index(n)) else {
+            note!("omarepos: no card {wanted} on a grid of {index}");
+            return;
+        };
+        child.set_state_flags(over, false);
+        if let Some(card) = child.child() {
+            card.set_state_flags(over, false);
+        }
+        // The middle of the card, in the grid's own coordinates. A window
+        // that is sent no frames lays a card out once at most, and one that
+        // has never been laid out is nowhere: such cards are told apart by
+        // their numbers, which is all the handler needs of a place.
+        let (x, y) = match child.compute_bounds(&flow) {
+            Some(bounds) if bounds.width() > 0.0 => (
+                f64::from(bounds.x() + bounds.width() / 2.0),
+                f64::from(bounds.y() + bounds.height() / 2.0),
+            ),
+            _ => (f64::from(child.index()) * 40.0 + 20.0, 20.0),
+        };
+        let controllers = flow.observe_controllers();
+        for index in 0..controllers.n_items() {
+            if let Some(motion) = controllers.item(index).and_downcast::<gtk::EventControllerMotion>() {
+                motion.emit_by_name::<()>("motion", &[&x, &y]);
+            }
+        }
+    });
+    window.add_action(&point);
+
+    let wheel = gio::SimpleAction::new("wheel", None);
+    let window_weak = window.downgrade();
+    wheel.connect_activate(move |_, _| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(flow) = first_flow(window.upcast_ref()) else {
+            note!("omarepos: there is no grid to turn the wheel over");
+            return;
+        };
+        let controllers = flow.observe_controllers();
+        for index in 0..controllers.n_items() {
+            if let Some(wheel) = controllers.item(index).and_downcast::<gtk::EventControllerScroll>() {
+                wheel.emit_by_name::<bool>("scroll", &[&0f64, &1f64]);
+            }
+        }
+    });
+    window.add_action(&wheel);
+
     // Text, into the field the keyboard is in.
     let type_ = gio::SimpleAction::new("type", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
@@ -427,6 +499,17 @@ fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everythin
         None => out.push_str("keyboard: nowhere\n"),
     }
     out.push_str(&format!("dialog: {}\n", window.visible_dialog().is_some()));
+    // What is choosing a card on the grid, as the stylesheet is told it: the
+    // keyboard, a pointer that has been moved, or nothing yet.
+    if let Some(flow) = first_flow(window.upcast_ref()) {
+        let choosing = match (flow.has_css_class("om-keyboard"), flow.has_css_class("om-pointer")) {
+            (true, true) => "keyboard and pointer",
+            (true, false) => "keyboard",
+            (false, true) => "pointer",
+            (false, false) => "nothing",
+        };
+        out.push_str(&format!("choosing: {choosing}\n"));
+    }
     // How many frames the display has asked this window for. A number that
     // stands still is a window nobody is looking at, where nothing that
     // waits for a frame (a change of breakpoint, an animation) ever ends.
@@ -551,6 +634,22 @@ fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
     None
 }
 
+/// The grid of cards, whether or not it is the page in front. By its class:
+/// the tag editor lays its tags out in a flow box as well.
+fn first_flow(widget: &gtk::Widget) -> Option<gtk::FlowBox> {
+    if let Some(flow) = widget.downcast_ref::<gtk::FlowBox>().filter(|flow| flow.has_css_class("om-flow")) {
+        return Some(flow.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = first_flow(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
 fn first_split(widget: &gtk::Widget) -> Option<gtk::Paned> {
     if !widget.is_mapped() {
         return None;
@@ -646,6 +745,10 @@ fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
         if check.is_active() {
             flags.push("active".to_string());
         }
+    }
+    // The card the pointer is over, which says nothing of its own.
+    if widget.has_css_class("om-card") && widget.state_flags().contains(gtk::StateFlags::PRELIGHT) {
+        flags.push("pointer".to_string());
     }
     let classes: Vec<String> = widget
         .css_classes()
