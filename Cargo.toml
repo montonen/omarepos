@@ -5,6 +5,11 @@ edition = "2024"
 rust-version = "1.92"
 description = "Omarchy-styled overview of every git repo on your machine"
 license = "MIT"
+repository = "https://github.com/montonen/omarepos"
+readme = "README.md"
+# Installed from a clone, with `cargo install --path .`. Not a crates.io
+# package, and this keeps a stray `cargo publish` from making it one.
+publish = false
 default-run = "omarepos"
 
 [dependencies]
