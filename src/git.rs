@@ -673,6 +673,11 @@ fn child_dirs(dir: &Path) -> Vec<PathBuf> {
         }
         children.push(entry.path());
     }
+    // By name. A directory is listed in whatever order its filesystem keeps
+    // it in, and what a root is said to have left out names the first few in
+    // the order they were come across: "(y, x)" on one disk and "(x, y)" on
+    // the next.
+    children.sort();
     children
 }
 
