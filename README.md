@@ -37,7 +37,7 @@ scratch home directory of their own. [How the pictures are taken](docs/developme
 
 ### A card says one thing in each place
 
-![Three cards: one with commits that are only here, one held back by uncommitted work, one quiet](docs/img/cards.png)
+![Three cards: one with a commit that is only here, one with uncommitted work and commits waiting on the remote, one quiet](docs/img/cards.png)
 
 Every fact has a place of its own, the same on every card, so where a thing is
 says what it is.

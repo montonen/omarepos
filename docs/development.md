@@ -120,7 +120,7 @@ OMAREPOS_SHOTS_DIR=/some/scratch/dir scripts/shots/shoot.sh
 repositories that had the most stars on GitHub under a search for "omarchy"
 when the pictures were last taken. Those are cloned without signing in, and
 git is given a configuration that reaches no credential helper. So that there
-is something to show, three of the copies are then wound back a day or two,
+is something to show, three of the copies are then wound back a few commits,
 with what has happened since still to pull; three are given uncommitted edits;
 one is put on a branch of its own and one on a release. That is done to the
 copies, never to anything else, and only under a directory the script made

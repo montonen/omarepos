@@ -102,14 +102,16 @@ for repo in $FLEET; do
 done
 
 # A fleet where everything is level and clean has nothing to show. So, on
-# these copies only: three as they were a day or two ago, with what has
-# happened since still to pull (omarepos fetches and never pulls, so behind is
-# where a copy stays until somebody does); uncommitted work in three, one of
-# them behind as well; one on a branch of its own and one on a release.
-as_it_was() { git -C "$CODE/$1" reset -q --hard "$(git -C "$CODE/$1" rev-list -1 --before="$2" "origin/$(main "$1")")"; }
-as_it_was omarchy "1 day ago"
-as_it_was try-omarchy "2 days ago"
-as_it_was omacosy "2 days ago"
+# these copies only: three a few commits back, with what has happened since
+# still to pull (omarepos fetches and never pulls, so behind is where a copy
+# stays until somebody does); uncommitted work in three, one of them behind as
+# well; one on a branch of its own and one on a release. Commits and not days:
+# a project that has had a quiet week is level again however far back in time
+# it is wound.
+back() { git -C "$CODE/$1" reset -q --hard "origin/$(main "$1")~$2"; }
+back omarchy 6
+back try-omarchy 3
+back omacosy 2
 echo >> "$CODE/omacosy/README.md"
 echo >> "$CODE/aether/README.md"; echo >> "$CODE/aether/go.mod"; echo "ideas" > "$CODE/aether/NOTES.md"
 # The one whose changes a picture opens: an install prefix and a line width,
