@@ -50,6 +50,8 @@ pub struct Host {
     pub on_web: Rc<dyn Fn()>,
     /// Opens the contributions page scoped to this repository.
     pub on_contributions: Rc<dyn Fn(PathBuf)>,
+    /// Opens the commit search on this repository alone.
+    pub on_search: Rc<dyn Fn()>,
     /// Fetch this repository. The window runs it and says what happened: it
     /// has the settings, knows whether something else is already running, and
     /// keeps the record of what a fetch could not do. The page had a copy of
@@ -85,6 +87,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         web,
         on_web,
         on_contributions,
+        on_search,
         on_fetch,
         toasts,
     } = host;
@@ -693,6 +696,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         // while the page is in front, and `page.reload-for` with a path, which
         // the window sends to every open page when its own refresh has moved a
         // repository. Both go through the slot, so neither keeps the page.
+        // And `page.search-commits`, the commit search key, which searches
+        // this repository.
         let group = gtk::gio::SimpleActionGroup::new();
         let reload = gtk::gio::SimpleAction::new("reload", None);
         {
@@ -719,6 +724,9 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             });
         }
         group.add_action(&reload_for);
+        let search = gtk::gio::SimpleAction::new("search-commits", None);
+        search.connect_activate(move |_, _| on_search());
+        group.add_action(&search);
         page.insert_action_group("page", Some(&group));
     }
 

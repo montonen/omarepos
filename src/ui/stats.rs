@@ -24,17 +24,22 @@ const BAR_H: i32 = 46;
 const GAP: i32 = 220;
 const SPARK_W: f64 = 11.0;
 
-/// `scope` is shown as the page subtitle, e.g. "4 selected repos".
 /// What opens a commit from the page: its repository, what to call it, and
 /// the commit.
 pub type OnOpen = Rc<dyn Fn(PathBuf, String, Option<String>)>;
 
-pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::NavigationPage {
+/// What searches the commits of some repositories, with what to call them.
+pub type OnSearch = Rc<dyn Fn(Vec<PathBuf>, String)>;
+
+/// `scope` is shown as the page subtitle, e.g. "4 selected repos".
+pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen, on_search: OnSearch) -> adw::NavigationPage {
     // The subtitle also says which commits are counted. The totals mean one
     // thing for the branch that is checked out and another for every branch
     // there is, and the page gave no way to tell which it was showing. It is
     // written by `load`, which knows which was asked for.
     let title = adw::WindowTitle::new("Contributions", &scope);
+    // For the commit search, which is of the same repositories.
+    let search_scope = scope.clone();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
@@ -210,10 +215,18 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     }
     load();
 
-    // A row's button for setting its author aside, or bringing them back,
-    // names them by the key the figures are kept under. The page is put
-    // together again from what was read; nothing is read again.
+    // How the window and the rows reach the page. A row's button for setting
+    // its author aside, or bringing them back, names them by the key the
+    // figures are kept under; the page is put together again from what was
+    // read, and nothing is read again. The commit search key searches the
+    // repositories this page is of.
     let actions = gio::SimpleActionGroup::new();
+    let search = gio::SimpleAction::new("search-commits", None);
+    {
+        let repos = Rc::clone(&repos);
+        search.connect_activate(move |_, _| on_search((*repos).clone(), search_scope.clone()));
+    }
+    actions.add_action(&search);
     let set_aside = gio::SimpleAction::new("set-aside", Some(glib::VariantTy::STRING));
     {
         let (content, status) = (content.clone(), status.clone());
@@ -234,7 +247,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
         });
     }
     actions.add_action(&set_aside);
-    page.insert_action_group("contributions", Some(&actions));
+    page.insert_action_group("page", Some(&actions));
 
     // The code is watched for on the way down to whatever has the keyboard,
     // and every key goes on to it: the page works as it would without.
@@ -737,7 +750,7 @@ fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen, set_asi
     aside.add_css_class("om-stat-aside");
     aside.set_valign(gtk::Align::Center);
     aside.set_tooltip_text(Some(says));
-    aside.set_action_name(Some("contributions.set-aside"));
+    aside.set_action_name(Some("page.set-aside"));
     aside.set_action_target_value(Some(&key(author).to_variant()));
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);

@@ -150,6 +150,10 @@ for repo in $REPOS; do
   step "$repo: p, which is no key on a graph page" "X pick 0:1; X keys p"
   step "$repo: o" "X pick 0:1; X keys o"
   step "$repo: shortcuts" "X keys shift+question; sleep 0.3; X keys Escape"
+  # The commit search key searches the repository whose graph is open.
+  step "$repo: search its commits" "X keys ctrl+shift+f; sleep 0.8"
+  X dump "Search commits" | grep -q "Search commits" || { WRONG=$((WRONG+1)); echo "WRONG: $repo: the commit search key did nothing in a commit graph"; }
+  step "$repo: back from the search" "X keys Escape; sleep 0.4"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
   step "$repo: 14 days" "X choose 'Time window=1'; sleep 1"
   step "$repo: 30 days" "X choose 'Time window=2'; sleep 1"
@@ -225,6 +229,10 @@ X dump "om-statusbar" | grep -q "1 set aside" || { WRONG=$((WRONG+1)); echo "WRO
 X dump "Set aside, and not in the figures" | grep -q "Set aside, and" || { WRONG=$((WRONG+1)); echo "WRONG: nobody is listed under the gap"; }
 step "bring them back" 'X press "Bring back"; sleep 0.6'
 X dump "om-statusbar" | grep -q "set aside" && { WRONG=$((WRONG+1)); echo "WRONG: an author is still set aside"; }
+# The commit search key on Contributions searches the same repositories.
+step "search the commits from contributions" "X keys ctrl+shift+f; sleep 0.8"
+X dump "Search commits" | grep -q "Search commits" || { WRONG=$((WRONG+1)); echo "WRONG: the commit search key did nothing on Contributions"; }
+step "back to contributions" "X keys Escape; sleep 0.4"
 step "back" "X keys Escape"
 
 # ---- tags: the menu, the editor, the chips

@@ -63,7 +63,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Across repositories",
         &[
             ("Ctrl+G", "Contributions"),
-            ("Ctrl+Shift+F", "Search commits"),
+            ("Ctrl+Shift+F", "Search commits; on Contributions its repositories, in a commit graph that one"),
             ("Ctrl+R  or  F5", "Rescan what is on disk"),
             ("Ctrl+Shift+R", "Fetch every repository in scope, now"),
         ],

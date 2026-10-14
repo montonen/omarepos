@@ -22,7 +22,7 @@ moves from the filter into the cards.
 | `Ctrl+Shift+R` | Run the refresh now: fetch every repository in scope |
 | `Ctrl+L` | Jump to the grid |
 | `Ctrl+F`, or `/` with the keyboard on a card | Focus the filter box |
-| `Ctrl+Shift+F` | Search commits across these repos |
+| `Ctrl+Shift+F` | Search commits across these repos; on Contributions its repos, in a commit graph that one |
 | `Enter` in the filter | Open the commit graph of the top hit |
 | `Down` in the filter | Move into the cards |
 | `Ctrl+A` | Select every repo shown; again to deselect |

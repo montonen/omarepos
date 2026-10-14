@@ -2,7 +2,9 @@
 
 `Ctrl+Shift+F`, or the magnifier in the header. One query across every
 repository in scope — the ticked ones, or everything the grid is showing, the
-same rule contributions uses.
+same rule contributions uses. The key works on two other pages as well: on
+Contributions it searches the repositories that page is of, and in a commit
+graph the one repository.
 
 It matches, in that order of preference: the commit subject, the rest of the
 message, the author's name or e-mail, and a sha prefix. Each result says which

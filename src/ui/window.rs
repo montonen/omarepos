@@ -726,8 +726,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     {
         let ui = Rc::clone(&ui);
         act_search_commits.connect_activate(move |_, _| {
+            // The grid searches what it shows or what is ticked. A page that
+            // is of some repositories searches those: Contributions its own,
+            // a commit graph its one. Any other page leaves the key alone.
             if ui.on_grid() {
                 ui.open_commit_search();
+            } else if let Some(page) = ui.nav.visible_page() {
+                let _ = page.activate_action("page.search-commits", None);
             }
         });
     }
@@ -810,9 +815,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             act_clear.clone(),
             act_focus_grid.clone(),
             act_contrib.clone(),
-            act_search_commits.clone(),
         ];
         let anywhere = [
+            act_search_commits.clone(),
             act_refresh.clone(),
             act_fetch.clone(),
             act_settings.clone(),
@@ -2827,6 +2832,16 @@ impl Ui {
     /// Search commits across the ticked repositories, or everything shown.
     fn open_commit_search(self: &Rc<Self>) {
         let (repos, scope) = self.contribution_scope();
+        self.search_commits(repos, scope);
+    }
+
+    /// How a page that is of some repositories searches their commits.
+    fn commit_searcher(self: &Rc<Self>) -> ui::stats::OnSearch {
+        let ui = Rc::clone(self);
+        Rc::new(move |repos, scope| ui.search_commits(repos, scope))
+    }
+
+    fn search_commits(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
             self.toasts
                 .add_toast(ui::toast("No repositories to search"));
@@ -2858,9 +2873,19 @@ impl Ui {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            ui.nav
-                .push(&ui::stats::page(vec![path], name, ui.commit_opener()));
+            ui.nav.push(&ui::stats::page(vec![path], name, ui.commit_opener(), ui.commit_searcher()));
         });
+        let on_search: Rc<dyn Fn()> = {
+            let ui = Rc::clone(self);
+            let path = path.to_path_buf();
+            Rc::new(move || {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string());
+                ui.search_commits(vec![path.clone()], name);
+            })
+        };
         let on_fetch: Rc<dyn Fn(Rc<dyn Fn(bool)>)> = {
             let ui = Rc::clone(self);
             let path = path.to_path_buf();
@@ -2878,6 +2903,7 @@ impl Ui {
                 Rc::new(move || ui.open_web(&path))
             },
             on_contributions,
+            on_search,
             on_fetch,
             toasts: self.toasts.clone(),
         }
@@ -3123,7 +3149,7 @@ impl Ui {
             return;
         }
         self.nav
-            .push(&ui::stats::page(repos, scope, self.commit_opener()));
+            .push(&ui::stats::page(repos, scope, self.commit_opener(), self.commit_searcher()));
     }
 
     fn run_action(self: &Rc<Self>, action: Action, info: &RepoInfo) {

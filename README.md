@@ -97,7 +97,8 @@ installed, and the list is current again when you come back.
 ![Commit search across all sixteen repositories](docs/img/search.png)
 
 `Ctrl+Shift+F` searches the commits of every repository on the grid, or of the
-ones you ticked. A commit matches on its subject, or else on the rest of its
+ones you ticked; on Contributions, of the repositories that page is of, and in
+a commit graph, of that one. A commit matches on its subject, or else on the rest of its
 message, its author or a sha prefix, and each result says which; the newest
 come first. `Enter` opens that repository's graph on that commit. More in
 [Searching commits](docs/search.md).
@@ -273,7 +274,7 @@ most of the work:
 | `l` · `e` · `o` | Open a terminal there (lazygit), your editor, or its page on the web |
 | `f` · `p` | Fetch that repository · fetch it and fast-forward, if clean and only behind |
 | `Space` on a card | Tick it, to scope the search and contributions |
-| `Ctrl+Shift+F` | Search commits across the repositories |
+| `Ctrl+Shift+F` | Search commits across the repositories; on Contributions its own, in a commit graph that one |
 | `Ctrl+G` | Contributions |
 | `Ctrl+R` · `Ctrl+Shift+R` | Rescan, local only · fetch the whole grid |
 | `Tab` in a graph | Into the changed files |
