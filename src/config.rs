@@ -341,6 +341,31 @@ pub fn save_known_repos(known: &std::collections::BTreeSet<String>) {
     }
 }
 
+/// Who the Contributions page sets aside, one address to a line: listed
+/// under everybody else after a gap, and left out of the figures above them,
+/// so that the page can be pictured without them. State, like the rest of
+/// this directory: it is what was last clicked, not configuration.
+pub fn set_aside_path() -> PathBuf {
+    last_refresh_path().with_file_name("set-aside")
+}
+
+pub fn load_set_aside() -> std::collections::BTreeSet<String> {
+    std::fs::read_to_string(set_aside_path())
+        .map(|text| text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+pub fn save_set_aside(aside: &std::collections::BTreeSet<String>) {
+    if aside.is_empty() {
+        let _ = std::fs::remove_file(set_aside_path());
+        return;
+    }
+    let body: String = aside.iter().map(|who| format!("{who}\n")).collect();
+    if let Err(err) = replace_file(&set_aside_path(), &body) {
+        note!("omarepos: could not record who is set aside: {err}");
+    }
+}
+
 /// Split the repositories a pass would cover into those it may enter and the
 /// number it must leave for the user to look at first.
 pub fn only_known(

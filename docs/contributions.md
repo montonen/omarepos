@@ -39,6 +39,13 @@ local calendar days, bucketed at local midnight.
   its sha, churn and age. `Enter` or a click on one opens that repository's
   graph on that commit. The newest 100 per repository are kept; past that the
   group says how many older ones there were.
+- An author can be set aside with the button at the end of their row, which
+  shows when the row is pointed at or reached with `Tab`. They move under the
+  list, after a gap, and out of the figures and the days above it, so a
+  screenshot taken above the gap is of everybody else (yourself, most
+  likely). The status bar keeps everybody's figures and says how many are set
+  aside. The same button on their row brings them back. Who is set aside is
+  remembered, by address, in `~/.local/state/omarepos/set-aside`.
 
 Line counts come from diffing each commit against its first parent, which is the
 expensive part. Only the paths a commit changed are diffed, so the cost follows

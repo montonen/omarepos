@@ -218,6 +218,13 @@ step "game over" "X keys Escape; sleep 1.8"
 X dump "HIGH SCORES" | grep -q "HIGH SCORES" && { WRONG=$((WRONG+1)); echo "WRONG: Escape did not end the game"; }
 X dump "om-statusbar" | grep -q "commits" || { WRONG=$((WRONG+1)); echo "WRONG: Escape in the arcade left the Contributions page"; }
 step "an author" 'X press "Fixture"; sleep 0.4'
+# Setting an author aside: under the list and out of its figures, the bar
+# saying so; and back.
+step "set an author aside" 'X press "Set aside"; sleep 0.6'
+X dump "om-statusbar" | grep -q "1 set aside" || { WRONG=$((WRONG+1)); echo "WRONG: the status bar does not say an author is set aside"; }
+X dump "Set aside, and not in the figures" | grep -q "Set aside, and" || { WRONG=$((WRONG+1)); echo "WRONG: nobody is listed under the gap"; }
+step "bring them back" 'X press "Bring back"; sleep 0.6'
+X dump "om-statusbar" | grep -q "set aside" && { WRONG=$((WRONG+1)); echo "WRONG: an author is still set aside"; }
 step "back" "X keys Escape"
 
 # ---- tags: the menu, the editor, the chips

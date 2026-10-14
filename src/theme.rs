@@ -1155,6 +1155,31 @@ button.om-stat-head:focus-visible {{
   background-color: @om_raised;
 }}
 
+/* Setting an author aside. Shown on the row the pointer is on and to the
+   keyboard, and on every row already set aside, which is where it is
+   looked for to bring one back; a picture of the list shows none. */
+button.om-stat-aside {{
+  background: none;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  min-height: 0;
+  min-width: 0;
+  padding: 6px;
+  color: @om_dim;
+  opacity: 0;
+}}
+
+.om-stat-row:hover button.om-stat-aside,
+.om-set-aside button.om-stat-aside,
+button.om-stat-aside:focus-visible {{
+  opacity: 1;
+}}
+
+button.om-stat-aside:hover {{
+  color: @om_fg;
+}}
+
 {arcade}
 
 popover.menu contents, popover contents {{
