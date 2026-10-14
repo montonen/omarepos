@@ -76,13 +76,15 @@ start conflicted
 start broken; printf 'garbage' > broken/.git/index
 # Enough history and enough untracked files to fold and to scroll, written
 # over six weeks by two people: what a card's four weeks of days are drawn
-# from, and whose name it leaves out.
+# from, and whose name it leaves out. Some of it with a third, named in a
+# Co-authored-by trailer, for the arcade's co-op player.
 git init -q -b main lots
 ( cd lots && for i in $(seq 1 14); do echo $i > "untracked-$i.txt"; done
   now=$(date +%s)
   for i in $(seq 1 30); do echo $i >> log.txt; git add log.txt
     at="$(( now - (30 - i) * 34 * 3600 - 600 )) +0000"; who="Fixture"; mail="fixture@example.invalid"
     [ $((i % 3)) = 0 ] && who="Tove Lind" && mail="tove@example.invalid"
+    pair="Paired with nobody."; [ $((i % 2)) = 0 ] && pair="Co-authored-by: Robo Pair <robo@example.invalid>"
     GIT_AUTHOR_DATE="$at" GIT_COMMITTER_DATE="$at" git -c user.name="$who" -c user.email="$mail" \
-      commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis"; done )
+      commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis" -m "$pair"; done )
 echo "fixtures in $W/fleet: $(ls "$W/fleet" | tr '\n' ' ')"

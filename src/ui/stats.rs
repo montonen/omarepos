@@ -1,7 +1,7 @@
 //! The contributions page: who committed what, over the last N days, across a
 //! set of repositories.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -10,6 +10,7 @@ use gtk::glib;
 use gtk::pango;
 
 use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
+use crate::ui::arcade::{self, Arcade};
 use crate::ui::{day_window, key_color, relative_time};
 
 const RANGES: [(&str, usize); 3] = [("Last 7 days", 7), ("Last 14 days", 14), ("Last 30 days", 30)];
@@ -106,6 +107,10 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     let generation = Rc::new(RefCell::new(0u64));
     let repos = Rc::new(repos);
 
+    // The arcade (`ui::arcade`): what it is shown, and what the page shows
+    // when there is no game on.
+    let game = Game::default();
+
     let load: Rc<dyn Fn()> = {
         let generation = Rc::clone(&generation);
         let repos = Rc::clone(&repos);
@@ -116,6 +121,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
         let progress = progress.clone();
         let (range, view) = (range.clone(), view.clone());
         let title = title.clone();
+        let game = game.clone();
         Rc::new(move || {
             let days = RANGES.get(range.selected() as usize).map_or(7, |(_, days)| *days);
             let branches = VIEWS
@@ -130,7 +136,8 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
                 *counter += 1;
                 *counter
             };
-            stack.set_visible_child_name("loading");
+            game.rest(&stack, "loading");
+            game.show(None);
             status.set_label("Reading history…");
             status.set_tooltip_text(None);
 
@@ -142,6 +149,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
             let status = status.clone();
             let progress = progress.clone();
             let on_open = Rc::clone(&on_open);
+            let game = game.clone();
             glib::spawn_future_local(async move {
                 while let Ok(event) = rx.recv().await {
                     if *generation.borrow() != mine {
@@ -152,6 +160,8 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
                             progress.set_label(&format!("{name}  ({done}/{total})"));
                         }
                         stats::Event::Done(result) => {
+                            let result: Rc<Contributions> = Rc::from(result);
+                            game.show(Some(Rc::clone(&result)));
                             while let Some(child) = content.first_child() {
                                 content.remove(&child);
                             }
@@ -163,7 +173,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
                                 empty.set_description(Some(&glib::markup_escape_text(
                                     &description,
                                 )));
-                                stack.set_visible_child_name("empty");
+                                game.rest(&stack, "empty");
                             } else {
                                 if !result.errors.is_empty() {
                                     content.append(&not_counted(&result.errors));
@@ -185,7 +195,7 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
                                 for author in &result.authors {
                                     content.append(&author_row(author, &result, &on_open));
                                 }
-                                stack.set_visible_child_name("content");
+                                game.rest(&stack, "content");
                             }
                             status.set_label(&status_line(&result));
                             // The label is one line and cut short when the
@@ -207,7 +217,95 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen) -> adw::Navigat
     }
     load();
 
+    // The code is watched for on the way down to whatever has the keyboard,
+    // and every key goes on to it: the page works as it would without.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let konami = RefCell::new(arcade::Konami::default());
+    let weak_page = page.downgrade();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if game.playing.get() || !konami.borrow_mut().press(key, state) {
+            return glib::Propagation::Proceed;
+        }
+        if let Some(page) = weak_page.upgrade() {
+            game.start(&page, &stack, &range);
+        }
+        glib::Propagation::Stop
+    });
+    page.add_controller(keys);
+
     page
+}
+
+/// The arcade, from the page's side.
+#[derive(Clone, Default)]
+struct Game {
+    /// Made the first time the code is typed.
+    arcade: Rc<RefCell<Option<Rc<Arcade>>>>,
+    playing: Rc<Cell<bool>>,
+    /// The latest figures, for a game begun after they were read.
+    latest: Rc<RefCell<Option<Rc<Contributions>>>>,
+    /// What the page shows with no game on: "loading", "content" or "empty".
+    resting: Rc<Cell<&'static str>>,
+    /// Where the keyboard was when the game began, to go back to.
+    before: Rc<RefCell<glib::WeakRef<gtk::Widget>>>,
+}
+
+impl Game {
+    /// Show `name` on the page, or keep it for after the game.
+    fn rest(&self, stack: &gtk::Stack, name: &'static str) {
+        self.resting.set(name);
+        if !self.playing.get() {
+            stack.set_visible_child_name(name);
+        }
+    }
+
+    fn show(&self, result: Option<Rc<Contributions>>) {
+        self.latest.replace(result.clone());
+        if let Some(arcade) = self.arcade.borrow().as_ref() {
+            arcade.show(result);
+        }
+    }
+
+    fn start(&self, page: &adw::NavigationPage, stack: &gtk::Stack, range: &gtk::DropDown) {
+        let arcade = Rc::clone(self.arcade.borrow_mut().get_or_insert_with(|| {
+            arcade::load_font(page);
+            // Left and right are the time window's, a step either way round.
+            let on_range = {
+                let range = range.clone();
+                move |by: i32| {
+                    let ranges = RANGES.len() as i32;
+                    range.set_selected((range.selected() as i32 + by).rem_euclid(ranges) as u32);
+                }
+            };
+            // Not the whole of `self`, which holds the arcade that holds this.
+            let on_quit = {
+                let (playing, resting) = (Rc::clone(&self.playing), Rc::clone(&self.resting));
+                let before = Rc::clone(&self.before);
+                let stack = stack.downgrade();
+                move || {
+                    playing.set(false);
+                    if let Some(stack) = stack.upgrade() {
+                        stack.set_visible_child_name(resting.get());
+                        let before = before.borrow().upgrade();
+                        match before.filter(|widget| widget.is_mapped()) {
+                            Some(widget) => widget.grab_focus(),
+                            None => stack.grab_focus(),
+                        };
+                    }
+                }
+            };
+            let arcade = Arcade::new(on_range, on_quit);
+            stack.add_named(arcade.widget(), Some("arcade"));
+            arcade
+        }));
+        let before = page.root().and_then(|root| root.focus());
+        self.before.replace(before.map(|widget| widget.downgrade()).unwrap_or_default());
+        self.playing.set(true);
+        arcade.show(self.latest.borrow().clone());
+        stack.set_visible_child_name("arcade");
+        arcade.insert_coin();
+    }
 }
 
 /// What a view counts: in a word or two for the subtitle, and in full.
@@ -794,6 +892,8 @@ mod tests {
             },
             branches: stats::Branches::CheckedOut,
             authors: Vec::new(),
+            co_authors: Vec::new(),
+            mine: Default::default(),
             per_day_total: vec![0; 7],
             repos_scanned: scanned,
             repos_active: 0,

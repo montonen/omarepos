@@ -427,6 +427,117 @@ impl Palette {
             let nearer = |a: Rgb, b: Rgb| if on_accent(b) > on_accent(a) { b } else { a };
             plain.into_iter().fold(page, nearer)
         });
+        // The arcade (`ui::arcade`), a page of its own on the sunken colour.
+        // Its table is written on that and on the row that is chosen, rank
+        // by rank in five of the theme's colours, the way an arcade's
+        // high-score table is.
+        let sunken = Self::rgb(&p.bg_sunken);
+        let chosen = whole(mix(sunken, fg, ROW_SELECTED));
+        let on_the_table = |ink: Rgb| contrast(ink, sunken) >= LEGIBLE && contrast(ink, chosen) >= LEGIBLE;
+        let ranks = [&p.red, &p.yellow, &p.green, &p.cyan, &p.magenta]
+            .iter()
+            .enumerate()
+            .map(|(rank, hue)| {
+                format!(".om-arcade .om-rank-{rank} {{\n  color: {};\n}}", p.ink(hue, on_the_table))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let arcade = format!(
+            r#"
+.om-arcade {{
+  background-color: @om_sunken;
+  color: @om_fg;
+  font-family: "Press Start 2P", monospace;
+  font-size: 1rem;
+}}
+
+.om-arcade-small {{
+  font-size: 0.75rem;
+}}
+
+.om-arcade-title {{
+  font-size: 1.6rem;
+  color: {title};
+}}
+
+.om-arcade-hi {{
+  color: {gold};
+}}
+
+.om-arcade-dim,
+.om-arcade-badge .om-arcade-badge-name {{
+  color: {dim};
+}}
+
+{ranks}
+
+.om-arcade-row {{
+  padding: 6px 12px;
+}}
+
+.om-arcade-row.om-chosen {{
+  background-color: {chosen};
+}}
+
+.om-arcade-tab {{
+  padding: 8px 10px;
+  border: 2px solid @om_border;
+  color: {dim};
+}}
+
+.om-arcade-tab.om-on {{
+  background-color: @om_accent;
+  border-color: @om_accent;
+  color: {primary};
+}}
+
+.om-arcade-bar {{
+  min-height: 16px;
+  background-image: repeating-linear-gradient(to right, {bar} 0px, {bar} 12px, transparent 12px, transparent 16px);
+}}
+
+.om-arcade-badge {{
+  padding: 10px 12px;
+  border: 2px solid @om_border;
+}}
+
+.om-arcade-badge.om-won {{
+  border-color: {gold};
+}}
+
+.om-arcade-badge.om-won .om-arcade-badge-name {{
+  color: {gold};
+}}
+
+.om-arcade-screen:focus,
+.om-arcade-screen:focus-visible {{
+  outline: none;
+}}
+
+/* Over the whole screen, and drawn on top of it. */
+.om-arcade-scanlines {{
+  background-image: repeating-linear-gradient(to bottom, alpha(black, 0.16) 0px, alpha(black, 0.16) 1px, transparent 1px, transparent 3px);
+}}
+
+/* GTK leaves animations out where the desktop asks for less motion. */
+.om-arcade-blink {{
+  animation: om-blink 1s linear infinite;
+}}
+
+@keyframes om-blink {{
+  0% {{ opacity: 1; }}
+  49% {{ opacity: 1; }}
+  50% {{ opacity: 0; }}
+  100% {{ opacity: 0; }}
+}}
+"#,
+            title = p.ink(&p.magenta, on_the_table),
+            gold = p.ink(&p.yellow, on_the_table),
+            dim = hex(whole(mix(sunken, fg, MUTED))),
+            chosen = hex(chosen),
+            primary = hex(primary),
+            bar = p.green,
+        );
         // A card's left edge is the state of its repository: red for
         // trouble, yellow for work that is not committed, the accent for
         // commits that are nowhere else. It is 4px where the border is 1px,
@@ -1044,6 +1155,8 @@ button.om-stat-head:focus-visible {{
   background-color: @om_raised;
 }}
 
+{arcade}
+
 popover.menu contents, popover contents {{
   background-color: @om_raised;
   color: @om_fg;
@@ -1221,6 +1334,25 @@ mod tests {
                 rest = rest.trim_start();
                 if rest.is_empty() {
                     break;
+                }
+                // An animation's steps are rules inside a rule. They name no
+                // element and set no colour, and are passed over whole.
+                if let Some(after) = rest.strip_prefix("@keyframes") {
+                    let mut depth = 0;
+                    let end = after
+                        .char_indices()
+                        .find(|&(_, c)| {
+                            depth += match c {
+                                '{' => 1,
+                                '}' => -1,
+                                _ => 0,
+                            };
+                            c == '}' && depth == 0
+                        })
+                        .map(|(at, _)| at + 1)
+                        .expect("an animation is closed");
+                    rest = &after[end..];
+                    continue;
                 }
                 if let Some(define) = rest.strip_prefix("@define-color") {
                     let (statement, after) = define.split_once(';').expect("a definition ends");

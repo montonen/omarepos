@@ -80,6 +80,19 @@ nothing on screen, and no compositor involved (`drive.py start-offscreen` and
 Run the walk after changing anything a person can click, and `frames.sh` too
 after changing what has the keyboard or how the header is laid out.
 
+## The arcade
+
+The Contributions page has an easter egg: the Konami code (↑ ↑ ↓ ↓ ← → ← → B
+A) typed there turns it into an arcade's high-score table, with stages and
+badges, and Escape is game over. It is left out of the README, the keyboard
+list and the user docs on purpose. `src/ui/arcade.rs` says how a score is
+made and who plays (co-authors from `Co-authored-by` trailers, which
+`src/stats.rs` reads for it and leaves out of the page's own figures). It
+reads nothing the page has not; the one thing it writes is its font, Press
+Start 2P, built into the binary and put in `$XDG_RUNTIME_DIR/omarepos` for
+Pango the first time the code is typed. On a Pango older than 1.56 it is in
+monospace instead. The walk types the code and checks the table.
+
 ## Layout
 
 | Path | What's in it |
@@ -93,6 +106,7 @@ after changing what has the keyboard or how the header is laid out.
 | `src/graph.rs` | Revwalk → lane assignment for the commit graph |
 | `src/meta.rs` | Tag store (`repos.toml`) |
 | `src/stats.rs` | Contribution aggregation over a day window |
+| `src/ui/arcade.rs` | The Contributions page's easter egg: see above |
 | `src/search.rs` | Commit search across many repositories |
 | `src/scan.rs` | Worker threads streaming results to the main loop |
 | `src/refresh.rs` | Fetching: one repository, or a pass across the fleet with what may run on it fenced off |

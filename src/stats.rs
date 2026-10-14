@@ -25,11 +25,15 @@
 //! unless a mailmap says otherwise, and the one git reads is read here. Merge
 //! commits count as commits but are left out of the line totals — their diffs
 //! are their parents' work, counted already.
+//!
+//! Whoever a `Co-authored-by` trailer names is credited as well, and kept
+//! apart: every figure on the page is of authors, and the co-authors are for
+//! the arcade (`ui::arcade`), which counts a commit for each of its players.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use git2::{Oid, Repository, Sort};
+use git2::{Mailmap, Oid, Repository, Signature, Sort, Time};
 
 /// Day boundaries are computed on the main thread, where the local timezone is
 /// available, and handed to the worker as plain timestamps.
@@ -154,6 +158,13 @@ pub struct Contributions {
     /// The branches these figures are of.
     pub branches: Branches,
     pub authors: Vec<Author>,
+    /// Whoever a `Co-authored-by` trailer names, counted the way an author
+    /// is, for the same commits. In none of the figures here: a commit with
+    /// a co-author is one commit, and its author has it.
+    pub co_authors: Vec<Author>,
+    /// The addresses commits are made under here: `user.email` as each
+    /// repository's configuration has it, through its mailmap.
+    pub mine: BTreeSet<String>,
     pub per_day_total: Vec<usize>,
     pub repos_scanned: usize,
     pub repos_active: usize,
@@ -208,12 +219,16 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window, branches: Branches) -> async_c
     rx
 }
 
+/// Each person, keyed by address, and beside them every spelling of their
+/// name that has been met with the number of commits that carry it.
+type People = HashMap<String, (Author, Vec<(String, usize)>)>;
+
 /// Everything counted so far in one run.
 struct Tally {
     days: usize,
-    /// Each author, and beside them every spelling of their name that has
-    /// been met with the number of commits that carry it.
-    authors: HashMap<String, (Author, Vec<(String, usize)>)>,
+    authors: People,
+    co_authors: People,
+    mine: BTreeSet<String>,
     per_day_total: Vec<usize>,
     /// Every commit counted or set aside, in any repository. A linked
     /// worktree, a second clone and a fork beside its upstream are each a card
@@ -234,6 +249,8 @@ impl Tally {
         Tally {
             days,
             authors: HashMap::new(),
+            co_authors: HashMap::new(),
+            mine: BTreeSet::new(),
             per_day_total: vec![0; days],
             counted: HashSet::new(),
             repos_active: 0,
@@ -250,73 +267,22 @@ impl Tally {
         if !found.commits.is_empty() {
             self.repos_active += 1;
         }
+        self.mine.extend(found.identity);
         self.future += found.future.len();
         self.counted.extend(found.future);
         for commit in found.commits {
             self.counted.insert(commit.oid);
-
-            let key = if commit.email.is_empty() {
-                commit.name.to_lowercase()
-            } else {
-                commit.email.clone()
-            };
-            let (entry, spellings) = self.authors.entry(key).or_insert_with(|| {
-                let author = Author {
-                    name: commit.name.clone(),
-                    email: commit.email.clone(),
-                    commits: 0,
-                    merges: 0,
-                    insertions: 0,
-                    deletions: 0,
-                    files: 0,
-                    uncounted: 0,
-                    per_day: vec![0; self.days],
-                    repos: BTreeMap::new(),
-                    last_seen: 0,
-                };
-                (author, Vec::new())
-            });
-            match spellings.iter_mut().find(|(name, _)| *name == commit.name) {
-                Some((_, times)) => *times += 1,
-                None => spellings.push((commit.name.clone(), 1)),
+            for (name, email) in &commit.co_authors {
+                credit(&mut self.co_authors, self.days, path, repo_name, name, email, &commit);
             }
-            entry.commits += 1;
-            if commit.merge {
-                entry.merges += 1;
-            }
+            credit(&mut self.authors, self.days, path, repo_name, &commit.name, &commit.email, &commit);
             match commit.lines {
-                Some((insertions, deletions, files)) => {
-                    entry.insertions += insertions;
-                    entry.deletions += deletions;
-                    entry.files += files;
+                Some((insertions, deletions, _)) => {
                     self.total_insertions += insertions;
                     self.total_deletions += deletions;
                 }
-                None => {
-                    entry.uncounted += 1;
-                    self.uncounted += 1;
-                }
+                None => self.uncounted += 1,
             }
-            entry.per_day[commit.day] += 1;
-            entry.last_seen = entry.last_seen.max(commit.when);
-
-            let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
-                name: repo_name.to_string(),
-                ..RepoCommits::default()
-            });
-            in_repo.total += 1;
-            if in_repo.commits.len() < MAX_COMMITS_LISTED {
-                in_repo.commits.push(Commit {
-                    id: commit.oid.to_string(),
-                    short_id: commit.oid.to_string().chars().take(7).collect(),
-                    summary: commit.summary,
-                    when: commit.when,
-                    committed: commit.committed,
-                    lines: commit.lines.map(|(insertions, deletions, _)| (insertions, deletions)),
-                    merge: commit.merge,
-                });
-            }
-
             self.per_day_total[commit.day] += 1;
             self.total_commits += 1;
         }
@@ -329,35 +295,12 @@ impl Tally {
         repos_scanned: usize,
         errors: Vec<String>,
     ) -> Contributions {
-        // One address, several spellings of the name: the row is titled with
-        // the one most of the commits carry. It used to be whichever the walk
-        // met first, which changed with the order the repositories were read
-        // in and could be a login or a typo from one afternoon.
-        let mut authors: Vec<Author> = self
-            .authors
-            .into_values()
-            .map(|(mut author, spellings)| {
-                let mut most = 0;
-                for (name, times) in spellings {
-                    if times > most {
-                        most = times;
-                        author.name = name;
-                    }
-                }
-                author
-            })
-            .collect();
-        authors.sort_by(|a, b| {
-            b.commits
-                .cmp(&a.commits)
-                .then_with(|| b.churn().cmp(&a.churn()))
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                .then_with(|| a.email.cmp(&b.email))
-        });
         Contributions {
             window,
             branches,
-            authors,
+            authors: ranked(self.authors),
+            co_authors: ranked(self.co_authors),
+            mine: self.mine,
             per_day_total: self.per_day_total,
             repos_scanned,
             repos_active: self.repos_active,
@@ -369,6 +312,99 @@ impl Tally {
             errors,
         }
     }
+}
+
+/// Put a commit to somebody's name: its author's, or a co-author's.
+fn credit(
+    people: &mut People,
+    days: usize,
+    path: &Path,
+    repo_name: &str,
+    name: &str,
+    email: &str,
+    commit: &Seen,
+) {
+    let key = if email.is_empty() { name.to_lowercase() } else { email.to_string() };
+    let (entry, spellings) = people.entry(key).or_insert_with(|| {
+        let author = Author {
+            name: name.to_string(),
+            email: email.to_string(),
+            commits: 0,
+            merges: 0,
+            insertions: 0,
+            deletions: 0,
+            files: 0,
+            uncounted: 0,
+            per_day: vec![0; days],
+            repos: BTreeMap::new(),
+            last_seen: 0,
+        };
+        (author, Vec::new())
+    });
+    match spellings.iter_mut().find(|(spelt, _)| spelt == name) {
+        Some((_, times)) => *times += 1,
+        None => spellings.push((name.to_string(), 1)),
+    }
+    entry.commits += 1;
+    if commit.merge {
+        entry.merges += 1;
+    }
+    match commit.lines {
+        Some((insertions, deletions, files)) => {
+            entry.insertions += insertions;
+            entry.deletions += deletions;
+            entry.files += files;
+        }
+        None => entry.uncounted += 1,
+    }
+    entry.per_day[commit.day] += 1;
+    entry.last_seen = entry.last_seen.max(commit.when);
+
+    let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
+        name: repo_name.to_string(),
+        ..RepoCommits::default()
+    });
+    in_repo.total += 1;
+    if in_repo.commits.len() < MAX_COMMITS_LISTED {
+        in_repo.commits.push(Commit {
+            id: commit.oid.to_string(),
+            short_id: commit.oid.to_string().chars().take(7).collect(),
+            summary: commit.summary.clone(),
+            when: commit.when,
+            committed: commit.committed,
+            lines: commit.lines.map(|(insertions, deletions, _)| (insertions, deletions)),
+            merge: commit.merge,
+        });
+    }
+}
+
+/// The people counted, most commits first.
+fn ranked(people: People) -> Vec<Author> {
+    // One address, several spellings of the name: the row is titled with
+    // the one most of the commits carry. It used to be whichever the walk
+    // met first, which changed with the order the repositories were read
+    // in and could be a login or a typo from one afternoon.
+    let mut authors: Vec<Author> = people
+        .into_values()
+        .map(|(mut author, spellings)| {
+            let mut most = 0;
+            for (name, times) in spellings {
+                if times > most {
+                    most = times;
+                    author.name = name;
+                }
+            }
+            author
+        })
+        .collect();
+    authors.sort_by(|a, b| {
+        b.commits
+            .cmp(&a.commits)
+            .then_with(|| b.churn().cmp(&a.churn()))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.email.cmp(&b.email))
+    });
+    authors
 }
 
 /// What to call each repository on the page: its folder name, with as many of
@@ -430,6 +466,8 @@ struct Seen {
     /// Insertions, deletions and files changed, or nothing where they could
     /// not be read.
     lines: Option<(usize, usize, usize)>,
+    /// Name and address of each co-author: see [`co_authors`].
+    co_authors: Vec<(String, String)>,
 }
 
 /// What one repository holds that is not in `counted` already.
@@ -439,6 +477,8 @@ struct Found {
     commits: Vec<Seen>,
     /// Dated after the window ends.
     future: Vec<Oid>,
+    /// What commits made here go under: see [`identity`].
+    identity: Option<String>,
 }
 
 /// Read one repository to the end, counting nothing. The error is what libgit2
@@ -505,6 +545,7 @@ fn collect(
     // pull requests on a forge is two people: the address on their machine
     // and the one the forge commits under.
     let mailmap = repo.mailmap().ok();
+    found.identity = identity(&repo, mailmap.as_ref());
 
     for oid in walk {
         // A step that failed used to be skipped. A walk in time order reads
@@ -545,10 +586,12 @@ fn collect(
         let Some(day) = window.index_of(when) else { continue };
 
         let merge = commit.parent_count() > 1;
+        let email = author.email().unwrap_or("").trim().to_lowercase();
         found.commits.push(Seen {
             oid,
             name: author.name().unwrap_or("unknown").to_string(),
-            email: author.email().unwrap_or("").trim().to_lowercase(),
+            co_authors: co_authors(&commit, mailmap.as_ref(), &email),
+            email,
             summary: commit
                 .summary()
                 .ok()
@@ -568,6 +611,60 @@ fn collect(
     // an author's commits are listed, and the rest are called older.
     found.commits.sort_by(|a, b| b.when.cmp(&a.when));
     Ok(found)
+}
+
+/// Who else the message says wrote the commit: its `Co-authored-by`
+/// trailers, the way a forge reads them, put through the mailmap the author
+/// is. The author named again is left out, and so is a second line for one
+/// address.
+fn co_authors(commit: &git2::Commit<'_>, mailmap: Option<&Mailmap>, author: &str) -> Vec<(String, String)> {
+    let Some(trailers) = commit.message().ok().and_then(|message| git2::message_trailers_strs(message).ok())
+    else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, String)> = Vec::new();
+    for (key, value) in trailers.iter() {
+        if !key.trim().eq_ignore_ascii_case("co-authored-by") {
+            continue;
+        }
+        let Some((name, email)) = person(value) else { continue };
+        let (name, email) = mapped(mailmap, &name, &email).unwrap_or((name, email));
+        let email = email.trim().to_lowercase();
+        if email == author || found.iter().any(|(_, seen)| *seen == email) {
+            continue;
+        }
+        found.push((name, email));
+    }
+    found
+}
+
+/// `Name <address>`, the way a trailer names somebody.
+fn person(value: &str) -> Option<(String, String)> {
+    let (name, rest) = value.trim().rsplit_once('<')?;
+    let email = rest.strip_suffix('>')?.trim();
+    if email.is_empty() {
+        return None;
+    }
+    let name = name.trim();
+    Some((if name.is_empty() { email } else { name }.to_string(), email.to_string()))
+}
+
+/// A name and address as the mailmap has them, where it has them.
+fn mapped(mailmap: Option<&Mailmap>, name: &str, email: &str) -> Option<(String, String)> {
+    let said = Signature::new(name, email, &Time::new(0, 0)).ok()?;
+    let mapped = mailmap?.resolve_signature(&said).ok()?;
+    Some((mapped.name().ok()?.to_string(), mapped.email().ok()?.to_string()))
+}
+
+/// The address commits made in this repository go under: `user.email` as its
+/// configuration has it, which takes in the global one and any `includeIf`,
+/// through the mailmap as an author's address is.
+fn identity(repo: &Repository, mailmap: Option<&Mailmap>) -> Option<String> {
+    let config = repo.config().ok()?;
+    let email = config.get_string("user.email").ok()?;
+    let name = config.get_string("user.name").unwrap_or_else(|_| email.clone());
+    let email = mapped(mailmap, &name, &email).map_or(email, |(_, email)| email);
+    Some(email.trim().to_lowercase()).filter(|email| !email.is_empty())
 }
 
 /// The commit HEAD is on, or nothing in a repository that has no commit yet.
@@ -1809,5 +1906,61 @@ mod tests {
         let (commits, files) = same_as_the_whole_tree(&dir);
         assert_eq!(commits, 200);
         assert!(files > 400, "the history has to have had something in it: {files}");
+    }
+
+    // ---- co-authors and whose the fleet is ------------------------------------
+
+    /// A `Co-authored-by` trailer credits whoever it names, through the
+    /// mailmap, once a commit, and apart from the authors: what the page
+    /// shows is as it was.
+    #[test]
+    fn a_co_author_is_credited_apart_from_the_authors() {
+        let _guard = isolate();
+        let dir = scratch("stats-co-authors");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let pair = "Robo Pair <robo@example.invalid>";
+        commit_file(&dir, ".mailmap", &format!("{pair} <robo-old@example.invalid>\n"), "say who is who");
+        commit_as(&dir, BOB, "a.txt", &lines(3), &format!("one\n\nCo-authored-by: {pair}"));
+        // The same address twice, written two ways, and the author naming
+        // themselves: one credit, to Robo.
+        let two = format!(
+            "two\n\nCo-Authored-By: Robo Pair <Robo@Example.invalid>\n\
+             Co-authored-by: {pair}\nCo-authored-by: Bob Builder <bob@example.invalid>"
+        );
+        commit_as(&dir, BOB, "b.txt", &lines(2), &two);
+        // An address the mailmap says is Robo's.
+        let old = "three\n\nCo-authored-by: Old Robo <robo-old@example.invalid>";
+        commit_as(&dir, BOB, "c.txt", &lines(4), old);
+        // Not a trailer: it is not in the message's last paragraph.
+        commit_as(&dir, BOB, "d.txt", &lines(1), &format!("four\n\nCo-authored-by: {pair}\n\nAnd more."));
+        commit_as(&dir, BOB, "e.txt", &lines(1), "five, alone");
+
+        let result = contributions(&[&dir]);
+        assert_eq!(by_author(&result), shortlog(&dir, &["HEAD"]), "the authors as they were");
+        assert_eq!(result.total_commits, 6);
+        assert_eq!(result.co_authors.len(), 1, "Robo alone, and not Bob a second time");
+        let robo = &result.co_authors[0];
+        assert_eq!((robo.name.as_str(), robo.email.as_str()), ("Robo Pair", "robo@example.invalid"));
+        assert_eq!((robo.commits, robo.insertions), (3, 9));
+        assert_eq!(robo.per_day.iter().sum::<usize>(), 3);
+        assert_eq!(robo.repos.values().map(|repo| repo.total).sum::<usize>(), 3);
+    }
+
+    /// `user.email` as each repository has it: its own where it sets one,
+    /// the global one where it does not.
+    #[test]
+    fn mine_is_the_address_commits_are_made_under() {
+        let _guard = isolate();
+        let own = scratch("stats-mine-own");
+        git(&own, &["init", "-q", "-b", "main"]);
+        git(&own, &["config", "user.email", "Me@Work.Example"]);
+        commit_file(&own, "a.txt", "a\n", "one");
+        let global = scratch("stats-mine-global");
+        git(&global, &["init", "-q", "-b", "main"]);
+        commit_file(&global, "a.txt", "a\n", "one");
+
+        let result = contributions(&[&own, &global]);
+        let mine: Vec<&str> = result.mine.iter().map(String::as_str).collect();
+        assert_eq!(mine, ["fixture@example.invalid", "me@work.example"]);
     }
 }

@@ -320,4 +320,5 @@ time you pressed `f` or `Ctrl+Shift+R`.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). It carries one font, Press Start 2P, under the SIL
+Open Font License 1.1: see [data/fonts/OFL.txt](data/fonts/OFL.txt).

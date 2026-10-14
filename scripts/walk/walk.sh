@@ -203,6 +203,20 @@ X dump "all branches" | grep -q "all branches" || { WRONG=$((WRONG+1)); echo "WR
 step "checked-out branches again" "X choose 'Which branches=0'; sleep 1.5"
 [ "$(figures)" = "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: back on the checked-out branches the figures are not what they were ($(figures); before: $before)"; }
 step "7 days" "X choose 'Time window=0'; sleep 1.2"
+# The arcade, behind the Konami code: the same figures as a high-score table,
+# the lots fixture's co-author among the players, and Escape back to the page.
+step "the arcade" "X keys Up Up Down Down Left Right Left Right b a; sleep 2.2"
+for shown in "HIGH SCORES" "1UP" "CO-OP"; do
+  X dump "$shown" | grep -q "$shown" || { WRONG=$((WRONG+1)); echo "WRONG: the arcade does not show $shown"; }
+done
+step "arcade: stages" "X keys Tab"
+step "arcade: badges, the second player's" "X keys shift+Tab shift+Tab Down Tab Tab"
+step "arcade: 30 days" "X keys Left; sleep 1.6"
+X dump "LAST 30 DAYS" | grep -q "LAST 30 DAYS" || { WRONG=$((WRONG+1)); echo "WRONG: left in the arcade did not change the window of days"; }
+step "arcade: 7 days" "X keys Right; sleep 1.6"
+step "game over" "X keys Escape; sleep 1.8"
+X dump "HIGH SCORES" | grep -q "HIGH SCORES" && { WRONG=$((WRONG+1)); echo "WRONG: Escape did not end the game"; }
+X dump "om-statusbar" | grep -q "commits" || { WRONG=$((WRONG+1)); echo "WRONG: Escape in the arcade left the Contributions page"; }
 step "an author" 'X press "Fixture"; sleep 0.4'
 step "back" "X keys Escape"
 

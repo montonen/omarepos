@@ -1,3 +1,4 @@
+pub mod arcade;
 pub mod card;
 pub mod commit;
 #[cfg(debug_assertions)]

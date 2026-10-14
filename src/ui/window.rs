@@ -2354,6 +2354,11 @@ impl Ui {
                 popover.popdown();
                 return;
             }
+            // The arcade on Contributions, where Escape is game over, and
+            // the page stays.
+            if focused.activate_action("arcade.game-over", None).is_ok() {
+                return;
+            }
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
                 if !editable.text().is_empty() {
                     editable.set_text("");
