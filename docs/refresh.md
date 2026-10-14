@@ -1,19 +1,52 @@
 # Fetching
 
-Fetching is the one thing omarepos does to a repository. It asks the remote
-what it has and records the answer, which is what `origin/main` and its like
-are. No branch of yours moves, no file in your working tree changes, and
-nothing is sent anywhere. Three things start one:
+A fetch asks the remote what it has and records the answer, which is what
+`origin/main` and its like are. No branch of yours moves, no file in your
+working tree changes, and nothing is sent anywhere. Four things start one:
 
-| What | Fetches |
+| What | Does |
 | --- | --- |
-| `f` on a card, or in a commit graph | That repository, now |
-| `Ctrl+Shift+R` | Every repository in scope, now |
-| The background refresh | Every repository in scope, on a timer |
+| `f` on a card, or in a commit graph | Fetches that repository, now |
+| `p` on a card | Fetches that repository, then fast-forwards it if it is clean and only behind |
+| `Ctrl+Shift+R` | Fetches every repository in scope, now |
+| The background refresh | Fetches every repository in scope, on a timer |
 
-Bringing the fetched commits into your branch is yours to do, with your own
-tools: `l` on the card opens a terminal in the repository, in lazygit when it
-is installed.
+Bringing fetched commits into a branch that has work in progress, or commits
+of its own, is yours to do with your own tools: `l` on the card opens a
+terminal in the repository, in lazygit when it is installed.
+
+## `p`: fetch, then fast-forward
+
+`p` on a card is the one thing omarepos does that changes a working tree, and
+it does it only for the repository under the keyboard, when you press it. The
+timer, the catch-up at launch and `Ctrl+Shift+R` never do.
+
+It fetches first, always. Then it fast-forwards the checked-out branch, and
+only if all of this holds; otherwise it says which did not:
+
+- nothing is staged, modified or in conflict (an untracked file is fine: git
+  refuses rather than overwrite one);
+- a branch is checked out, it tracks an upstream, and it is only behind it,
+  with no commits of its own;
+- no merge, rebase, cherry-pick or bisect is under way;
+- the update does not move the pointer of a submodule that is checked out
+  here, since `git merge` would leave the submodule's files behind.
+
+The update itself is your own `git` running
+`git -c merge.autoStash=false -c pull.twohead=recursive merge --ff-only
+--no-squash --no-autostash --no-overwrite-ignore @{u}`, with the branch's own
+`mergeoptions` set aside for the command. Each of those was found making a
+plain `--ff-only` do something else and exit 0: a merge commit, a squash, a
+stash, an ignored `.env` overwritten. A branch that insists on signed commits
+still does. Afterwards the branch is read back, and anything but the
+upstream's commit is reported, not trusted. Your hooks and filters run, as
+they would for your own pull.
+
+When an update stops part-way (a file it cannot write, a filter that fails),
+git has already written some of the files and leaves the branch where it was.
+omarepos says which files hold the incoming version, so they are not taken for
+your work, and it goes on saying so, on the next fetch too, until they are put
+back.
 
 ## The background refresh
 

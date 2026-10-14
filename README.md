@@ -5,7 +5,7 @@
 
 <p align="center">
   <strong>Every git repository on your machine, on one screen.</strong><br>
-  A keyboard-first, read-only overview for <a href="https://omarchy.org">Omarchy</a>: what is uncommitted, what is unpushed
+  A keyboard-first overview for <a href="https://omarchy.org">Omarchy</a>: what is uncommitted, what is unpushed
   and what is waiting to be pulled, in the theme you are using.
 </p>
 
@@ -13,7 +13,7 @@
   <a href="#a-tour">Tour</a> ·
   <a href="#install">Install</a> ·
   <a href="#keyboard">Keyboard</a> ·
-  <a href="#read-only">Read-only</a> ·
+  <a href="#what-it-does-to-a-repository">What it changes</a> ·
   <a href="docs/README.md">Documentation</a>
 </p>
 
@@ -27,8 +27,9 @@ with its remote is grey, and a coloured edge means there is something to do.**
 
 From a card it is one key to the repository's commit graph, a terminal, your
 editor or its page on the web. It reads, and it fetches, when you ask or on a
-timer. That is all it does to a repository: no branch moves and no file
-changes because omarepos was open.
+timer. The one thing it changes is what you ask it to with `p`: it brings a
+clean branch that is only behind up to date, one repository at a time. Nothing
+moves just because omarepos was open.
 
 <sub>Pictured: this repository and fifteen public Omarchy projects, in a
 scratch home directory of their own. [How the pictures are taken](docs/development.md#the-readmes-pictures).</sub>
@@ -111,14 +112,17 @@ with a mailmap honoured. A row opens to the commits themselves. A second view
 counts every branch and not only the checked-out ones. More in
 [Contributions](docs/contributions.md).
 
-### Fetching, and nothing more
+### Fetching, and pulling when you ask
 
 `f` fetches the repository under the keyboard, and `Ctrl+Shift+R` the whole
 grid, or the tags you have limited the refresh to. A timer in the window can
 do the same every few minutes; it is off until you give it an interval. A
 fetch records what the remote has, so "behind" stays true. It moves no branch
-and touches no file. The timer runs no hooks and only enters repositories you
-have already seen. More in [Fetching](docs/refresh.md).
+and touches no file. `p` fetches and then fast-forwards the branch, if nothing
+in the repository is uncommitted and the branch is only behind; anything else
+it leaves for you, and says why. The timer only ever fetches, runs no hooks and
+only enters repositories you have already seen. More in
+[Fetching](docs/refresh.md).
 
 ### Your theme
 
@@ -131,26 +135,32 @@ restarting. The lanes of a graph and the dots on tags and authors keep a fixed
 set of eight colours, which a theme's own handful of hues could not keep
 apart. More in [Configuration and theme](docs/configuration.md#theme).
 
-## Read-only
+## What it does to a repository
 
 A tool pointed at every repository you have should be able to say what it
-does to them in a sentence. omarepos reads them, and it fetches.
+does to them in a sentence. omarepos reads them, it fetches, and when you ask
+it brings one clean branch up to date.
 
 - **Reading never runs `git`, never writes to a repository and never talks to
   a remote.** What is shown is read from disk with libgit2.
-- **Fetching is the one thing it does to a repository.** On `f`, on
-  `Ctrl+Shift+R`, or on a timer you switch on. It goes through the `git` you
-  use yourself, with your credential helpers and SSH setup: a repository you
-  cannot fetch by hand is one omarepos does not pretend it can fetch either.
-- **Nothing else.** It does not stage, commit, push, merge, fast-forward,
-  rebase, stash, check out or reset. There is nothing in it that could
+- **Fetching** happens on `f`, on `Ctrl+Shift+R`, or on a timer you switch on.
+  It goes through the `git` you use yourself, with your credential helpers and
+  SSH setup: a repository you cannot fetch by hand is one omarepos does not
+  pretend it can fetch either.
+- **One update, when you ask.** `p` fast-forwards the branch of the repository
+  under the keyboard, if nothing in it is uncommitted and the branch is only
+  behind. It is a `git merge --ff-only` with every option spelled out, so your
+  settings cannot turn it into a real merge or a stash, and it never
+  overwrites an ignored file. The timer never does this.
+- **Nothing else.** It does not stage, commit, push, rebase, stash, check out
+  or reset, and never makes a merge commit. There is nothing in it that could
   discard an edit or publish one.
 - **For everything that changes a repository, it hands over.** `l` opens a
   terminal there, in lazygit when it is installed, and `e` your editor.
 - **Tags are omarepos's own.** Nothing is written into your repositories to
   keep them.
 
-More in [Read-only](docs/read-only.md) and [Fetching](docs/refresh.md).
+More in [What it changes](docs/read-only.md) and [Fetching](docs/refresh.md).
 
 ## Install
 
@@ -261,7 +271,7 @@ most of the work:
 | `Down` in the filter | Move into the cards |
 | `Enter` on a card | Open its commit graph |
 | `l` · `e` · `o` | Open a terminal there (lazygit), your editor, or its page on the web |
-| `f` | Fetch that repository |
+| `f` · `p` | Fetch that repository · fetch it and fast-forward, if clean and only behind |
 | `Space` on a card | Tick it, to scope the search and contributions |
 | `Ctrl+Shift+F` | Search commits across the repositories |
 | `Ctrl+G` | Contributions |
@@ -282,9 +292,9 @@ More of them are in [Usage](docs/usage.md).
 | [Commit graph](docs/commit-graph.md) | The graph, what is uncommitted, what a commit changed |
 | [Searching commits](docs/search.md) | What is matched, and how far back |
 | [Contributions](docs/contributions.md) | What is counted, and the all-branches view |
-| [Fetching](docs/refresh.md) | `f`, the timer, what runs unattended and what does not, and why it runs `git` |
+| [Fetching](docs/refresh.md) | `f`, `p`, the timer, what runs unattended and what does not, and why it runs `git` |
 | [Configuration and theme](docs/configuration.md) | `config.toml`, and how the Omarchy theme is used |
-| [Read-only](docs/read-only.md) | What is read, the one thing that is done to a repository, and what omarepos keeps for itself |
+| [What it changes](docs/read-only.md) | What is read, what a fetch and `p` change, and what omarepos keeps for itself |
 | [Development](docs/development.md) | Building, the tests, the walk, the source layout, the pictures |
 
 ## Development

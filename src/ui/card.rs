@@ -1009,7 +1009,7 @@ fn keys() -> [gtk::Box; 2] {
         group
     };
     let letters = group("om-keys");
-    for letter in ["l", "e", "o", "f"] {
+    for letter in ["l", "e", "o", "p", "f"] {
         letters.append(&keycap(letter));
     }
     let enter = group("om-enter");

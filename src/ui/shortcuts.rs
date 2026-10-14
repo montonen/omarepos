@@ -39,6 +39,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("l", "Open a terminal there — lazygit"),
             ("e", "Open it in your editor"),
             ("o", "Open its page on the web — GitHub, or wherever the remote is"),
+            ("p", "Fetch, and fast-forward it if it is clean and only behind"),
             ("f", "Fetch it — your branches and files stay as they are"),
         ],
     ),

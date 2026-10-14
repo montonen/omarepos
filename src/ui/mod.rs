@@ -105,7 +105,13 @@ pub fn outcome_text(outcome: &crate::refresh::Outcome) -> String {
     match outcome {
         Outcome::UpToDate => "fetched, nothing new".to_string(),
         Outcome::Behind(n) => format!("fetched, {n} behind"),
+        Outcome::FastForwarded(1) => "1 commit pulled".to_string(),
+        Outcome::FastForwarded(n) => format!("{n} commits pulled"),
+        Outcome::Skipped(skip) if skip.after_fetch() => {
+            format!("fetched, not updated: {}", skip.reason())
+        }
         Outcome::Skipped(skip) => format!("not fetched: {}", skip.reason()),
+        Outcome::Refused(why) => format!("fetched, not updated. {why}"),
         Outcome::Failed(err) => err.clone(),
     }
 }

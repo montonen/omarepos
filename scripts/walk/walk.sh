@@ -51,11 +51,13 @@ tags() { : > "$W/config/omarepos/repos.toml"; local i=0 n; n=$(echo "$1" | wc -w
     printf '[repos."%s/fleet/%s"]\ntags = ["%s"]\n\n' "$W" "$r" "$t" >> "$W/config/omarepos/repos.toml"; done; }
 
 # ---- what must be the same afterwards
-# omarepos reads, and it fetches. So whatever is pressed below, no fixture's
-# branches, tags, index or files may be any different at the end: only what
-# it knows of its remote may. Taken with git told not to tidy the index as it
-# looks, or the looking would be the change.
-as_found() { local r; for r in "$W"/fleet/*/; do ( cd "$r" || exit
+# omarepos reads, and it fetches, and `p` fast-forwards one clean branch. So
+# whatever is pressed below, no fixture's branches, tags, index or files may
+# be any different at the end, but for beta's, where `p` is pressed on a clean
+# branch that is only behind: that one is checked on its own at the end. Taken
+# with git told not to tidy the index as it looks, or the looking would be the
+# change.
+as_found() { local r; for r in "$W"/fleet/*/; do [ "$(basename "$r")" = beta ] && continue; ( cd "$r" || exit
   echo "== $(basename "$r")"
   git symbolic-ref -q HEAD || git rev-parse -q --verify HEAD || echo "no commit"
   git for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags
@@ -122,7 +124,8 @@ asks $N 1 "o on a card did not ask for its page"
 N=$(asked); step "card menu: open on the web" 'X press "!Open on git.example.invalid"'
 asks $N 1 "the card's menu did not ask for the page"
 WAIT=2 step "f on a card" "X keys ctrl+l f"
-step "p on a card, which is no key now" "X keys ctrl+l p"
+step "p on a clean card that is behind" "X keys ctrl+f; X type beta; sleep 0.4; X keys Down p; sleep 2.5; X keys Escape Escape"
+step "p on a card with commits of its own" "X keys ctrl+f; X type alpha; sleep 0.4; X keys Down p; sleep 2.5; X keys Escape Escape"
 WAIT=4 step "refresh the fleet" "X keys ctrl+shift+r"
 step "rescan" "X keys ctrl+r; sleep 1"
 step "card menu: contributions" 'X press "!Contributions"; sleep 1.2'
@@ -144,7 +147,7 @@ for repo in $REPOS; do
   step "$repo: open the pane" "X keys ctrl+d; sleep 0.5"
   step "$repo: reload" "X keys ctrl+r; sleep 0.9"
   WAIT=2 step "$repo: fetch" "X pick 0:1; X keys f"
-  step "$repo: p, which is no key now" "X pick 0:1; X keys p"
+  step "$repo: p, which is no key on a graph page" "X pick 0:1; X keys p"
   step "$repo: o" "X pick 0:1; X keys o"
   step "$repo: shortcuts" "X keys shift+question; sleep 0.3; X keys Escape"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
@@ -292,7 +295,11 @@ step "a root that is not there, and one that is a file" "printf 'roots = [\"/non
 step "settings on that" "X act settings; sleep 0.5; X keys Escape"
 
 X stop
-# ---- and nothing was written
+# ---- and nothing was written, but by the `p` that was asked for
+b="$W/fleet/beta"
+[ "$(git -C "$b" rev-parse main)" = "$(git -C "$b" rev-parse origin/main)" ] \
+  && [ -z "$(GIT_OPTIONAL_LOCKS=0 git -C "$b" status --porcelain)" ] \
+  || { WRONG=$((WRONG+1)); echo "WRONG: p did not bring beta level with its upstream, and clean"; }
 as_found > "$W/as-left.txt"
 if ! cmp -s "$W/as-found.txt" "$W/as-left.txt"; then
   WRONG=$((WRONG+1)); echo "WRONG: a fixture is not as it was found:"

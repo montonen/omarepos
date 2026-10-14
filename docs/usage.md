@@ -43,6 +43,7 @@ moves from the filter into the cards.
 | `e` | Open it in your editor |
 | `o` | Open its page on the web — GitHub, or wherever the remote is |
 | `f` | Fetch that repo. Its branches and files are left alone |
+| `p` | Fetch it, then fast-forward it if it is clean and only behind |
 | `Tab` in a commit graph | Into the changed files |
 | `Ctrl+D` in a commit graph | Show or hide the pane below it |
 

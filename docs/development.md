@@ -44,9 +44,11 @@ contributions, tags and the tag editor, light, broken and missing themes,
 Settings row by row, and the config and tag files broken and mended under the
 running window. After each of some five hundred steps it runs the drawing code
 and checks that the program is still there; it exits non-zero, with the panic,
-if it is not. And since omarepos only reads and fetches, it takes down every
-fixture's branches, tags, index and files before it starts and compares them
-at the end: anything that had been written would show there. A window driven this
+if it is not. And since omarepos only reads and fetches, but for `p`, it takes
+down every fixture's branches, tags, index and files before it starts and
+compares them at the end: anything that had been written would show there.
+The one fixture `p` is pressed on while clean and behind is checked instead
+to have been brought level with its upstream, and clean. A window driven this
 way opens no browser: it writes down the page it would have opened, and the
 walk checks that each way of asking wrote the right one. `walk.sh quick` does
 one repository instead of eight. It needs Hyprland, `python3`, `gdbus` and

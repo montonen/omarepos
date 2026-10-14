@@ -1,16 +1,23 @@
-//! Fetching: one repository the user pointed at, or a pass across the fleet.
+//! Fetching: one repository the user pointed at, or a pass across the fleet;
+//! and, for one repository the user asks it of with `p`, a fast-forward.
 //!
-//! It is the one thing omarepos does to a repository. A fetch asks the remote
-//! what it has and moves the remote-tracking branches, `origin/*`, to match.
-//! No branch of the user's moves, nothing in the working tree changes, and
-//! nothing is sent. There was more here once (a fast-forward of the
-//! checked-out branch, with the pages of care that took); it was taken out
-//! so that what the program may do to every repository on a machine fits in
-//! a sentence.
+//! A fetch asks the remote what it has and moves the remote-tracking
+//! branches, `origin/*`, to match. No branch of the user's moves, nothing in
+//! the working tree changes, and nothing is sent. That is all a pass across
+//! the fleet ever does: the timer, the catch-up at launch and `Ctrl+Shift+R`
+//! fetch and nothing else.
 //!
-//! The fetch shells out to `git` rather than going through libgit2. That is
+//! The one thing that writes is a fast-forward of the checked-out branch, and
+//! only when the user asks for it, one repository at a time, and only where
+//! the repository is clean and its branch is simply behind. It was taken out
+//! once, timer and all, and brought back for `p` alone: the timer's version
+//! is where nearly all the care below came from, an update nobody had asked
+//! for landing under whatever the user was doing.
+//!
+//! Both shell out to `git` rather than going through libgit2. That is
 //! deliberate: a user's authentication lives in credential helpers, an SSH
-//! agent and `insteadOf` rewrites, none of which libgit2 reads. Driving the
+//! agent and `insteadOf` rewrites, none of which libgit2 reads, and an update
+//! should run their hooks and filters as their own pull would. Driving the
 //! same `git` the user drives means their setup applies unchanged, and a
 //! repository they cannot fetch by hand is one omarepos does not pretend it
 //! can fetch either.
@@ -28,15 +35,15 @@
 //!   is not fixed here: fetching to somewhere else (`--prefetch`) would leave
 //!   the cards with nothing to read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use git2::{BranchType, Repository};
+use git2::{BranchType, Repository, RepositoryState, StatusOptions};
 
-/// Why a repository was not fetched at all.
+/// Why a repository was not fetched, or, fetched, not fast-forwarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     Bare,
@@ -48,6 +55,24 @@ pub enum Skip {
     /// Found since the user last looked, and not yet opened or asked for. A
     /// pass across the fleet does not enter a repository nobody has seen.
     Unseen,
+    /// Staged, modified or conflicted files. Only a clean repository is
+    /// fast-forwarded: what to do with work in progress is the user's call.
+    Dirty,
+    /// No branch checked out, so there is nothing to fast-forward.
+    Detached,
+    /// No commits yet.
+    Unborn,
+    /// The branch tracks nothing.
+    NoUpstream,
+    /// The branch has commits its upstream does not: a fast-forward is not
+    /// possible, and a merge or a rebase is the user's to make.
+    Diverged,
+    /// A merge, rebase, bisect or cherry-pick is in progress.
+    Busy,
+    /// The incoming commits move the pointer of a submodule that is checked
+    /// out here. `git merge` moves the pointer and leaves the checkout where
+    /// it was, and this module does not update submodules.
+    Submodule,
 }
 
 impl Skip {
@@ -57,7 +82,20 @@ impl Skip {
             Skip::NoRemote => "no remote",
             Skip::Elsewhere => "its work tree is not this directory",
             Skip::Unseen => "new here, open it once",
+            Skip::Dirty => "uncommitted changes",
+            Skip::Detached => "detached HEAD",
+            Skip::Unborn => "no commits",
+            Skip::NoUpstream => "no upstream",
+            Skip::Diverged => "has commits its upstream does not",
+            Skip::Busy => "merge or rebase in progress",
+            Skip::Submodule => "update moves a submodule",
         }
+    }
+
+    /// Whether this is a reason not to fast-forward, given after a fetch, and
+    /// not a reason not to fetch at all.
+    pub fn after_fetch(self) -> bool {
+        !matches!(self, Skip::Bare | Skip::NoRemote | Skip::Elsewhere | Skip::Unseen)
     }
 }
 
@@ -68,11 +106,19 @@ pub enum Outcome {
     /// tracks nothing.
     UpToDate,
     /// Fetched, and the checked-out branch is this many commits behind what
-    /// it tracks. Said whatever else is true of the branch, commits of its
-    /// own included: it is a count of what is waiting, and bringing it in is
-    /// not this program's to do.
+    /// it tracks. On a pass that only fetches this is said whatever else is
+    /// true of the branch, commits of its own included: it is a count of what
+    /// is waiting, and bringing it in was not asked for.
     Behind(usize),
+    /// Fetched and fast-forwarded by this many commits.
+    FastForwarded(usize),
     Skipped(Skip),
+    /// Fetched, but not fast-forwarded, and this is why: what git said when
+    /// it refused, or what was found that made asking it pointless. Kept apart
+    /// from `Failed`: the remote was reached, and "fetch failed" would send
+    /// the user looking in the wrong place. Nothing was changed unless the
+    /// text says otherwise.
+    Refused(String),
     /// The fetch itself failed.
     Failed(String),
 }
@@ -96,13 +142,14 @@ pub enum Event {
 /// Who chose the repositories in a pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
-    /// One repository the user pointed at and asked to fetch. Their whole git
-    /// setup applies, exactly as if they had typed the fetch.
+    /// One repository the user pointed at and asked to fetch, or with `p` to
+    /// fetch and fast-forward. Their whole git setup applies, hooks included,
+    /// exactly as if they had typed the commands.
     One,
     /// Everything in scope: the timer, the catch-up at launch, and a fetch of
     /// the whole fleet. Nobody picked these repositories one by one and nobody
-    /// is watching them, so nothing a repository carries gets to run: see
-    /// [`UNATTENDED`].
+    /// is watching them, so nothing a repository carries gets to run (see
+    /// [`UNATTENDED`]), and nothing is fast-forwarded.
     Fleet,
 }
 
@@ -128,7 +175,8 @@ const UNATTENDED: [&str; 6] = [
 ];
 
 /// Set to abandon a pass that is under way. Repositories not yet started are
-/// left alone. A fetch already running is allowed to finish.
+/// left alone, and one that has been fetched is not then fast-forwarded. A
+/// fetch or a fast-forward already running is allowed to finish.
 #[derive(Debug, Clone, Default)]
 pub struct Cancel(Arc<AtomicBool>);
 
@@ -144,6 +192,10 @@ impl Cancel {
 
 #[derive(Debug, Clone)]
 pub struct Options {
+    /// Fast-forward the checked-out branch after fetching, where that is
+    /// safe. Only on a [`Pass::One`]: a pass across the fleet fetches and
+    /// does nothing else, whatever this says.
+    pub fast_forward: bool,
     pub max_parallel: usize,
     /// How long a fetch may go without anything arriving before it is given
     /// up on. Not how long it may take: see [`FETCH_PATIENCE`].
@@ -205,6 +257,103 @@ const FETCH: [&str; 4] = [
     "--no-recurse-submodules",
 ];
 
+/// How long a fast-forward may take. The checkout runs the user's filters, and
+/// git-lfs among them fetches as it checks out: a large update over a slow
+/// link takes as long as it takes, and stopping git in the middle of a
+/// checkout leaves the tree half the old commit and half the new. Half an hour
+/// is a backstop against a filter that never returns, not an expectation.
+const FAST_FORWARD_PATIENCE: Duration = Duration::from_secs(30 * 60);
+
+/// The fast-forward, and nothing but. [`fast_forward`] puts the branch's own
+/// switch in front of this and what to merge behind it.
+///
+/// `--ff-only` refuses a merge that the *command line* asks for. What
+/// `git merge` does is also decided by configuration, read before the command
+/// line and able to outvote it, and each of the following made it do
+/// something else and exit 0.
+///
+/// `pull.twohead=recursive`: the key names the strategy for merging one head,
+/// and a strategy that cannot fast-forward (`ours`, `subtree`) switches
+/// `--ff-only` off without a word. git wrote a merge commit that threw
+/// upstream's changes away, and the update was reported as done. It is pinned
+/// to a strategy that can, by the one name every git version knows: an empty
+/// value is an error, and the default's own name is newer than the oldest git
+/// this runs on.
+///
+/// `--no-squash`, `--no-autostash`: a branch's own merge options, which
+/// [`fast_forward`] sets aside, said once more on the command line for the
+/// branch where that cannot be done. git reads the command line second.
+///
+/// `--no-overwrite-ignore`: without it git replaces an ignored file that is in
+/// the way of an incoming one, silently, and there is no reflog or stash to
+/// get it back from. With it git refuses and names the file.
+///
+/// `merge.autoStash=false`: a user who has turned autostash on would otherwise
+/// have this stash and re-apply their work around the update, and this module
+/// promises never to stash.
+const FAST_FORWARD: [&str; 10] = [
+    "-c",
+    "merge.autoStash=false",
+    "-c",
+    "pull.twohead=recursive",
+    "merge",
+    "--ff-only",
+    "--no-squash",
+    "--no-autostash",
+    "--no-overwrite-ignore",
+    "--quiet",
+];
+
+/// The whole fast-forward command for the branch called `branch`, or why it
+/// will not be run.
+///
+/// `branch.<name>.mergeoptions` is read by `git merge` ahead of its command
+/// line and can hold anything the command line can. `-s ours` there turns
+/// `--ff-only` into a merge commit that discards what upstream did;
+/// `--squash` stages upstream's whole diff and leaves the branch where it
+/// was; `--autostash` stashes the user's work, updates, and re-applies it
+/// with conflict markers where the two overlap. All three exit 0. A strategy
+/// cannot be taken back by a later argument, so the key itself is set to
+/// nothing for this one command.
+///
+/// One thing those options can hold is a refusal and not a behaviour, and
+/// setting the key aside must not lose it: a branch that insists on signed
+/// commits still does.
+///
+/// `-c key=value` ends the key at the first `=`, so the key cannot be spelled
+/// for a branch with one in its name. Such a branch is updated only if it has
+/// no merge options to set aside.
+fn fast_forward(repo: &Repository, branch: &str) -> Result<Vec<String>, String> {
+    let key = format!("branch.{branch}.mergeoptions");
+    let own = match repo.config().and_then(|config| config.get_string(&key)) {
+        Ok(options) => options,
+        Err(err) if err.code() == git2::ErrorCode::NotFound => String::new(),
+        // Unreadable is not the same as absent.
+        Err(err) => return Err(format!("could not read {key}: {}", err.message())),
+    };
+
+    let mut args = Vec::new();
+    if !branch.contains('=') {
+        args.extend(["-c".to_string(), format!("{key}=")]);
+    } else if !own.trim().is_empty() {
+        return Err(format!(
+            "This branch has merge options of its own ({key} = {}), and with `=` in the \
+             branch's name they cannot be set aside for one command. Update it by hand.",
+            own.trim()
+        ));
+    }
+    args.extend(FAST_FORWARD.iter().map(|arg| arg.to_string()));
+    // The last word on it wins, as it does for git.
+    let signed = own
+        .split_whitespace()
+        .rfind(|option| matches!(*option, "--verify-signatures" | "--no-verify-signatures"));
+    if signed == Some("--verify-signatures") {
+        args.push("--verify-signatures".to_string());
+    }
+    args.push("@{u}".to_string());
+    Ok(args)
+}
+
 pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
 
@@ -233,6 +382,9 @@ pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<E
                         guard.next()
                     };
                     let Some(path) = next else { return };
+                    // From the fetch to the fast-forward: the application
+                    // does not exit in the gap between the two.
+                    let _hold = crate::gitcmd::Hold::take();
                     let report = refresh_one(&path, &options);
                     if tx.send_blocking(Event::Repo(Box::new(report))).is_err() {
                         return;
@@ -261,6 +413,8 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         outcome,
         fetched: fetched.get(),
     };
+    // The timer never updates anything, whatever it is handed.
+    let updating = options.fast_forward && options.pass == Pass::One;
 
     let repo = match Repository::open(path) {
         Ok(repo) => repo,
@@ -289,13 +443,92 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         Ok(repo) => repo,
         Err(err) => return report(Outcome::Failed(err.message().to_string())),
     };
-    // What is waiting for the checked-out branch, where it tracks something.
-    // A detached HEAD or a branch that tracks nothing has been fetched all
-    // the same, and "left alone: no upstream" about a repository just fetched
-    // is not what happened.
-    match behind(&repo) {
-        Some(behind) if behind > 0 => report(Outcome::Behind(behind)),
-        _ => report(Outcome::UpToDate),
+
+    if !updating {
+        // What is waiting for the checked-out branch, where it tracks
+        // something. A detached HEAD or a branch that tracks nothing has
+        // been fetched all the same, and "left alone: no upstream" about a
+        // repository just fetched is not what happened.
+        let Ok(at) = tracking(&repo) else { return report(Outcome::UpToDate) };
+        if at.behind == 0 {
+            return report(Outcome::UpToDate);
+        }
+        // Nothing is updated on this pass, but an update that stopped
+        // part-way on an earlier `p` is still lying here, and "fetched, 3
+        // behind" would clear the only record of it.
+        if at.ahead == 0 && is_dirty(&repo) {
+            let left = half_applied(&repo, &at);
+            if !left.is_empty() {
+                return report(Outcome::Refused(part_way(&left)));
+            }
+        }
+        return report(Outcome::Behind(at.behind));
+    }
+
+    // Asked again: the fetch ran this repository's own git, which is long
+    // enough for its config to have changed.
+    if crate::git::belongs_here(&repo, path).is_err() {
+        return report(Outcome::Skipped(Skip::Elsewhere));
+    }
+    if repo.state() != RepositoryState::Clean {
+        return report(Outcome::Skipped(Skip::Busy));
+    }
+    let at = match tracking(&repo) {
+        Ok(at) => at,
+        Err(skip) => return report(Outcome::Skipped(skip)),
+    };
+    if at.behind == 0 {
+        return report(Outcome::UpToDate);
+    }
+    if at.ahead > 0 {
+        return report(Outcome::Skipped(Skip::Diverged));
+    }
+    // Only a clean repository, and looked at after the fetch: it took time,
+    // and the user may have started editing during it. Changes that are not
+    // the user's but what an earlier update left part-way are said to be that.
+    if is_dirty(&repo) {
+        let left = half_applied(&repo, &at);
+        return report(if left.is_empty() {
+            Outcome::Skipped(Skip::Dirty)
+        } else {
+            Outcome::Refused(part_way(&left))
+        });
+    }
+    // Not a question git answers. It moves the pointer, leaves the checkout,
+    // and exits 0.
+    if strands_a_submodule(&repo, &at) {
+        return report(Outcome::Skipped(Skip::Submodule));
+    }
+    // Called off while this repository was being fetched: it stays fetched,
+    // and where it was.
+    if options.cancel.stopped() || crate::gitcmd::winding_down() {
+        return report(Outcome::Behind(at.behind));
+    }
+
+    let command = match fast_forward(&repo, &at.branch) {
+        Ok(command) => command,
+        Err(why) => return report(Outcome::Refused(why)),
+    };
+    let command: Vec<&str> = command.iter().map(String::as_str).collect();
+    match crate::gitcmd::run(path, &command, FAST_FORWARD_PATIENCE) {
+        // Exit 0 is git's opinion. Where the branch is now is the fact.
+        Ok(_) => match landed(path, at.upstream) {
+            Ok(()) => report(Outcome::FastForwarded(at.behind)),
+            Err(why) => report(Outcome::Refused(why)),
+        },
+        // Usually git refused before touching anything. Not always: it can
+        // fail after writing some of the files, and then the tree has to be
+        // looked at, because git's message only names the one it tripped on.
+        Err(err) => {
+            let left = Repository::open(path)
+                .map(|repo| half_applied(&repo, &at))
+                .unwrap_or_default();
+            report(Outcome::Refused(if left.is_empty() {
+                err
+            } else {
+                format!("{err}\n{}", part_way(&left))
+            }))
+        }
     }
 }
 
@@ -331,7 +564,8 @@ fn gate(repo: &Repository) -> Arc<Mutex<()>> {
 ///
 /// A fetch needs a remote and nothing else: it does not care that HEAD is
 /// detached, that a rebase is under way or that there are no commits yet, and
-/// it disturbs none of them.
+/// it disturbs none of them. Those are reasons not to *update*, and are asked
+/// after the fetch, so that `p` on such a repository still fetches it.
 ///
 /// A bare repository is left out. A mirror's fetch writes straight into its
 /// branches, which is more than "fetch" means anywhere else here.
@@ -345,14 +579,201 @@ fn disqualify(repo: &Repository) -> Option<Skip> {
     None
 }
 
-/// How many commits the checked-out branch is behind what it tracks, as they
-/// stand right now. `None` where there is no branch, or it tracks nothing.
-fn behind(repo: &Repository) -> Option<usize> {
-    let head = repo.head().ok()?;
-    let branch = repo.find_branch(head.shorthand().ok()?, BranchType::Local).ok()?;
-    let upstream = branch.upstream().ok()?;
-    let (local, remote) = (branch.get().target()?, upstream.get().target()?);
-    repo.graph_ahead_behind(local, remote).ok().map(|(_, behind)| behind)
+/// The checked-out branch and what it tracks, as they stand right now.
+struct Tracking {
+    /// The branch's short name: `main`.
+    branch: String,
+    local: git2::Oid,
+    upstream: git2::Oid,
+    ahead: usize,
+    behind: usize,
+}
+
+fn tracking(repo: &Repository) -> Result<Tracking, Skip> {
+    let head = repo.head().map_err(|_| Skip::Unborn)?;
+    if repo.head_detached().unwrap_or(false) {
+        return Err(Skip::Detached);
+    }
+    let branch_name = head.shorthand().map_err(|_| Skip::Detached)?.to_string();
+    let branch = repo
+        .find_branch(&branch_name, BranchType::Local)
+        .map_err(|_| Skip::NoUpstream)?;
+    let upstream = branch.upstream().map_err(|_| Skip::NoUpstream)?;
+    let local = branch.get().target().ok_or(Skip::NoUpstream)?;
+    let remote = upstream.get().target().ok_or(Skip::NoUpstream)?;
+    let (ahead, behind) = repo
+        .graph_ahead_behind(local, remote)
+        .map_err(|_| Skip::NoUpstream)?;
+    Ok(Tracking { branch: branch_name, local, upstream: remote, ahead, behind })
+}
+
+/// Whether the branch is where a fast-forward to `meant` puts it.
+///
+/// git exiting 0 used to be the whole of the evidence, and the count reported
+/// was one worked out before the command ran. With a merge strategy of the
+/// user's in force the same exit code came back from a merge commit, and from
+/// a squash that staged upstream's diff and left the branch where it was.
+/// Those two are closed off in [`fast_forward`]. This is for the one nobody
+/// has thought of.
+///
+/// A branch level with its upstream as it stands now also counts: a fetch from
+/// a terminal may have moved the upstream on between the measuring and the
+/// merge, and git then fast-forwarded to the newer commit.
+fn landed(path: &Path, meant: git2::Oid) -> Result<(), String> {
+    let short = |oid: git2::Oid| oid.to_string()[..7].to_string();
+    let now = Repository::open(path).ok().and_then(|repo| tracking(&repo).ok());
+    match now {
+        Some(at) if at.local == meant || at.local == at.upstream => Ok(()),
+        Some(at) => Err(format!(
+            "git reported the update as done, but the branch is at {} and its upstream at {}, \
+             which is not what a fast-forward leaves. Look at `git status` and `git log -3` \
+             before anything else.",
+            short(at.local),
+            short(at.upstream)
+        )),
+        None => Err("git reported the update as done, but the branch cannot be read back \
+                     to check: look at `git status` before anything else."
+            .to_string()),
+    }
+}
+
+/// Staged, modified or conflicted. Untracked files are left out: git refuses
+/// on its own to overwrite one. It does *not* refuse for an ignored file unless
+/// told to, which is what `--no-overwrite-ignore` in [`FAST_FORWARD`] is for.
+fn is_dirty(repo: &Repository) -> bool {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(false)
+        .include_ignored(false)
+        .exclude_submodules(true);
+    match repo.statuses(Some(&mut opts)) {
+        Ok(statuses) => statuses.iter().any(|entry| {
+            entry.status().intersects(
+                git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE
+                    | git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_RENAMED
+                    | git2::Status::WT_TYPECHANGE
+                    | git2::Status::CONFLICTED,
+            )
+        }),
+        // Unreadable status is not a licence to proceed.
+        Err(_) => true,
+    }
+}
+
+/// Whether fast-forwarding would move the pointer of a submodule that is
+/// checked out here.
+///
+/// `git merge` does not update submodules, with or without
+/// `submodule.recurse`. It records the new pointer and leaves the checkout on
+/// the old commit, so the repository's code is new and the library's is not.
+/// That was reported as "updated", the card showed "clean" because its status
+/// leaves submodules out, and a build that broke had no visible cause.
+/// Bringing the submodule along is `git submodule update`, which this module
+/// does not run; so the update is left for the user to pull, and the reason
+/// says why.
+///
+/// A submodule that was never checked out has nothing to be left behind, and
+/// does not hold anything back.
+fn strands_a_submodule(repo: &Repository, at: &Tracking) -> bool {
+    let tree = |commit| repo.find_commit(commit).and_then(|commit| commit.tree());
+    let incoming = match (tree(at.local), tree(at.upstream)) {
+        (Ok(ours), Ok(theirs)) => repo.diff_tree_to_tree(Some(&ours), Some(&theirs), None),
+        (Err(err), _) | (_, Err(err)) => Err(err),
+    };
+    // Unreadable is not a licence to proceed.
+    let Ok(incoming) = incoming else { return true };
+    let Some(workdir) = repo.workdir() else { return false };
+    incoming.deltas().any(|delta| {
+        [delta.old_file(), delta.new_file()].iter().any(|file| {
+            file.mode() == git2::FileMode::Commit
+                && file.path().is_some_and(|path| workdir.join(path).join(".git").exists())
+        })
+    })
+}
+
+/// The paths where the working tree already holds what the upstream commit
+/// has, while the branch is still on a commit that has something else.
+///
+/// git's checkout is not a transaction. When one incoming path cannot be
+/// written (a directory somebody else owns, a full disk, a filter that fails)
+/// it has already written others, and it exits without moving the branch. The
+/// repository is then dirty with upstream's own content: `git status` lists
+/// the files as modified, and one the update adds as untracked.
+///
+/// Told apart from an edit by content, not by remembering: a file counts only
+/// if it is byte for byte what the update brings. So this needs no record of
+/// the failure, finds the same thing after a restart, and can never claim a
+/// file the user has changed. A file filtered on the way in (git-lfs) does not
+/// compare equal and is left out, which is the safe side to be wrong on.
+fn half_applied(repo: &Repository, at: &Tracking) -> Vec<String> {
+    let tree = |commit| repo.find_commit(commit).and_then(|commit| commit.tree());
+    let (Ok(ours), Ok(theirs)) = (tree(at.local), tree(at.upstream)) else {
+        return Vec::new();
+    };
+    let Ok(incoming) = repo.diff_tree_to_tree(Some(&ours), Some(&theirs), None) else {
+        return Vec::new();
+    };
+    // A submodule's pointer is compared with a checkout, not with content.
+    let link = |file: &git2::DiffFile| file.mode() == git2::FileMode::Commit;
+    let changed: Vec<PathBuf> = incoming
+        .deltas()
+        .filter(|delta| !link(&delta.old_file()) && !link(&delta.new_file()))
+        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
+        .map(Path::to_path_buf)
+        .collect();
+    if changed.is_empty() {
+        return Vec::new();
+    }
+
+    // Of the paths the update touches, the ones where the working tree is not
+    // yet what upstream has. Ignored and untracked files are asked for: a path
+    // the update deletes is "not yet" exactly when a file is still there.
+    let mut only = git2::DiffOptions::new();
+    only.disable_pathspec_match(true)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(true)
+        .recurse_ignored_dirs(true)
+        .ignore_submodules(true);
+    for path in &changed {
+        only.pathspec(path);
+    }
+    let Ok(pending) = repo.diff_tree_to_workdir(Some(&theirs), Some(&mut only)) else {
+        return Vec::new();
+    };
+    let pending: HashSet<PathBuf> = pending
+        .deltas()
+        .flat_map(|delta| [delta.old_file().path(), delta.new_file().path()])
+        .flatten()
+        .map(Path::to_path_buf)
+        .collect();
+    changed
+        .iter()
+        .filter(|path| !pending.contains(*path))
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+/// What to say about a tree [`half_applied`] found something in. The same
+/// words for the same files, so that a pass repeating it is not new trouble.
+fn part_way(left: &[String]) -> String {
+    let mut named = left.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if left.len() > 3 {
+        named.push_str(&format!(" and {} more", left.len() - 3));
+    }
+    format!(
+        "Part of this update is already in the working tree: {named} {} the incoming version \
+         while the branch is still on the old commit. That is what an update leaves when \
+         something stops it part-way. git lists them as changes, but they are exactly what the \
+         update brings, so nothing is lost by putting them back (`git restore <file>`, or \
+         deleting one the update adds) and updating again.",
+        if left.len() == 1 { "holds" } else { "hold" }
+    )
 }
 
 /// Counts for the summary line after a pass.
@@ -360,7 +781,11 @@ fn behind(repo: &Repository) -> Option<usize> {
 pub struct Summary {
     pub fetched: usize,
     pub behind: usize,
+    pub updated: usize,
     pub skipped: usize,
+    /// Fetched, but not fast-forwarded where that was asked for, or found
+    /// holding what an earlier update left part-way.
+    pub refused: usize,
     pub failed: usize,
     /// Why repositories were passed over, so the summary can say rather than
     /// leave the user to guess which of their repos was left alone and why.
@@ -375,9 +800,20 @@ impl Summary {
                 self.fetched += 1;
                 self.behind += 1;
             }
+            Outcome::FastForwarded(_) => {
+                self.fetched += 1;
+                self.updated += 1;
+            }
             Outcome::Skipped(skip) => {
+                if skip.after_fetch() {
+                    self.fetched += 1;
+                }
                 self.skipped += 1;
                 *self.skips.entry(skip.reason()).or_insert(0) += 1;
+            }
+            Outcome::Refused(_) => {
+                self.fetched += 1;
+                self.refused += 1;
             }
             Outcome::Failed(_) => self.failed += 1,
         }
@@ -385,6 +821,9 @@ impl Summary {
 
     pub fn line(&self) -> String {
         let mut parts = vec![format!("{} fetched", self.fetched)];
+        if self.updated > 0 {
+            parts.push(format!("{} updated", self.updated));
+        }
         if self.behind > 0 {
             parts.push(format!("{} behind", self.behind));
         }
@@ -396,6 +835,9 @@ impl Summary {
                 .collect::<Vec<_>>()
                 .join(", ");
             parts.push(format!("{} skipped ({reasons})", self.skipped));
+        }
+        if self.refused > 0 {
+            parts.push(format!("{} with an update left part-way", self.refused));
         }
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
@@ -414,6 +856,7 @@ mod tests {
 
     fn options(pass: Pass) -> Options {
         Options {
+            fast_forward: false,
             max_parallel: 1,
             timeout: Duration::from_secs(30),
             pass,
@@ -1086,5 +1529,653 @@ mod tests {
 
         assert!(matches!(report.outcome, Outcome::Behind(1)), "{:?}", report.outcome);
         assert!(report.fetched);
+    }
+
+    // ---- `p`, and only `p`, fast-forwards --------------------------------
+
+    /// What `p` on this repository's card does: fetch, and fast-forward.
+    fn update_report(dir: &Path) -> Report {
+        refresh_one(dir, &Options { fast_forward: true, ..options(Pass::One) })
+    }
+
+    fn update(f: &Fleet) -> Outcome {
+        update_report(&f.work).outcome
+    }
+
+    /// Whether this runs as root, as the tests do in CI's container. Root can
+    /// write into a directory that is not writable, and the tests of an update
+    /// that stops part-way need one that stops it.
+    fn as_root() -> bool {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    /// The timer and `Ctrl+Shift+R` fetch, and nothing else, even handed the
+    /// option to do more.
+    #[test]
+    fn a_pass_across_the_fleet_never_fast_forwards() {
+        let _guard = isolate();
+        let f = fleet("refresh-fleet-never-updates");
+        let before = f.head();
+        f.remote_moves(2);
+        let asked = Options { fast_forward: true, ..options(Pass::Fleet) };
+        let got = refresh_one(&f.work, &asked).outcome;
+        assert!(matches!(got, Outcome::Behind(2)), "{got:?}");
+        assert_eq!(f.head(), before);
+    }
+
+    /// Where `p` will not update, it has still fetched, and "behind" is true.
+    #[test]
+    fn p_fetches_even_where_it_does_not_update() {
+        let _guard = isolate();
+        let f = fleet("refresh-p-fetches");
+        write(&f.work.join("README.md"), "my edit\n");
+        f.remote_moves(1);
+        let report = update_report(&f.work);
+        assert!(matches!(report.outcome, Outcome::Skipped(Skip::Dirty)), "{:?}", report.outcome);
+        assert!(report.fetched);
+        assert_eq!(origin_main(&f.work), f.remote_ref("refs/heads/main"));
+    }
+
+    #[test]
+    fn a_clean_branch_that_is_behind_is_fast_forwarded() {
+        let _guard = isolate();
+        let f = fleet("refresh-ff");
+        f.remote_moves(3);
+        assert!(matches!(update(&f), Outcome::FastForwarded(3)));
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+
+
+    #[test]
+    fn an_unstaged_edit_holds_the_repository_back_and_survives() {
+        let _guard = isolate();
+        let f = fleet("refresh-dirty-unstaged");
+        let before = f.head();
+        write(&f.work.join("README.md"), "my edit\n");
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+        assert_eq!(f.head(), before);
+        assert_eq!(read(&f.work.join("README.md")), "my edit\n");
+    }
+
+    #[test]
+    fn a_staged_edit_holds_the_repository_back() {
+        let _guard = isolate();
+        let f = fleet("refresh-dirty-staged");
+        let before = f.head();
+        write(&f.work.join("README.md"), "my edit\n");
+        git(&f.work, &["add", "README.md"]);
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+        assert_eq!(f.head(), before);
+    }
+
+    #[test]
+    fn untracked_files_do_not_hold_it_back() {
+        let _guard = isolate();
+        let f = fleet("refresh-untracked");
+        write(&f.work.join("notes.txt"), "mine\n");
+        f.remote_moves(1);
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        assert_eq!(read(&f.work.join("notes.txt")), "mine\n");
+    }
+
+    #[test]
+    fn an_untracked_file_in_the_way_is_never_overwritten() {
+        let _guard = isolate();
+        let f = fleet("refresh-untracked-collision");
+        let before = f.head();
+        // The remote is about to add a file of this name.
+        write(&f.work.join("upstream-0.txt"), "MY UNTRACKED WORK\n");
+        f.remote_moves(1);
+        let got = update(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("upstream-0.txt"), "git's refusal should name the file: {why}");
+        assert_eq!(f.head(), before);
+        assert_eq!(read(&f.work.join("upstream-0.txt")), "MY UNTRACKED WORK\n");
+    }
+
+    #[test]
+    fn commits_of_its_own_are_never_merged() {
+        let _guard = isolate();
+        let f = fleet("refresh-diverged");
+        commit_file(&f.work, "mine.txt", "mine\n", "local work");
+        let before = f.head();
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Diverged)), "{got:?}");
+        assert_eq!(f.head(), before);
+    }
+
+    /// Reasons not to update, and so asked after the fetch: `p` on such a
+    /// repository fetches it all the same.
+    #[test]
+    fn detached_no_upstream_and_mid_merge_are_left_alone() {
+        let _guard = isolate();
+
+        let f = fleet("refresh-detached");
+        git(&f.work, &["checkout", "-q", "--detach"]);
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Detached)), "{got:?}");
+
+        let f = fleet("refresh-no-upstream");
+        git(&f.work, &["checkout", "-q", "-b", "local-only"]);
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::NoUpstream)), "{got:?}");
+
+        let f = fleet("refresh-mid-merge");
+        git(&f.work, &["checkout", "-q", "-b", "side"]);
+        commit_file(&f.work, "README.md", "side\n", "side");
+        git(&f.work, &["checkout", "-q", "main"]);
+        commit_file(&f.work, "README.md", "main\n", "main");
+        let (merged, _) = try_git(&f.work, &["merge", "side"]);
+        assert!(!merged, "the fixture needs a conflicted merge in progress");
+        let before = f.head();
+        f.remote_moves(1);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Busy)), "{got:?}");
+        assert_eq!(f.head(), before);
+    }
+
+
+    // ---- ignored files: git overwrites them unless told not to ------------
+
+    #[test]
+    fn an_ignored_file_in_the_way_is_never_overwritten() {
+        let _guard = isolate();
+        let f = fleet("refresh-ignored-collision");
+        // Everybody ignores .env and local/, as a tracked .gitignore says.
+        f.remote_commits("ignore what is local", |seed| {
+            write(&seed.join(".gitignore"), ".env\nlocal/\n");
+        });
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        write(&f.work.join(".env"), "KEY=the only copy\n");
+        write(&f.work.join("local/notes.md"), "mine\n");
+        let before = f.head();
+
+        // Then somebody starts tracking a .env, and puts a file where the
+        // ignored directory is.
+        f.remote_commits("track .env", |seed| {
+            write(&seed.join(".env"), "KEY=upstream\n");
+            write(&seed.join("local"), "a file now\n");
+        });
+
+        let got = update(&f);
+        assert_eq!(read(&f.work.join(".env")), "KEY=the only copy\n", "{got:?}");
+        assert_eq!(read(&f.work.join("local/notes.md")), "mine\n", "{got:?}");
+        assert_eq!(f.head(), before);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(
+            why.contains(".env") || why.contains("local"),
+            "git's refusal should name what is in the way: {why}"
+        );
+
+        // And not the second time either.
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Refused(_)), "{got:?}");
+        assert_eq!(read(&f.work.join(".env")), "KEY=the only copy\n");
+    }
+
+    #[test]
+    fn a_path_ignored_only_in_this_clone_is_not_overwritten_either() {
+        let _guard = isolate();
+        let f = fleet("refresh-excluded-collision");
+        write(&f.work.join(".git/info/exclude"), ".vscode/\n");
+        write(&f.work.join(".vscode/settings.json"), "{ \"mine\": true }\n");
+        let before = f.head();
+        f.remote_commits("share editor settings", |seed| {
+            write(&seed.join(".vscode/settings.json"), "{ \"team\": true }\n");
+        });
+
+        let got = update(&f);
+        assert_eq!(read(&f.work.join(".vscode/settings.json")), "{ \"mine\": true }\n", "{got:?}");
+        assert!(matches!(got, Outcome::Refused(_)), "{got:?}");
+        assert_eq!(f.head(), before);
+    }
+
+    #[test]
+    fn an_ignored_file_out_of_the_way_does_not_stop_the_update() {
+        let _guard = isolate();
+        let f = fleet("refresh-ignored-bystander");
+        f.remote_commits("ignore .env", |seed| write(&seed.join(".gitignore"), ".env\n"));
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        write(&f.work.join(".env"), "KEY=mine\n");
+        f.remote_moves(2);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::FastForwarded(2)), "{got:?}");
+        assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
+    }
+
+
+    // ---- an update lands in the repository's own directory or nowhere ------
+
+    #[test]
+    fn a_fast_forward_never_lands_in_another_directory() {
+        let _guard = isolate();
+        let f = fleet("refresh-redirect");
+        let elsewhere = scratch("refresh-redirect-victim");
+        write(&elsewhere.join("README.md"), "the other directory's own file\n");
+        git(&f.work, &["config", "core.worktree", elsewhere.to_str().unwrap()]);
+        f.remote_commits("a payload", |seed| {
+            write(&seed.join("README.md"), "overwritten\n");
+            write(&seed.join(".config/autostart/payload.desktop"), "[Desktop Entry]\n");
+        });
+
+        for pass in [Pass::One] {
+            let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
+            assert!(matches!(got, Outcome::Skipped(Skip::Elsewhere)), "{pass:?}: {got:?}");
+        }
+        assert_eq!(read(&elsewhere.join("README.md")), "the other directory's own file\n");
+        assert!(!elsewhere.join(".config").exists(), "files were written outside the repository");
+    }
+
+
+    // ---- a fast-forward is not stopped half-way ---------------------------
+
+    /// Upstream adds files that pass through a slow filter on checkout: the
+    /// stand-in for git-lfs fetching objects, or a cold disk. The pass's
+    /// timeout is shorter than the checkout takes.
+    #[test]
+    fn a_slow_checkout_is_waited_for_not_cut_off_by_the_fetch_timeout() {
+        let _guard = isolate();
+        let f = fleet("refresh-slow-checkout");
+        f.remote_commits("binaries", |seed| {
+            write(&seed.join(".gitattributes"), "*.bin filter=slow\n");
+            for i in 0..3 {
+                write(&seed.join(format!("big-{i}.bin")), "payload\n");
+            }
+        });
+        git(&f.work, &["config", "filter.slow.smudge", "sh -c 'sleep 1; cat'"]);
+        git(&f.work, &["config", "filter.slow.clean", "cat"]);
+
+        let hurried = Options { fast_forward: true, timeout: Duration::from_secs(1), ..options(Pass::One) };
+        let got = refresh_one(&f.work, &hurried).outcome;
+
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+        assert!(!f.work.join(".git/index.lock").exists());
+        assert_eq!(git(&f.work, &["status", "--porcelain"]), "", "a half-updated tree");
+    }
+
+
+    // ---- an update the user asked for runs what their own pull would ------
+
+    /// A clone whose hooks live in the tree, and an upstream commit that adds
+    /// a post-merge hook leaving a marker behind.
+    fn hook_arrives(name: &str) -> (Fleet, PathBuf) {
+        let f = fleet(name);
+        git(&f.work, &["config", "core.hooksPath", ".githooks"]);
+        let marker = f.root.join("HOOK-RAN");
+        let script = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
+        f.remote_commits("add a post-merge hook", |seed| {
+            let hook = seed.join(".githooks/post-merge");
+            write(&hook, &script);
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        });
+        (f, marker)
+    }
+
+
+
+    #[test]
+    fn a_hook_runs_when_the_user_asks_for_the_update() {
+        let _guard = isolate();
+        let (f, marker) = hook_arrives("refresh-hook-asked");
+        let got = update(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert!(marker.exists(), "their own pull would have run it, so this does too");
+    }
+
+
+    // ---- a fast-forward is one, whatever the merge settings say -----------
+
+    /// Each of these makes `git merge --ff-only` do something that is not a
+    /// fast-forward and exit 0: a merge commit that throws upstream's changes
+    /// away, or upstream's whole diff staged with the branch left where it
+    /// was. Each was reported as "updated".
+    #[test]
+    fn merge_settings_cannot_turn_the_fast_forward_into_something_else() {
+        let _guard = isolate();
+        let mut wrong = Vec::new();
+        for (name, key, value) in [
+            ("ours", "branch.main.mergeoptions", "-s ours"),
+            ("subtree", "branch.main.mergeoptions", "-s subtree"),
+            ("squash", "branch.main.mergeoptions", "--squash"),
+            ("twohead", "pull.twohead", "ours"),
+        ] {
+            for pass in [Pass::One] {
+                let f = fleet(&format!("rf-merge-config-{name}-{pass:?}"));
+                git(&f.work, &["config", key, value]);
+                f.remote_commits("an edit and a new file", |seed| {
+                    write(&seed.join("README.md"), "two\n");
+                    write(&seed.join("added.txt"), "new\n");
+                });
+
+                let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
+
+                let fast_forwarded = matches!(got, Outcome::FastForwarded(1))
+                    && f.head() == f.remote_ref("refs/heads/main")
+                    && git(&f.work, &["status", "--porcelain"]).is_empty()
+                    && read(&f.work.join("README.md")) == "two\n";
+                if !fast_forwarded {
+                    wrong.push(format!(
+                        "{name}, {pass:?}: {got:?}, then `{}` and status `{}`",
+                        git(&f.work, &["log", "--format=%s", "-1"]),
+                        git(&f.work, &["status", "--porcelain"])
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "not a fast-forward:\n{}", wrong.join("\n"));
+    }
+
+    /// The module promises never to stash. `merge.autoStash` was switched off
+    /// for that; the same request in a branch's own merge options was not.
+    /// And `p` leaves a repository with work in it alone before git is asked.
+    #[test]
+    fn a_branch_that_asks_for_autostash_is_not_stashed_around() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-autostash");
+        git(&f.work, &["config", "branch.main.mergeoptions", "--autostash"]);
+        let before = f.head();
+        write(&f.work.join("README.md"), "my edit\n");
+        f.remote_commits("their edit to the same file", |seed| {
+            write(&seed.join("README.md"), "their edit\n");
+        });
+
+        let got = update(&f);
+
+        assert_eq!(read(&f.work.join("README.md")), "my edit\n", "{got:?}");
+        assert_eq!(git(&f.work, &["stash", "list"]), "", "{got:?}");
+        assert_eq!(f.head(), before, "{got:?}");
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+    }
+
+    /// Setting a branch's merge options aside must not set aside a refusal
+    /// the user asked for.
+    #[test]
+    fn a_branch_that_insists_on_signed_commits_still_does() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-signed");
+        git(&f.work, &["config", "branch.main.mergeoptions", "--verify-signatures"]);
+        let before = f.head();
+        f.remote_moves(1);
+
+        let got = update(&f);
+
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("signature"), "{why}");
+        assert_eq!(f.head(), before);
+    }
+
+    /// `-c branch.<name>.mergeoptions=` is how the options are set aside, and
+    /// it cannot be spelled for a branch with `=` in its name: git reads the
+    /// key as ending at the first one.
+    #[test]
+    fn merge_options_that_cannot_be_set_aside_stop_the_update() {
+        let _guard = isolate();
+        let f = fleet("rf-merge-config-equals");
+        git(&f.work, &["branch", "-m", "main", "rel=1"]);
+        git(&f.work, &["config", "branch.rel=1.mergeoptions", "-s ours"]);
+        let before = f.head();
+        f.remote_moves(1);
+
+        for pass in [Pass::One] {
+            let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
+            let Outcome::Refused(why) = &got else { panic!("{pass:?}: {got:?}") };
+            assert!(why.contains("mergeoptions"), "{pass:?}: {why}");
+            assert_eq!(f.head(), before, "{pass:?}");
+        }
+
+        // Without options of its own, a branch named like that is updated
+        // like any other.
+        git(&f.work, &["config", "--unset", "branch.rel=1.mergeoptions"]);
+        let got = update(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// The last line of defence, for whatever the switches above do not
+    /// cover: exit 0 is not what "fast-forwarded" means.
+    #[test]
+    fn success_is_believed_only_when_the_branch_is_at_its_upstream() {
+        let _guard = isolate();
+        let f = fleet("rf-landed");
+        f.remote_moves(2);
+        git(&f.work, &["fetch", "-q"]);
+        let upstream = git2::Oid::from_str(&f.remote_ref("refs/heads/main")).unwrap();
+
+        let said = landed(&f.work, upstream).unwrap_err();
+        assert!(said.contains(&f.head()[..7]), "it should say where the branch is: {said}");
+
+        git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
+        assert_eq!(landed(&f.work, upstream), Ok(()));
+    }
+
+
+    // ---- an update that stops part-way -----------------------------------
+
+    /// A directory nothing can be written into, the way a container running
+    /// as root or a code generator leaves one, for as long as this lives.
+    struct ReadOnly(PathBuf);
+
+    impl ReadOnly {
+        fn new(dir: PathBuf) -> Self {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            ReadOnly(dir)
+        }
+    }
+
+    impl Drop for ReadOnly {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A clone whose next update changes a file in each of three directories
+    /// and adds a fourth file.
+    fn four_files_incoming(name: &str) -> Fleet {
+        let f = fleet(name);
+        f.remote_commits("lay the tree out", |seed| {
+            write(&seed.join("a/one.txt"), "one\n");
+            write(&seed.join("docs/guide.md"), "guide\n");
+            write(&seed.join("z/last.txt"), "last\n");
+        });
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        f.remote_commits("change all three and add one", |seed| {
+            write(&seed.join("a/one.txt"), "one, upstream\n");
+            write(&seed.join("a/added.txt"), "added upstream\n");
+            write(&seed.join("docs/guide.md"), "guide, upstream\n");
+            write(&seed.join("z/last.txt"), "last, upstream\n");
+        });
+        f
+    }
+
+    fn names_what_was_left(why: &str) -> bool {
+        ["a/one.txt", "a/added.txt", "z/last.txt"].iter().all(|file| why.contains(file))
+    }
+
+    /// git's checkout is not a transaction. When one path cannot be written it
+    /// has already written others, and it exits without moving the branch.
+    #[test]
+    fn an_update_that_stops_part_way_says_what_it_left_behind() {
+        let _guard = isolate();
+        if as_root() {
+            return;
+        }
+        for pass in [Pass::One] {
+            let f = four_files_incoming(&format!("rf-part-way-{pass:?}"));
+            let before = f.head();
+            let locked = ReadOnly::new(f.work.join("docs"));
+
+            let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
+
+            drop(locked);
+            assert_eq!(f.head(), before, "{pass:?}: {got:?}");
+            assert_eq!(read(&f.work.join("a/one.txt")), "one, upstream\n", "the fixture: {got:?}");
+            let Outcome::Refused(why) = &got else { panic!("{pass:?}: {got:?}") };
+            assert!(why.contains("docs/guide.md"), "{pass:?}: git's own reason: {why}");
+            assert!(names_what_was_left(why), "{pass:?}: and what it left: {why}");
+        }
+    }
+
+    /// The pass after that finds a dirty tree, and used to say so: "left
+    /// alone: uncommitted changes", about a repository nobody had edited. That
+    /// report also cleared the record of the one before it.
+    #[test]
+    fn what_an_update_left_behind_is_not_then_called_the_users_changes() {
+        let _guard = isolate();
+        if as_root() {
+            return;
+        }
+        let f = four_files_incoming("rf-part-way-after");
+        let before = f.head();
+        let locked = ReadOnly::new(f.work.join("docs"));
+        let first = update(&f);
+        drop(locked);
+        assert!(matches!(first, Outcome::Refused(_)), "{first:?}");
+
+        // On a pass across the fleet, asked to update or not (it does not
+        // update), and when the user fetches it by hand.
+        let mut said = Vec::new();
+        let later = [(true, Pass::Fleet), (false, Pass::Fleet), (false, Pass::One)];
+        for (fast_forward, pass) in later {
+            let got = refresh_one(&f.work, &Options { fast_forward, ..options(pass) }).outcome;
+            let Outcome::Refused(why) = got else { panic!("{fast_forward} {pass:?}: {got:?}") };
+            assert!(names_what_was_left(&why), "{fast_forward} {pass:?}: {why}");
+            said.push(why);
+        }
+        // The same words every time: only new trouble raises a toast.
+        assert!(said.iter().all(|why| *why == said[0]), "{said:?}");
+
+        // Asked to update it, it is left alone, since it is not clean, and
+        // the answer says whose the changes are.
+        let got = update(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(names_what_was_left(why), "{why}");
+        assert_eq!(f.head(), before);
+
+        // The way out the message gives is the one that works.
+        git(&f.work, &["restore", "a/one.txt", "z/last.txt"]);
+        std::fs::remove_file(f.work.join("a/added.txt")).unwrap();
+        let got = update(&f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
+    }
+
+    /// An update that only adds files leaves nothing "modified" behind it,
+    /// only files git calls untracked, and the tree does not even look dirty.
+    /// The next attempt is then refused over a file "in the way" that the
+    /// attempt before it put there.
+    #[test]
+    fn a_file_an_update_added_before_it_stopped_is_recognised_as_its_own() {
+        let _guard = isolate();
+        if as_root() {
+            return;
+        }
+        let f = fleet("rf-part-way-added");
+        f.remote_commits("somewhere for the docs", |seed| {
+            write(&seed.join("docs/index.md"), "index\n");
+        });
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        let before = f.head();
+        f.remote_commits("two new files", |seed| {
+            write(&seed.join("a/new.txt"), "new\n");
+            write(&seed.join("docs/new.md"), "new\n");
+        });
+        let locked = ReadOnly::new(f.work.join("docs"));
+        let first = update(&f);
+        drop(locked);
+        let Outcome::Refused(why) = &first else { panic!("{first:?}") };
+        assert!(why.contains("docs/new.md"), "git's own reason: {why}");
+        assert!(why.contains("a/new.txt holds the incoming version"), "{why}");
+
+        let got = update(&f);
+        let Outcome::Refused(why) = &got else { panic!("{got:?}") };
+        assert!(why.contains("would be overwritten"), "git's own reason: {why}");
+        assert!(why.contains("a/new.txt holds the incoming version"), "{why}");
+        assert_eq!(f.head(), before);
+    }
+
+    /// Changes that are the user's own are still theirs, and still reported
+    /// as such, including beside something an update left.
+    #[test]
+    fn an_edit_of_the_users_own_is_never_mistaken_for_a_leftover() {
+        let _guard = isolate();
+        let f = four_files_incoming("rf-part-way-not");
+        write(&f.work.join("a/one.txt"), "one, mine\n");
+        write(&f.work.join("notes.txt"), "mine\n");
+
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+        let got = refresh_one(&f.work, &Options { fast_forward: false, ..options(Pass::Fleet) }).outcome;
+        assert!(matches!(got, Outcome::Behind(1)), "{got:?}");
+
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+        assert_eq!(read(&f.work.join("a/one.txt")), "one, mine\n");
+
+        // An update that takes files away, one of them tracked although it is
+        // ignored: a file still there is not "already what upstream has".
+        let f = fleet("rf-part-way-not-deleted");
+        f.remote_commits("a log that got committed", |seed| {
+            write(&seed.join(".gitignore"), "*.log\n");
+            write(&seed.join("build.log"), "noise\n");
+            write(&seed.join("old.txt"), "old\n");
+        });
+        assert!(matches!(update(&f), Outcome::FastForwarded(1)));
+        f.remote_commits("take them out", |seed| {
+            std::fs::remove_file(seed.join("build.log")).unwrap();
+            std::fs::remove_file(seed.join("old.txt")).unwrap();
+        });
+        write(&f.work.join("README.md"), "my edit\n");
+        let got = update(&f);
+        assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
+    }
+
+
+    /// `git merge` moves a submodule's pointer and leaves its checkout where
+    /// it was. The pass said "updated", the card said "clean", `git status`
+    /// said modified, and the build ran new code against the old library.
+    #[test]
+    fn an_update_that_moves_a_checked_out_submodule_is_left_to_the_user() {
+        let _guard = isolate();
+        for pass in [Pass::One] {
+            let v = vendored(&format!("rf-submodule-update-{pass:?}"));
+            let before = v.f.head();
+            v.pointer_moves();
+
+            let got = refresh_one(&v.f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
+
+            assert_eq!(git(&v.f.work, &["status", "--porcelain"]), "", "{pass:?}: {got:?}");
+            assert!(matches!(got, Outcome::Skipped(Skip::Submodule)), "{pass:?}: {got:?}");
+            assert_eq!(v.f.head(), before, "{pass:?}");
+        }
+    }
+
+    /// Only that. An update that leaves the pointer alone goes through, and
+    /// so does one that moves it where the submodule was never checked out:
+    /// there is no checkout to leave behind.
+    #[test]
+    fn a_submodule_holds_back_only_the_update_that_would_strand_it() {
+        let _guard = isolate();
+        let v = vendored("rf-submodule-bystander");
+        v.f.remote_moves(1);
+        let got = update(&v.f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+
+        let v = vendored("rf-submodule-absent");
+        git(&v.f.work, &["submodule", "--quiet", "deinit", "-f", "vendor/lib"]);
+        v.pointer_moves();
+        let got = update(&v.f);
+        assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
+        assert_eq!(v.f.head(), v.f.remote_ref("refs/heads/main"));
+        assert_eq!(git(&v.f.work, &["status", "--porcelain"]), "");
     }
 }

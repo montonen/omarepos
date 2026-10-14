@@ -504,10 +504,20 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
                 return glib::Propagation::Stop;
             }
 
+            // `p` as lazygit means it: fetch, and fast-forward the branch if
+            // the repository is clean and the branch only behind. The one
+            // thing here that changes a working tree, and only when asked.
+            if key == gdk::Key::p && ui::unmodified(state) {
+                if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
+                    nav.fetch_one(path, true, None);
+                }
+                return glib::Propagation::Stop;
+            }
+
             // `f` fetches. It moves no branch and touches no file.
             if key == gdk::Key::f && ui::unmodified(state) {
                 if let Some(path) = nav.focused_repo().filter(|_| presses.first(key)) {
-                    nav.fetch_one(path, None);
+                    nav.fetch_one(path, false, None);
                 }
                 return glib::Propagation::Stop;
             }
@@ -1883,6 +1893,8 @@ impl Ui {
         let rx = refresh::spawn(
             repos,
             refresh::Options {
+                // A pass across the fleet fetches, and nothing else.
+                fast_forward: false,
                 max_parallel: settings.max_parallel,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
                 // Nobody picked these one by one, whether the timer started
@@ -2847,7 +2859,7 @@ impl Ui {
         let on_fetch: Rc<dyn Fn(Rc<dyn Fn(bool)>)> = {
             let ui = Rc::clone(self);
             let path = path.to_path_buf();
-            Rc::new(move |done| ui.fetch_one(path.clone(), Some(done)))
+            Rc::new(move |done| ui.fetch_one(path.clone(), false, Some(done)))
         };
         ui::graph::Host {
             detail_open,
@@ -2866,11 +2878,16 @@ impl Ui {
         }
     }
 
-    /// Fetch one repository, saying what happened: the pass the timer runs,
-    /// narrowed to the repository in hand. The card's `f` comes here, and so
-    /// does a graph page's, which hands in `done` to hear whether the remote
-    /// was reached.
-    fn fetch_one(self: &Rc<Self>, path: PathBuf, done: Option<Rc<dyn Fn(bool)>>) {
+    /// Fetch one repository, and fast-forward it too when asked, saying what
+    /// happened: the pass the timer runs, narrowed to the repository in hand.
+    /// The card's `p` and `f` come here, and so does a graph page's `f`,
+    /// which hands in `done` to hear whether the remote was reached.
+    fn fetch_one(
+        self: &Rc<Self>,
+        path: PathBuf,
+        fast_forward: bool,
+        done: Option<Rc<dyn Fn(bool)>>,
+    ) {
         if self.refreshing.get() || self.scanning.get() {
             self.toasts
                 .add_toast(ui::toast("Already busy: a scan or a fetch is under way"));
@@ -2896,6 +2913,7 @@ impl Ui {
         let rx = refresh::spawn(
             vec![path.clone()],
             refresh::Options {
+                fast_forward,
                 max_parallel: 1,
                 timeout: std::time::Duration::from_secs(settings.timeout_seconds.clamp(5, 600)),
                 pass: refresh::Pass::One,

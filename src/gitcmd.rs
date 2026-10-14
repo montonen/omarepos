@@ -1,11 +1,12 @@
 //! Running `git` itself.
 //!
-//! One command is run from here, a fetch, and it goes through `git` rather
-//! than through libgit2. libgit2 does not read the credential helpers, the
-//! `insteadOf` rewrites or the ssh settings a user has configured once and
-//! expects everywhere. Driving the same `git` they drive means their setup
-//! applies unchanged, and a repository they cannot fetch by hand is not one
-//! omarepos pretends it can fetch either.
+//! Two commands are run from here, a fetch and the fast-forward `p` asks
+//! for, and they go through `git` rather than through libgit2. libgit2 does
+//! not read the credential helpers, the `insteadOf` rewrites or the ssh
+//! settings a user has configured once and expects everywhere, and does not
+//! run their hooks and filters. Driving the same `git` they drive means their
+//! setup applies unchanged, and a thing they cannot do by hand is not
+//! something omarepos pretends it can do either.
 //!
 //! Two things are added to their setup, both so that nothing waits on a prompt
 //! nobody will answer: `GIT_TERMINAL_PROMPT=0`, and ssh's batch options, which
@@ -37,9 +38,9 @@ static WINDING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Held for as long as a git command is running. The application used to
 /// exit the moment its window closed, whatever git was in the middle of. The
-/// window still goes at once; the process stays until [`busy`] says no, which
-/// for a fetch that has been told to stop is a moment: long enough for git to
-/// take its lock files away.
+/// window still goes at once; the process stays until [`busy`] says no: until
+/// a fast-forward has finished, and for a fetch that has been told to stop, a
+/// moment, long enough for git to take its lock files away.
 pub struct Hold(());
 
 impl Hold {
@@ -62,7 +63,9 @@ pub fn busy() -> bool {
 
 /// Say that the application is closing, or has stopped closing. While it is,
 /// a fetch under way is stopped: it is not worth keeping a closed application
-/// alive for, up to an hour, and loses nothing by being stopped.
+/// alive for, up to an hour, and loses nothing by being stopped. A
+/// fast-forward is let finish: stopped half-way, it leaves the tree half the
+/// old commit and half the new.
 pub fn wind_down(closing: bool) {
     WINDING_DOWN.store(closing, Ordering::SeqCst);
 }
@@ -121,12 +124,10 @@ const KEEP: usize = 1 << 20;
 /// The signal goes to git's whole process group, so a hook or filter it
 /// started stops with it.
 ///
-/// Nothing the application runs is limited this way any more. Its one command
-/// is a fetch, which is given up on by silence ([`transfer`]). The tests of
-/// the runner itself still are: they use a commit and its hooks as the command
-/// that prints too much, hangs or refuses, and a commit reports no progress to
-/// go by.
-#[cfg(test)]
+/// The fast-forward `p` asks for is run this way: it says nothing as it goes,
+/// so there is no silence to go by, and it is given a long time. The tests of
+/// the runner use a commit and its hooks as the command that prints too much,
+/// hangs or refuses.
 pub fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     exec(dir, args, Limit::Whole(timeout), true)
 }
@@ -173,7 +174,6 @@ pub fn transfer_fenced(
 #[derive(Clone, Copy)]
 enum Limit {
     /// This long, start to finish, whatever it is doing.
-    #[cfg(test)]
     Whole(Duration),
     /// For as long as it keeps saying something, with no gap longer than
     /// `quiet`; and however talkative, no longer than `ceiling`.
@@ -188,7 +188,6 @@ impl Limit {
             (started.elapsed() >= limit).then(|| format!("timed out after {}s", limit.as_secs()))
         };
         match self {
-            #[cfg(test)]
             Limit::Whole(timeout) => timed_out(timeout),
             Limit::WhileTalking { quiet, ceiling } => {
                 if heard.elapsed() >= quiet {
@@ -351,7 +350,7 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
                     stop(&mut child);
                     return Err(why);
                 }
-                if winding_down() {
+                if winding_down() && talks_to_a_remote(args) {
                     stop(&mut child);
                     return Err("stopped: omarepos was closing".to_string());
                 }
@@ -938,13 +937,30 @@ mod tests {
         assert_eq!(said, "> lint-staged\nsrc/app.ts\n  12:3  error  no-unused-vars\n1 problem");
     }
     /// What the window's close handler relies on: `busy` is true for exactly
-    /// as long as a fetch runs, and a fetch under way when the application
-    /// winds down is stopped, not waited for.
+    /// as long as a command runs, a write is let finish while the application
+    /// winds down (a commit with a slow hook stands in for the fast-forward
+    /// `p` runs), and a fetch is not.
     #[test]
-    fn closing_stops_a_fetch() {
+    fn closing_waits_for_a_write_and_stops_a_fetch() {
         let _guard = isolate();
         let dir = repo("gitcmd-closing");
+        hook(&dir, "pre-commit", "sleep 1");
+        write(&dir.join("README.md"), "two\n");
+        git(&dir, &["add", "README.md"]);
         assert!(!busy());
+
+        let worker = {
+            let dir = dir.clone();
+            std::thread::spawn(move || run(&dir, &["commit", "-m", "second"], PATIENT))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(busy(), "the commit's hook is still running");
+        wind_down(true);
+        let committed = worker.join().unwrap();
+        wind_down(false);
+        assert!(committed.is_ok(), "a write is let finish: {committed:?}");
+        assert!(!busy());
+        assert_eq!(git(&dir, &["log", "-1", "--format=%s"]), "second");
 
         // A fetch from a remote that takes its time answering.
         let remote = scratch("gitcmd-closing-remote");
@@ -961,7 +977,6 @@ mod tests {
             std::thread::spawn(move || run(&dir, &["fetch", "--quiet"], PATIENT))
         };
         std::thread::sleep(Duration::from_millis(300));
-        assert!(busy(), "the fetch is still running");
         wind_down(true);
         let fetched = worker.join().unwrap();
         wind_down(false);

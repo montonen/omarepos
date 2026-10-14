@@ -10,7 +10,7 @@ The [README](../README.md) is the short version. These pages are the long one.
 | [Commit graph](commit-graph.md) | The graph, what is uncommitted, what a commit changed |
 | [Searching commits](search.md) | What is matched, and how far back |
 | [Contributions](contributions.md) | What is counted, and the all-branches view |
-| [Fetching](refresh.md) | `f`, the timer, what runs unattended and what does not, and why it runs `git` |
+| [Fetching](refresh.md) | `f`, `p`, the timer, what runs unattended and what does not, and why it runs `git` |
 | [Configuration and theme](configuration.md) | `config.toml`, and how the Omarchy theme is used |
-| [Read-only](read-only.md) | What is read, the one thing that is done to a repository, and what omarepos keeps for itself |
+| [What it changes](read-only.md) | What is read, what a fetch and `p` change, and what omarepos keeps for itself |
 | [Development](development.md) | Building, the tests, the walk, the source layout, how the README's pictures are taken |
