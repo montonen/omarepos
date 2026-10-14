@@ -67,8 +67,9 @@ The filter has the keyboard when the window opens, and the launcher key brings
 an open window back with the keyboard there again, unless a commit graph is in
 front. Type a few letters of a name, a path, a branch or
 a remote; `tag:work` and `lang:rust` narrow by tag and by language; `Enter`
-opens the top hit. With up to five tags, each has a button in the header. The
-warning triangle keeps only the repositories that need something.
+opens the top hit. With up to five tags, each has a button in the header: a
+click shows that tag alone, and Ctrl+click adds another. The warning triangle
+keeps only the repositories that need something.
 
 ### One repository
 

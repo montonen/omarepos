@@ -107,7 +107,11 @@ live in `~/.config/omarepos/repos.toml`, keyed by absolute path.
 - Editing several at once only replaces the tags they have *in common*; tags
   unique to one of them survive.
 - With up to five tags, each has a button of its own in the header — one click
-  to filter instead of three, and in the colour its dot has on the cards. With
+  to filter instead of three, and in the colour its dot has on the cards. A
+  click shows the repositories with that tag and no others, the next click on
+  another tag shows that one instead, and a click on the tag already shown
+  shows everything again. `Ctrl`+click adds a tag to the ones shown, or takes
+  it away, for more than one at a time. With
   more than five the **Tags** menu lists them instead. The header gives the
   buttons up on a window too narrow for them (how narrow depends on how long
   the names are), and the menu lists the tags then as well. Buttons and counts

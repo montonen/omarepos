@@ -2095,24 +2095,28 @@ impl Ui {
             let button = gtk::ToggleButton::builder().child(&content).build();
             button.add_css_class("om-quick-tag");
             button.set_tooltip_text(Some(&format!(
-                "{count} {}",
+                "{count} {}. Click to see this tag alone, Ctrl+click to add it or take it away.",
                 if *count == 1 { "repository" } else { "repositories" }
             )));
 
+            // A click, and not a toggle: the button has flipped by the time
+            // this runs, and what it flipped to is not the answer. What the
+            // filter becomes is worked out from what it was, and every
+            // button, this one too, is then set from that by the rebuild.
             let ui = Rc::clone(self);
             let key = tag.to_lowercase();
-            button.connect_toggled(move |button| {
+            button.connect_clicked(move |button| {
                 if ui.tag_syncing.get() {
                     return;
                 }
-                {
-                    let mut filter = ui.tag_filter.borrow_mut();
-                    if button.is_active() {
-                        filter.insert(key.clone());
-                    } else {
-                        filter.remove(&key);
-                    }
-                }
+                let (chosen, untagged) = after_tag_click(
+                    &ui.tag_filter.borrow(),
+                    ui.untagged_only.get(),
+                    &key,
+                    ctrl_held(button),
+                );
+                *ui.tag_filter.borrow_mut() = chosen;
+                ui.untagged_only.set(untagged);
                 ui.rebuild();
             });
 
@@ -3139,6 +3143,49 @@ fn noun(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
+/// What the tag buttons filter by once `tag`'s has been clicked: the tags to
+/// show and whether "untagged only" stays on.
+///
+/// One tag at a time is the common case, so a click shows that tag and no
+/// other, and a second click on it, shown alone, shows everything again. They
+/// used to be switches each, and looking at one tag after another took a
+/// click to turn the last one off every time. With Ctrl held a click adds the
+/// tag to the ones shown, or takes it away, and leaves the rest alone.
+fn after_tag_click(
+    chosen: &BTreeSet<String>,
+    untagged: bool,
+    tag: &str,
+    add: bool,
+) -> (BTreeSet<String>, bool) {
+    let mut next = chosen.clone();
+    if add {
+        if !next.remove(tag) {
+            next.insert(tag.to_string());
+        }
+        return (next, untagged);
+    }
+    let alone = chosen.len() == 1 && chosen.contains(tag) && !untagged;
+    next.clear();
+    if !alone {
+        next.insert(tag.to_string());
+    }
+    (next, false)
+}
+
+/// Whether Ctrl is held down, on the keyboard of the display `widget` is on.
+fn ctrl_held(widget: &impl IsA<gtk::Widget>) -> bool {
+    // A driven window is sent no keys, so the driver says it outright.
+    #[cfg(debug_assertions)]
+    if let Some(held) = ui::debug::ctrl_held() {
+        return held;
+    }
+    widget
+        .display()
+        .default_seat()
+        .and_then(|seat| seat.keyboard())
+        .is_some_and(|keyboard| keyboard.modifier_state().contains(gdk::ModifierType::CONTROL_MASK))
+}
+
 /// Whether a pointer last seen at `was` and now at `at`, both in the window,
 /// has been moved. By a few pixels: where it is comes through a float each
 /// way, so the same place does not always come back as the same number, and
@@ -3255,6 +3302,31 @@ fn now_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A click on a tag shows it alone, again shows everything; Ctrl+click
+    /// adds to what is shown or takes from it.
+    #[test]
+    fn a_tag_click_switches_and_a_ctrl_click_adds() {
+        let set = |tags: &[&str]| tags.iter().map(|t| t.to_string()).collect::<BTreeSet<_>>();
+        let none = set(&[]);
+
+        // From nothing: that tag.
+        assert_eq!(after_tag_click(&none, false, "work", false), (set(&["work"]), false));
+        // Another: that one instead, not both.
+        assert_eq!(after_tag_click(&set(&["work"]), false, "side", false), (set(&["side"]), false));
+        // The one shown, again: everything.
+        assert_eq!(after_tag_click(&set(&["work"]), false, "work", false), (none.clone(), false));
+        // One of several, plainly: that one alone, the others and "untagged
+        // only" gone with them.
+        assert_eq!(after_tag_click(&set(&["work", "side"]), true, "work", false), (set(&["work"]), false));
+        // Shown together with the untagged, it is not alone: it stays, alone.
+        assert_eq!(after_tag_click(&set(&["work"]), true, "work", false), (set(&["work"]), false));
+
+        // With Ctrl: added, and taken away again; the rest left as they were.
+        assert_eq!(after_tag_click(&set(&["work"]), true, "side", true), (set(&["work", "side"]), true));
+        assert_eq!(after_tag_click(&set(&["work", "side"]), false, "work", true), (set(&["side"]), false));
+        assert_eq!(after_tag_click(&set(&["side"]), false, "side", true), (none, false));
+    }
 
     /// GTK reports a pointer again whenever the cards move under it, from the
     /// place it was already in. Only a report from somewhere else is the

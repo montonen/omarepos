@@ -17,6 +17,20 @@
 use adw::prelude::*;
 use gtk::gio;
 
+thread_local! {
+    /// Set while `press` clicks a button it was told to click with Ctrl held
+    /// ("ctrl+" in front of what the button says), and to "not held" while
+    /// it clicks any other: the keyboard of a window nobody is using says
+    /// nothing worth going by.
+    static CTRL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether the click being handled was made with Ctrl held, when it was the
+/// driver's. `None` for a click of anybody else's.
+pub fn ctrl_held() -> Option<bool> {
+    CTRL.with(|ctrl| ctrl.get())
+}
+
 /// Whether this window is being driven by a script rather than a person.
 /// What would leave the window (a browser being opened) asks, and says what
 /// it would have done instead of doing it.
@@ -61,12 +75,17 @@ pub fn install(window: &adw::ApplicationWindow) {
     }
 
     // And a hand for the script: `press` with a string clicks the first
-    // button on screen whose label or tooltip contains it.
+    // button on screen whose label or tooltip contains it, and "ctrl+" in
+    // front clicks it with Ctrl held.
     let press = gio::SimpleAction::new("press", Some(gtk::glib::VariantTy::STRING));
     let window_weak = window.downgrade();
     press.connect_activate(move |_, wanted| {
         let Some(window) = window_weak.upgrade() else { return };
         let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (wanted, ctrl) = match wanted.strip_prefix("ctrl+") {
+            Some(rest) => (rest, true),
+            None => (wanted, false),
+        };
         // A dialog in a window that is sent no frames is never laid out,
         // and so never on screen. "!" in front reaches into it anyway.
         let (wanted, unseen) = match wanted.strip_prefix('!') {
@@ -74,7 +93,11 @@ pub fn install(window: &adw::ApplicationWindow) {
             None => (wanted, false),
         };
         match find_button(window.upcast_ref(), wanted, unseen) {
-            Some(button) if button.is_sensitive() => button.emit_clicked(),
+            Some(button) if button.is_sensitive() => {
+                CTRL.with(|held| held.set(Some(ctrl)));
+                button.emit_clicked();
+                CTRL.with(|held| held.set(None));
+            }
             Some(_) => note!("omarepos: {wanted:?} is not sensitive"),
             None => note!("omarepos: no button says {wanted:?}"),
         }

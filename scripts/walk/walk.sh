@@ -225,9 +225,26 @@ step "tag editor again, cancel" 'X press "!Tags…"; sleep 0.5; X respond cancel
 step "tag editor: empty and save" 'X press "!Tags…"; sleep 0.5; X row "Tags="; X respond save; sleep 0.6'
 step "tag the selection" 'X keys ctrl+a; X press "Tag the selected repos"; X press "!selected…"; sleep 0.5; X row "Tags=open source, a,b"; X respond save; sleep 0.6; X keys ctrl+shift+a'
 tags "JM ACME"; step "two tags: chips" "X keys ctrl+r; sleep 1.2"
+# A click shows that tag alone, Ctrl+click adds one. The dump says "[active]"
+# of a chip that is on, and its name is a label inside it, one level deeper.
+chips() { local on; on=$(X dump | awk '
+    /om-quick-tag/ { match($0, /^ */); depth = RLENGTH; on = ($0 ~ /\[active/); next }
+    on { match($0, /^ */); if (RLENGTH <= depth) { on = 0; next }
+         if (match($0, /Label "[^"]*"/)) print substr($0, RSTART + 7, RLENGTH - 8) }' \
+    | grep -xE 'JM|ACME' | sort | tr '\n' ' ')
+  [ "$on" = "$1" ] || { WRONG=$((WRONG+1)); echo "WRONG: $2: the chips on are '$on', not '$1'"; }; }
 step "chip on" 'X press "JM"'
-step "second chip on" 'X press "ACME"'
-step "chips off" 'X press "JM"; X press "ACME"'
+chips "JM " "a click on a tag did not show it"
+step "the other chip instead" 'X press "ACME"'
+chips "ACME " "a click on another tag did not switch to it"
+step "ctrl+click adds a chip" 'X press "ctrl+JM"'
+chips "ACME JM " "ctrl+click did not add a tag"
+step "a plain click on one of two" 'X press "ACME"'
+chips "ACME " "a plain click on one of two did not show it alone"
+step "the chip shown, again: off" 'X press "ACME"'
+chips "" "a click on the one tag shown did not show everything again"
+step "ctrl+click from nothing, and off again" 'X press "ctrl+ACME"; X press "ctrl+ACME"'
+chips "" "ctrl+click twice did not take the tag away again"
 step "filter by a tag, then lose the tag" 'X press "ACME"; sleep 0.3'
 tags "JM"; step "rescan with the tag gone" "X keys ctrl+r; sleep 1.2"
 
