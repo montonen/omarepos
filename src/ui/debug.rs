@@ -157,6 +157,20 @@ pub fn install(window: &adw::ApplicationWindow) {
             }
             at = widget.parent();
         }
+        // Up and Down in a list, where no handler of ours wanted them, move
+        // its cursor as GTK's own binding for them does, and what the list
+        // does at either end of itself is the page's.
+        if matches!(name, "Up" | "Down") {
+            if let Some(list) = focus
+                .as_ref()
+                .and_then(|focus| focus.ancestor(gtk::ListBox::static_type()))
+                .and_downcast::<gtk::ListBox>()
+            {
+                let count: i32 = if name == "Up" { -1 } else { 1 };
+                list.emit_by_name::<()>("move-cursor", &[&gtk::MovementStep::DisplayLines, &count, &false, &false]);
+                return;
+            }
+        }
         // Enter, where no handler of ours wanted it, is what GTK would make
         // of it: the widget's own activation (a card, an entry, a button).
         if matches!(name, "Return" | "KP_Enter") {

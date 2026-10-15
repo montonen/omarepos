@@ -222,6 +222,11 @@ step "game over" "X keys Escape; sleep 1.8"
 X dump "HIGH SCORES" | grep -q "HIGH SCORES" && { WRONG=$((WRONG+1)); echo "WRONG: Escape did not end the game"; }
 X dump "om-statusbar" | grep -q "commits" || { WRONG=$((WRONG+1)); echo "WRONG: Escape in the arcade left the Contributions page"; }
 step "an author" 'X press "Fixture"; sleep 0.4'
+# Each repository's commits are a list of their own. Down from the last of
+# the first (merges, nine commits) goes on to the first of the next (lots).
+step "an author's last commit in a repository" "X pick 0:8"
+step "down into the next repository" "X keys Down"
+X dump | grep -F "[focus]" | grep -q "Commit number" || { WRONG=$((WRONG+1)); echo "WRONG: Down from one repository's last commit did not reach the next one's first"; }
 # Setting an author aside: under the list and out of its figures, the bar
 # saying so; and back.
 step "set an author aside" 'X press "Set aside"; sleep 0.6'

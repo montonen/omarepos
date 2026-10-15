@@ -761,7 +761,7 @@ fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen, set_asi
     let revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
         .transition_duration(160)
-        .child(&commit_list(&repos, on_open))
+        .child(&commit_list(&repos, on_open, &toggle))
         .build();
     card.append(&revealer);
 
@@ -807,11 +807,13 @@ fn tooltip(author: &Author) -> String {
     tip
 }
 
-/// The author's commits, grouped by repository, busiest first.
-fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen) -> gtk::Box {
+/// The author's commits, grouped by repository, busiest first. `head` is
+/// the row they open from, which Up from the first commit goes back to.
+fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen, head: &gtk::Button) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
     list.set_margin_top(12);
     list.set_margin_start(26);
+    let mut groups: Vec<gtk::ListBox> = Vec::new();
 
     for (path, in_repo) in repos {
         let group = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -918,6 +920,7 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen) -> gtk::Box
             rows.append(&listed);
         }
         group.append(&rows);
+        groups.push(rows);
 
         if in_repo.total > commits.len() {
             let more = gtk::Label::builder()
@@ -930,6 +933,49 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen) -> gtk::Box
         }
 
         list.append(&group);
+    }
+
+    // Each repository's commits are a list of their own, and the arrow keys
+    // stopped at the end of one with a beep: the next was a Tab away. Down
+    // from the last commit of one goes on to the first of the next, Up the
+    // other way, Up from the very first back to the author, and Down from
+    // the very last on to the next author, as Tab would.
+    for (n, rows) in groups.iter().enumerate() {
+        let before = n.checked_sub(1).and_then(|before| groups.get(before)).cloned();
+        let after = groups.get(n + 1).cloned();
+        let head = head.downgrade();
+        rows.connect_keynav_failed(move |rows, direction| {
+            match direction {
+                gtk::DirectionType::Down => match after.as_ref().and_then(|next| next.row_at_index(0)) {
+                    Some(first) => {
+                        first.grab_focus();
+                    }
+                    None => {
+                        if let Some(root) = rows.root() {
+                            root.child_focus(gtk::DirectionType::TabForward);
+                        }
+                    }
+                },
+                gtk::DirectionType::Up => match before.as_ref().and_then(|last| {
+                    let mut at = 0;
+                    while last.row_at_index(at + 1).is_some() {
+                        at += 1;
+                    }
+                    last.row_at_index(at)
+                }) {
+                    Some(last) => {
+                        last.grab_focus();
+                    }
+                    None => {
+                        if let Some(head) = head.upgrade() {
+                            head.grab_focus();
+                        }
+                    }
+                },
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
     }
 
     list
