@@ -14,7 +14,6 @@ use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
 use crate::ui::arcade::{self, Arcade};
 use crate::ui::{day_window, key_color, relative_time};
 
-const RANGES: [(&str, usize); 3] = [("Last 7 days", 7), ("Last 14 days", 14), ("Last 30 days", 30)];
 /// The two views, the one there has always been first.
 const VIEWS: [(&str, Branches); 2] =
     [("Checked-out branches", Branches::CheckedOut), ("All branches", Branches::All)];
@@ -53,7 +52,7 @@ pub fn page(
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
-    let range = gtk::DropDown::from_strings(&RANGES.map(|(label, _)| label));
+    let range = gtk::DropDown::from_strings(&crate::ui::periods().map(|(label, _)| label));
     range.add_css_class("om-sort");
     range.set_tooltip_text(Some("Time window"));
     header.pack_end(&range);
@@ -154,7 +153,7 @@ pub fn page(
         let aside = Rc::clone(&aside);
         let on_open = Rc::clone(&on_open);
         Rc::new(move || {
-            let days = RANGES.get(range.selected() as usize).map_or(7, |(_, days)| *days);
+            let days = crate::ui::periods().get(range.selected() as usize).map_or(7, |(_, days)| *days);
             let branches = VIEWS
                 .get(view.selected() as usize)
                 .map_or(Branches::CheckedOut, |(_, branches)| *branches);
@@ -246,7 +245,7 @@ pub fn page(
     // it counts, and without whoever it has set aside.
     let run_race = gio::SimpleAction::new("race", None);
     {
-        let (repos, aside, view) = (Rc::clone(&repos), Rc::clone(&aside), view.clone());
+        let (repos, aside, view, range) = (Rc::clone(&repos), Rc::clone(&aside), view.clone(), range.clone());
         run_race.connect_activate(move |_, _| {
             let branches = VIEWS
                 .get(view.selected() as usize)
@@ -256,6 +255,7 @@ pub fn page(
                 scope: race_scope.clone(),
                 branches,
                 aside: aside.borrow().clone(),
+                period: range.selected(),
             });
         });
     }
@@ -367,7 +367,7 @@ impl Game {
             let on_range = {
                 let range = range.clone();
                 move |by: i32| {
-                    let ranges = RANGES.len() as i32;
+                    let ranges = crate::ui::periods().len() as i32;
                     range.set_selected((range.selected() as i32 + by).rem_euclid(ranges) as u32);
                 }
             };
@@ -454,9 +454,10 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
     let is_aside = set_aside_in(&result.authors, aside);
     let (listed, set_aside): (Vec<&Author>, Vec<&Author>) =
         result.authors.iter().partition(|author| !is_aside(author));
-    content.append(&overview(result, &Figures::of(result, &listed)));
+    let drawn = Drawn::of(result);
+    content.append(&overview(&Figures::of(result, &listed), &drawn));
     for author in &listed {
-        content.append(&author_row(author, result, on_open, false));
+        content.append(&author_row(author, result, on_open, false, &drawn));
     }
     if set_aside.is_empty() {
         return;
@@ -476,7 +477,7 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
     heading.add_css_class("om-meta");
     content.append(&heading);
     for author in &set_aside {
-        content.append(&author_row(author, result, on_open, true));
+        content.append(&author_row(author, result, on_open, true, &drawn));
     }
 }
 
@@ -623,7 +624,34 @@ fn not_counted(errors: &[String]) -> gtk::Widget {
 }
 
 /// Totals, plus a bar per day across every author.
-fn overview(result: &Contributions, figures: &Figures) -> gtk::Widget {
+/// How the days are drawn on the page: as they are, or a week or a month to
+/// a column (`ui::buckets`), and the busiest any author had one of them,
+/// which every sparkline is drawn against so that rows can be compared.
+struct Drawn {
+    buckets: Vec<crate::ui::Bucket>,
+    peak: usize,
+}
+
+impl Drawn {
+    fn of(result: &Contributions) -> Drawn {
+        let buckets = crate::ui::buckets(&result.window);
+        let peak = result
+            .authors
+            .iter()
+            .flat_map(|author| buckets.iter().map(|bucket| in_bucket(&author.per_day, bucket)))
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        Drawn { buckets, peak }
+    }
+}
+
+/// What a day-by-day count comes to over a bucket's days.
+fn in_bucket(per_day: &[usize], bucket: &crate::ui::Bucket) -> usize {
+    per_day.get(bucket.days.clone()).map_or(0, |days| days.iter().sum())
+}
+
+fn overview(figures: &Figures, drawn: &Drawn) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
     card.add_css_class("om-card");
 
@@ -650,10 +678,11 @@ fn overview(result: &Contributions, figures: &Figures) -> gtk::Widget {
     ));
     card.append(&numbers);
 
-    let peak = figures.per_day.iter().copied().max().unwrap_or(0).max(1);
+    let counts: Vec<usize> = drawn.buckets.iter().map(|bucket| in_bucket(&figures.per_day, bucket)).collect();
+    let peak = counts.iter().copied().max().unwrap_or(0).max(1);
     let days = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     days.set_homogeneous(true);
-    for (i, count) in figures.per_day.iter().enumerate() {
+    for (bucket, count) in drawn.buckets.iter().zip(&counts) {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
 
         let bar = gtk::DrawingArea::builder().content_height(BAR_H).hexpand(true).build();
@@ -679,16 +708,15 @@ fn overview(result: &Contributions, figures: &Figures) -> gtk::Widget {
         value.add_css_class("om-summary");
         column.append(&value);
 
-        let label = gtk::Label::new(result.window.day_labels.get(i).map(String::as_str));
+        let label = gtk::Label::new(Some(&bucket.label));
         label.add_css_class("om-meta");
         column.append(&label);
 
-        if let Some(title) = result.window.day_titles.get(i) {
-            column.set_tooltip_text(Some(&format!(
-                "{title} · {count} {}",
-                plural(*&count, "commit", "commits")
-            )));
-        }
+        column.set_tooltip_text(Some(&format!(
+            "{} · {count} {}",
+            bucket.title,
+            plural(count, "commit", "commits")
+        )));
         days.append(&column);
     }
     card.append(&days);
@@ -707,7 +735,13 @@ fn big_number(value: &str, caption: &str) -> gtk::Box {
     column
 }
 
-fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen, set_aside: bool) -> gtk::Widget {
+fn author_row(
+    author: &Author,
+    result: &Contributions,
+    on_open: &OnOpen,
+    set_aside: bool,
+    drawn: &Drawn,
+) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.add_css_class("om-card");
     card.add_css_class("om-stat-row");
@@ -801,7 +835,7 @@ fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen, set_asi
     counts.append(&churn);
     head.append(&counts);
 
-    head.append(&sparkline(author, result, color));
+    head.append(&sparkline(author, drawn, color));
 
     // A button rather than a click gesture, so the row can be opened from the
     // keyboard like anything else.
@@ -1076,28 +1110,30 @@ fn swatch(color: &'static str) -> gtk::DrawingArea {
 
 /// Per-day commits for one author, scaled against the busiest author-day so the
 /// strips are comparable between rows.
-fn sparkline(author: &Author, result: &Contributions, color: &'static str) -> gtk::DrawingArea {
-    let days = result.window.days();
-    let peak = result
-        .authors
-        .iter()
-        .flat_map(|a| a.per_day.iter().copied())
-        .max()
-        .unwrap_or(0)
-        .max(1);
+fn sparkline(author: &Author, drawn: &Drawn, color: &'static str) -> gtk::DrawingArea {
+    let counts: Vec<usize> = drawn.buckets.iter().map(|bucket| in_bucket(&author.per_day, bucket)).collect();
+    let peak = drawn.peak;
 
     let area = gtk::DrawingArea::builder()
-        .content_width((days as f64 * SPARK_W) as i32)
+        .content_width((counts.len() as f64 * SPARK_W) as i32)
         .content_height(30)
         .valign(gtk::Align::Center)
         .build();
 
-    let per_day = author.per_day.clone();
+    area.set_tooltip_text(Some(
+        &drawn
+            .buckets
+            .iter()
+            .zip(&counts)
+            .map(|(bucket, n)| format!("{}: {n}", bucket.title))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ));
     area.set_draw_func(move |_, cr, width, height| {
         let h = height as f64;
-        let step = width as f64 / per_day.len().max(1) as f64;
+        let step = width as f64 / counts.len().max(1) as f64;
         let (r, g, b) = crate::theme::Palette::rgb(color);
-        for (i, count) in per_day.iter().enumerate() {
+        for (i, count) in counts.iter().enumerate() {
             let x = i as f64 * step;
             cr.set_source_rgba(r, g, b, 0.10);
             cr.rectangle(x + 1.0, 0.0, step - 2.0, h);
@@ -1110,17 +1146,6 @@ fn sparkline(author: &Author, result: &Contributions, color: &'static str) -> gt
             }
         }
     });
-
-    area.set_tooltip_text(Some(
-        &result
-            .window
-            .day_titles
-            .iter()
-            .zip(author.per_day.iter())
-            .map(|(title, n)| format!("{title}: {n}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ));
     area
 }
 

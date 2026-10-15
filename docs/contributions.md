@@ -4,8 +4,11 @@
 scope it; with nothing ticked it covers whatever the grid is currently showing, so
 the filter box doubles as the repo picker.
 
-Default window is the last 7 days, with 14 and 30 in the header dropdown. Days are
-local calendar days, bucketed at local midnight.
+Default window is the last 7 days; the drop-down in the header has 14, 30 and
+90 days, this year (from the first of January) and the last 12 months. Days are
+local calendar days, bucketed at local midnight. Over 90 days the overview and
+each author's strip draw a week to a column, and over this year or the last 12
+months a month, so that a year is a dozen columns and not 365.
 
 - What is counted is each repository's checked-out branch and the branch it
   tracks, as `git shortlog HEAD @{u}` would. Other branches are left out: with
@@ -34,7 +37,8 @@ local calendar days, bucketed at local midnight.
   counted as one with no activity.
 - Merge commits count as commits but not as lines — their diffs are their parents'
   work, already counted. The per-author tooltip breaks out how many were merges.
-- Per-day strips are scaled against the busiest author-day, so rows are comparable.
+- Each author's strip is scaled against the busiest any author had a day (or a
+  week, or a month) of, so rows are comparable.
 - A row expands to the work itself: every commit, grouped by repository, with
   its sha, churn and age. `Enter` or a click on one opens that repository's
   graph on that commit. The newest 100 per repository are kept; past that the
@@ -62,8 +66,8 @@ the page as it stands when asked for: the same repositories, the same
 branches, and without whoever is set aside, so that it can be recorded with
 yourself left out. The repositories it covers are named under it.
 
-Over the last 90 days, this year (from the first of January) or the last 12
-months, by the drop-down. A race lasts 20 seconds at 1×, whatever the period,
+It opens on the period Contributions is showing, and has the same six to
+choose from. A race lasts 20 seconds at 1×, whatever the period,
 and the button beside the progress bar makes it 2× or 4×. `Space` plays and
 pauses, `←` `→` go a day back or on, and `Home` and `End` go to the start and
 the end; the progress bar can be dragged to any day. With animations turned

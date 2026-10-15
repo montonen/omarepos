@@ -107,8 +107,8 @@ come first. `Enter` opens that repository's graph on that commit. More in
 
 ![Contributions over the last seven days, by author](docs/img/contributions.png)
 
-`Ctrl+G` adds up the last 7, 14 or 30 days, across the grid or the
-repositories you ticked: commits and lines per author, and commits per day,
+`Ctrl+G` adds up the last 7 days, or as much as the last 12 months, across the
+grid or the repositories you ticked: commits and lines per author, and commits per day,
 with a mailmap honoured. A row opens to the commits themselves. A second view
 counts every branch and not only the checked-out ones, and `r` plays the
 same as a race, the authors' bars overtaking one another day by day. More in

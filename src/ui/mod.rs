@@ -415,6 +415,81 @@ pub fn absolute_time(when: i64) -> String {
 
 /// Build the day buckets for a contributions window, in the local timezone.
 /// Index 0 is the oldest day; the last entry is today.
+/// The periods Contributions and its race are read over, as their
+/// drop-downs say them, and how many days each goes back from today. The same
+/// six on both, since both read the same history. This year runs from the
+/// first of January.
+pub fn periods() -> [(&'static str, usize); 6] {
+    let this_year = gtk::glib::DateTime::now_local().map_or(365, |now| now.day_of_year().max(1) as usize);
+    [
+        ("Last 7 days", 7),
+        ("Last 14 days", 14),
+        ("Last 30 days", 30),
+        ("Last 90 days", 90),
+        ("This year", this_year),
+        ("Last 12 months", 365),
+    ]
+}
+
+/// Days drawn as one: a column of the overview, a step of a sparkline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bucket {
+    pub days: std::ops::Range<usize>,
+    /// Under its column: "Wed", "6 Oct", "Oct".
+    pub label: String,
+    /// In its tooltip: "Wed 15 Oct", "6 Oct – 12 Oct", "October 2026".
+    pub title: String,
+}
+
+/// A window's days as they are drawn: one at a time up to a month, a week at
+/// a time up to three months, and a month at a time beyond. A column a day
+/// over a year was 365 columns of the overview and a sparkline 4,000 pixels
+/// wide. Weeks run Monday to Sunday and months are the calendar's, so the
+/// first and the last can be short.
+pub fn buckets(window: &crate::stats::Window) -> Vec<Bucket> {
+    use gtk::glib::DateTime;
+    let days = window.days();
+    if days <= 31 {
+        return (0..days)
+            .map(|day| Bucket {
+                days: day..day + 1,
+                label: window.day_labels.get(day).cloned().unwrap_or_default(),
+                title: window.day_titles.get(day).cloned().unwrap_or_default(),
+            })
+            .collect();
+    }
+    let weekly = days <= 92;
+    let dates: Vec<Option<DateTime>> =
+        window.day_starts.iter().map(|start| DateTime::from_unix_local(*start).ok()).collect();
+    let group = |date: &DateTime| {
+        if weekly { (date.week_numbering_year(), date.week_of_year()) } else { (date.year(), date.month()) }
+    };
+    let said = |date: Option<&DateTime>, how: &str| {
+        date.and_then(|date| date.format(how).ok()).map(|said| said.to_string()).unwrap_or_default()
+    };
+    let mut buckets = Vec::new();
+    let mut start = 0;
+    for day in 1..=days {
+        let ends = day == days
+            || match (&dates[day - 1], &dates[day]) {
+                (Some(before), Some(now)) => group(before) != group(now),
+                _ => true,
+            };
+        if !ends {
+            continue;
+        }
+        let (first, last) = (dates[start].as_ref(), dates[day - 1].as_ref());
+        let (label, title) = if weekly {
+            (said(first, "%-d %b"), format!("{} – {}", said(first, "%-d %b"), said(last, "%-d %b")))
+        } else {
+            (said(first, "%b"), said(first, "%B %Y"))
+        };
+        buckets.push(Bucket { days: start..day, label, title });
+        start = day;
+    }
+    buckets
+}
+
 pub fn day_window(days: usize) -> crate::stats::Window {
     let days = days.max(1);
     let mut day_starts = Vec::with_capacity(days);
@@ -519,5 +594,32 @@ mod tests {
         assert!(presses.first_at(gtk::gdk::Key::f, start));
         assert!(presses.first_at(gtk::gdk::Key::p, start + Duration::from_millis(100)));
         assert!(presses.first_at(gtk::gdk::Key::f, start + Duration::from_millis(200)));
+    }
+
+    /// Every day of a period is in one bucket and in order, a day at a time
+    /// up to a month, a week up to three months, and a month beyond.
+    #[test]
+    fn a_period_is_drawn_by_the_day_the_week_or_the_month() {
+        for (days, most, fewest, longest) in [(7, 7, 7, 1), (30, 30, 30, 1), (90, 15, 13, 7), (365, 13, 12, 31)] {
+            let buckets = buckets(&day_window(days));
+            let mut next = 0;
+            for bucket in &buckets {
+                assert_eq!(bucket.days.start, next, "{days} days: a gap or an overlap at {next}");
+                assert!(!bucket.days.is_empty() && bucket.days.len() <= longest, "{days} days: {:?}", bucket.days);
+                assert!(!bucket.label.is_empty() && !bucket.title.is_empty());
+                next = bucket.days.end;
+            }
+            assert_eq!(next, days, "{days} days: not every day is drawn");
+            assert!((fewest..=most).contains(&buckets.len()), "{days} days in {} buckets", buckets.len());
+        }
+    }
+
+    #[test]
+    fn the_six_periods_end_with_this_year_and_the_last_twelve_months() {
+        let periods = periods();
+        let days: Vec<usize> = periods.iter().map(|(_, days)| *days).collect();
+        assert_eq!(days[..4], [7, 14, 30, 90]);
+        assert!((1..=366).contains(&days[4]), "this year is {} days", days[4]);
+        assert_eq!(days[5], 365);
     }
 }

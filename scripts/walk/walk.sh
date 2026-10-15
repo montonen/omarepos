@@ -191,6 +191,10 @@ step "back to the grid" "X keys Escape Escape Escape"
 step "contributions" "X keys ctrl+g; sleep 1.6"
 step "14 days" "X choose 'Time window=1'; sleep 1.3"
 step "30 days" "X choose 'Time window=2'; sleep 1.5"
+# Longer, the days are drawn a week and then a month at a time.
+step "90 days, by the week" "X choose 'Time window=3'; sleep 1.5"
+step "12 months, by the month" "X choose 'Time window=5'; sleep 2"
+step "30 days again" "X choose 'Time window=2'; sleep 1.5"
 # The other view: every branch, which on these fixtures is more commits than
 # the branches that are checked out have, the merges fixture's two unmerged
 # branches among them. And back.
@@ -243,14 +247,15 @@ step "back to contributions" "X keys Escape; sleep 0.4"
 # at its end and moves only when told to; frames.sh plays it.
 step "the race" "X keys r; sleep 2"
 X dump "Contributions race" | grep -q "Contributions race" || { WRONG=$((WRONG+1)); echo "WRONG: r on Contributions did not open the race"; }
+X dump "WindowTitle" | grep -q "last 7 days" || { WRONG=$((WRONG+1)); echo "WRONG: the race did not open on the period Contributions was showing ($(X dump WindowTitle))"; }
 step "race: from the start" "X keys Home"
 first=$(X dump om-race-date)
 step "race: a day on" "X keys Right"
 [ "$(X dump om-race-date)" != "$first" ] || { WRONG=$((WRONG+1)); echo "WRONG: Right in the race did not move it a day on ($first)"; }
 step "race: play and pause" "X keys space space"
 step "race: to the end" "X keys End"
-step "race: this year" "X choose 'Period=1'; sleep 2"
-step "race: the last 12 months" "X choose 'Period=2'; sleep 2"
+step "race: this year" "X choose 'Period=4'; sleep 2"
+step "race: the last 12 months" "X choose 'Period=5'; sleep 2"
 step "race: back" "X keys Escape; sleep 0.4"
 step "back" "X keys Escape"
 
