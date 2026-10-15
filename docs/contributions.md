@@ -62,12 +62,12 @@ the page as it stands when asked for: the same repositories, the same
 branches, and without whoever is set aside, so that it can be recorded with
 yourself left out. The repositories it covers are named under it.
 
-Over the last 30 or 90 days, 6 months or a year (the drop-down). A race lasts
-20 seconds at 1×, whatever the period, and the button beside the progress bar
-makes it 2× or 4×. `Space` plays and pauses, `←` `→` go a day back or on, and
-`Home` and `End` go to the start and the end; the progress bar can be dragged
-to any day. With animations turned off on the desktop it opens at the end and
-moves only when told to.
+Over the last 90 days, this year (from the first of January) or the last 12
+months, by the drop-down. A race lasts 20 seconds at 1×, whatever the period,
+and the button beside the progress bar makes it 2× or 4×. `Space` plays and
+pauses, `←` `→` go a day back or on, and `Home` and `End` go to the start and
+the end; the progress bar can be dragged to any day. With animations turned
+off on the desktop it opens at the end and moves only when told to.
 
 It counts commits, not lines: a commit's lines are what reading it costs, and
 a year across a fleet is read in seconds without them.

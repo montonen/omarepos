@@ -248,8 +248,8 @@ step "race: a day on" "X keys Right"
 [ "$(X dump om-race-date)" != "$first" ] || { WRONG=$((WRONG+1)); echo "WRONG: Right in the race did not move it a day on ($first)"; }
 step "race: play and pause" "X keys space space"
 step "race: to the end" "X keys End"
-step "race: 30 days" "X choose 'Period=0'; sleep 1.5"
-step "race: a year" "X choose 'Period=3'; sleep 2"
+step "race: this year" "X choose 'Period=1'; sleep 2"
+step "race: the last 12 months" "X choose 'Period=2'; sleep 2"
 step "race: back" "X keys Escape; sleep 0.4"
 step "back" "X keys Escape"
 

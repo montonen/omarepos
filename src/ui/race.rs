@@ -2,8 +2,8 @@
 //! author's running total is a bar; the bars grow day by day and pass one
 //! another, and the date counts up in the corner.
 //!
-//! Opened from Contributions with `r`, over the same repositories, for 30
-//! days to a year. It reads what Contributions reads but for the line counts,
+//! Opened from Contributions with `r`, over the same repositories, for the
+//! last 90 days, this year or the last 12 months. It reads what Contributions reads but for the line counts,
 //! which are most of what reading history costs: a year across a fleet would
 //! take a while with them. Authors set aside on Contributions stay out of it.
 //!
@@ -23,9 +23,13 @@ use crate::stats::{self, Branches, Contributions, Lines};
 use crate::ui::stats::{plural, thousands};
 use crate::ui::{day_window, key_color};
 
-const PERIODS: [(&str, usize); 4] =
-    [("Last 30 days", 30), ("Last 90 days", 90), ("Last 6 months", 182), ("Last year", 365)];
-const FIRST_PERIOD: u32 = 1;
+/// What a race can be of, as the drop-down says it, and how many days it
+/// goes back from today. This year is from the first of January, and so as
+/// long as today is far into it.
+fn periods() -> [(&'static str, usize); 3] {
+    let this_year = glib::DateTime::now_local().map_or(365, |now| now.day_of_year().max(1) as usize);
+    [("Last 90 days", 90), ("This year", this_year), ("Last 12 months", 365)]
+}
 /// How many bars are in the race at once.
 const TOP: usize = 10;
 /// From one bar to the next, and how tall a bar is.
@@ -338,8 +342,7 @@ pub fn page(field: Field) -> adw::NavigationPage {
     let title = adw::WindowTitle::new("Contributions race", &scope);
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
-    let period = gtk::DropDown::from_strings(&PERIODS.map(|(label, _)| label));
-    period.set_selected(FIRST_PERIOD);
+    let period = gtk::DropDown::from_strings(&periods().map(|(label, _)| label));
     period.add_css_class("om-sort");
     period.set_tooltip_text(Some("Period"));
     header.pack_end(&period);
@@ -553,7 +556,8 @@ pub fn page(field: Field) -> adw::NavigationPage {
         let title = title.clone();
         let track = Rc::downgrade(&track);
         Rc::new(move || {
-            let (label, days) = PERIODS.get(period.selected() as usize).copied().unwrap_or(PERIODS[1]);
+            let periods = periods();
+            let (label, days) = periods.get(period.selected() as usize).copied().unwrap_or(periods[0]);
             let counted = if branches == Branches::All { " · all branches" } else { "" };
             title.set_subtitle(&format!("{scope} · {}{counted}", label.to_lowercase()));
             generation.set(generation.get() + 1);
