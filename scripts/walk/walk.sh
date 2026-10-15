@@ -228,9 +228,10 @@ step "an author's last commit in a repository" "X pick 0:8"
 step "down into the next repository" "X keys Down"
 X dump | grep -F "[focus]" | grep -q "Commit number" || { WRONG=$((WRONG+1)); echo "WRONG: Down from one repository's last commit did not reach the next one's first"; }
 # Setting an author aside: under the list and out of its figures, the bar
-# saying so; and back.
+# saying so; and back. Fixture commits from two addresses in the fixtures,
+# and both go, by name.
 step "set an author aside" 'X press "Set aside"; sleep 0.6'
-X dump "om-statusbar" | grep -q "1 set aside" || { WRONG=$((WRONG+1)); echo "WRONG: the status bar does not say an author is set aside"; }
+X dump "om-statusbar" | grep -q "2 set aside" || { WRONG=$((WRONG+1)); echo "WRONG: the status bar does not say both of Fixture's addresses are set aside"; }
 X dump "Set aside, and not in the figures" | grep -q "Set aside, and" || { WRONG=$((WRONG+1)); echo "WRONG: nobody is listed under the gap"; }
 step "bring them back" 'X press "Bring back"; sleep 0.6'
 X dump "om-statusbar" | grep -q "set aside" && { WRONG=$((WRONG+1)); echo "WRONG: an author is still set aside"; }

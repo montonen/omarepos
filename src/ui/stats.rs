@@ -268,8 +268,23 @@ pub fn page(
             let Some(who) = who.and_then(|who| who.str()) else { return };
             {
                 let mut aside = aside.borrow_mut();
-                if !aside.remove(who) {
-                    aside.insert(who.to_string());
+                let latest = latest.borrow();
+                let authors = latest.as_deref().map_or(&[][..], |result| &result.authors[..]);
+                // Brought back: every address of theirs that was set aside,
+                // since any one of them keeps them all aside by name.
+                match authors.iter().find(|author| author.key() == who) {
+                    Some(author) if set_aside_in(authors, &aside)(author) => {
+                        let name = author.name.to_lowercase();
+                        for same in authors.iter().filter(|other| other.name.to_lowercase() == name) {
+                            aside.remove(&same.key());
+                        }
+                        aside.remove(who);
+                    }
+                    _ => {
+                        if !aside.remove(who) {
+                            aside.insert(who.to_string());
+                        }
+                    }
                 }
                 crate::config::save_set_aside(&aside);
             }
@@ -404,6 +419,21 @@ fn counted(branches: Branches, repos: usize) -> (&'static str, &'static str) {
     }
 }
 
+/// Who among `authors` is set aside: whoever's address is in `aside`, and
+/// whoever else goes by one of their names. One person committing from a
+/// second address (another machine, a forge's no-reply one) is a second
+/// author here, and with only one of them set aside the other was still on
+/// the page and in the race.
+pub(crate) fn set_aside_in(authors: &[Author], aside: &BTreeSet<String>) -> impl Fn(&Author) -> bool {
+    let names: BTreeSet<String> = authors
+        .iter()
+        .filter(|author| aside.contains(&author.key()))
+        .map(|author| author.name.to_lowercase())
+        .collect();
+    let aside = aside.clone();
+    move |author| aside.contains(&author.key()) || names.contains(&author.name.to_lowercase())
+}
+
 /// The page, from what was read: the overview of everybody not set aside,
 /// their rows, and under a gap whoever is.
 fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on_open: &OnOpen) {
@@ -421,8 +451,9 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
         note.add_css_class("om-meta");
         content.append(&note);
     }
+    let is_aside = set_aside_in(&result.authors, aside);
     let (listed, set_aside): (Vec<&Author>, Vec<&Author>) =
-        result.authors.iter().partition(|author| !aside.contains(&author.key()));
+        result.authors.iter().partition(|author| !is_aside(author));
     content.append(&overview(result, &Figures::of(result, &listed)));
     for author in &listed {
         content.append(&author_row(author, result, on_open, false));
@@ -515,7 +546,8 @@ fn status_line(result: &Contributions, aside: &BTreeSet<String>) -> String {
     }
     // The bar keeps everybody's figures; the page above says how many are
     // not in its own.
-    let set_aside = result.authors.iter().filter(|author| aside.contains(&author.key())).count();
+    let is_aside = set_aside_in(&result.authors, aside);
+    let set_aside = result.authors.iter().filter(|author| is_aside(author)).count();
     if set_aside > 0 {
         parts.push(format!("{set_aside} set aside"));
     }
@@ -1221,5 +1253,29 @@ mod tests {
         assert_eq!((without.commits, without.authors, without.repos_active, without.insertions), (1, 1, 1, 1));
         assert_eq!(without.per_day.iter().sum::<usize>(), 1);
         assert!(status_line(&result, &me).ends_with("  ·  1 set aside"), "{}", status_line(&result, &me));
+    }
+
+    /// One person from two addresses is two authors, and setting one aside
+    /// sets aside the other, by name; somebody else is left alone.
+    #[test]
+    fn the_same_name_from_another_address_is_set_aside_with_them() {
+        let author = |name: &str, email: &str| Author {
+            name: name.to_string(),
+            email: email.to_string(),
+            commits: 1,
+            merges: 0,
+            insertions: 0,
+            deletions: 0,
+            files: 0,
+            uncounted: 0,
+            per_day: vec![1],
+            repos: Default::default(),
+            last_seen: 0,
+        };
+        let authors = vec![author("Ada Lind", "ada@work.invalid"), author("ada lind", "ada@home.invalid"), author("Bo", "bo@work.invalid")];
+        let aside: BTreeSet<String> = ["ada@work.invalid".to_string()].into();
+        let is_aside = set_aside_in(&authors, &aside);
+        assert_eq!(authors.iter().map(|author| is_aside(author)).collect::<Vec<_>>(), [true, true, false]);
+        assert!(set_aside_in(&authors, &BTreeSet::new())(&authors[1]) == false);
     }
 }

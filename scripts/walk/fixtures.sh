@@ -86,5 +86,8 @@ git init -q -b main lots
     [ $((i % 3)) = 0 ] && who="Tove Lind" && mail="tove@example.invalid"
     pair="Paired with nobody."; [ $((i % 2)) = 0 ] && pair="Co-authored-by: Robo Pair <robo@example.invalid>"
     GIT_AUTHOR_DATE="$at" GIT_COMMITTER_DATE="$at" git -c user.name="$who" -c user.email="$mail" \
-      commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis" -m "$pair"; done )
+      commit -q -m "Commit number $i with a subject that goes on for quite a while to test the ellipsis" -m "$pair"; done
+  # And one from the same person on another machine: a second author by
+  # address, the same one by name, which is how Contributions sets aside.
+  git -c user.name=Fixture -c user.email=fixture@old-machine.invalid commit -q --allow-empty -m "From the old machine" )
 echo "fixtures in $W/fleet: $(ls "$W/fleet" | tr '\n' ' ')"

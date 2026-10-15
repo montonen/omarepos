@@ -50,6 +50,9 @@ const SLIDE: f64 = 0.12;
 #[derive(Debug, Clone)]
 pub struct Racer {
     pub name: String,
+    /// Name and address, for the bar's tooltip: two authors of one name are
+    /// two addresses.
+    pub who: String,
     pub color: &'static str,
     /// Their total after each day: `running[d]` is the first `d` days', so
     /// `running[0]` is nought and the last is everything.
@@ -67,10 +70,11 @@ pub struct Race {
 impl Race {
     /// Everybody with a commit in the period, but whoever is set aside.
     pub fn of(result: &Contributions, aside: &BTreeSet<String>) -> Race {
+        let is_aside = crate::ui::stats::set_aside_in(&result.authors, aside);
         let racers = result
             .authors
             .iter()
-            .filter(|author| author.commits > 0 && !aside.contains(&author.key()))
+            .filter(|author| author.commits > 0 && !is_aside(author))
             .map(|author| {
                 let mut running = Vec::with_capacity(author.per_day.len() + 1);
                 running.push(0);
@@ -79,7 +83,12 @@ impl Race {
                 }
                 // The colour of their dot on Contributions.
                 let color = key_color(if author.email.is_empty() { &author.name } else { &author.email });
-                Racer { name: author.name.clone(), color, running }
+                let who = if author.email.is_empty() {
+                    author.name.clone()
+                } else {
+                    format!("{} <{}>", author.name, author.email)
+                };
+                Racer { name: author.name.clone(), who, color, running }
             })
             .collect();
         let dates = result
@@ -194,6 +203,7 @@ impl Track {
         row.append(&bar);
         row.append(&total);
         row.set_opacity(0.0);
+        row.set_tooltip_text(Some(&racer.who));
         let y = TOP as f64 * ROW;
         self.fixed.put(&row, 0.0, y);
         Lane { row, bar, total, y: Cell::new(y), shown: Cell::new(0.0) }
@@ -693,9 +703,16 @@ mod tests {
     #[test]
     fn whoever_is_set_aside_or_has_nothing_does_not_race() {
         let aside: BTreeSet<String> = ["me@example.invalid".to_string()].into();
-        let race = Race::of(&result(vec![author("Me", &[5, 5]), author("Them", &[1, 0]), author("Idle", &[0, 0])]), &aside);
+        // The same name from another address is the same person, set aside.
+        let mut elsewhere = author("Me", &[0, 2]);
+        elsewhere.email = "me@old-machine.invalid".to_string();
+        let race = Race::of(
+            &result(vec![author("Me", &[5, 5]), author("Them", &[1, 0]), author("Idle", &[0, 0]), elsewhere]),
+            &aside,
+        );
         let names: Vec<&str> = race.racers.iter().map(|racer| racer.name.as_str()).collect();
         assert_eq!(names, ["Them"]);
+        assert_eq!(race.racers[0].who, "Them <them@example.invalid>");
     }
 
     #[test]
