@@ -20,8 +20,9 @@ const VIEWS: [(&str, Branches); 2] =
     [("Checked-out branches", Branches::CheckedOut), ("All branches", Branches::All)];
 const BAR_H: i32 = 46;
 /// The space between the list and who is set aside under it: enough to
-/// stop a screenshot above, so that it shows nothing of them.
-const GAP: i32 = 220;
+/// stop a screenshot above, so that it shows nothing of them. It was twice
+/// this, and on a tall window it read as the end of the page.
+const GAP: i32 = 110;
 const SPARK_W: f64 = 11.0;
 
 /// What opens a commit from the page: its repository, what to call it, and
