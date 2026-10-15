@@ -60,10 +60,19 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "The race",
+        &[
+            ("Space", "Play or pause"),
+            ("← →", "A day back or on"),
+            ("Home  End", "The start, the end"),
+        ],
+    ),
+    (
         "Across repositories",
         &[
             ("Ctrl+G", "Contributions"),
             ("Ctrl+Shift+F", "Search commits; on Contributions its repositories, in a commit graph that one"),
+            ("r on Contributions", "Race: the authors' commits, day by day"),
             ("Ctrl+R  or  F5", "Rescan what is on disk"),
             ("Ctrl+Shift+R", "Fetch every repository in scope, now"),
         ],

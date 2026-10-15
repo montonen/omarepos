@@ -238,6 +238,19 @@ X dump "om-statusbar" | grep -q "set aside" && { WRONG=$((WRONG+1)); echo "WRONG
 step "search the commits from contributions" "X keys ctrl+shift+f; sleep 0.8"
 X dump "Search commits" | grep -q "Search commits" || { WRONG=$((WRONG+1)); echo "WRONG: the commit search key did nothing on Contributions"; }
 step "back to contributions" "X keys Escape; sleep 0.4"
+# The race, over the same repositories. Animations are off here, so it opens
+# at its end and moves only when told to; frames.sh plays it.
+step "the race" "X keys r; sleep 2"
+X dump "Contributions race" | grep -q "Contributions race" || { WRONG=$((WRONG+1)); echo "WRONG: r on Contributions did not open the race"; }
+step "race: from the start" "X keys Home"
+first=$(X dump om-race-date)
+step "race: a day on" "X keys Right"
+[ "$(X dump om-race-date)" != "$first" ] || { WRONG=$((WRONG+1)); echo "WRONG: Right in the race did not move it a day on ($first)"; }
+step "race: play and pause" "X keys space space"
+step "race: to the end" "X keys End"
+step "race: 30 days" "X choose 'Period=0'; sleep 1.5"
+step "race: a year" "X choose 'Period=3'; sleep 2"
+step "race: back" "X keys Escape; sleep 0.4"
 step "back" "X keys Escape"
 
 # ---- tags: the menu, the editor, the chips

@@ -53,6 +53,25 @@ the size of the change and not of the repository; a week across a dozen repos
 takes well under a second, and a 30-day window over a large fleet is the case
 that can still be felt.
 
+## The race
+
+`r` on Contributions, or the ▶ button in its header, plays the authors'
+commits as a race: each author's running total is a bar, the bars grow day by
+day and overtake one another, and the date counts up in the corner. It is of
+the page as it stands when asked for: the same repositories, the same
+branches, and without whoever is set aside, so that it can be recorded with
+yourself left out. The repositories it covers are named under it.
+
+Over the last 30 or 90 days, 6 months or a year (the drop-down). A race lasts
+20 seconds at 1×, whatever the period, and the button beside the progress bar
+makes it 2× or 4×. `Space` plays and pauses, `←` `→` go a day back or on, and
+`Home` and `End` go to the start and the end; the progress bar can be dragged
+to any day. With animations turned off on the desktop it opens at the end and
+moves only when told to.
+
+It counts commits, not lines: a commit's lines are what reading it costs, and
+a year across a fleet is read in seconds without them.
+
 ---
 
 [Back to the README](../README.md) · [All documentation](README.md)

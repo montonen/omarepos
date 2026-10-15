@@ -135,6 +135,21 @@ impl Author {
     pub fn churn(&self) -> usize {
         self.insertions + self.deletions
     }
+
+    /// What they are counted under: their address, or their name where they
+    /// have none.
+    pub fn key(&self) -> String {
+        if self.email.is_empty() { self.name.to_lowercase() } else { self.email.clone() }
+    }
+}
+
+/// Whether a commit's lines are counted. Reading its diff is most of what
+/// reading history costs, and a page that shows commits alone leaves it out:
+/// its commits are then all without line counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lines {
+    Counted,
+    Skipped,
 }
 
 /// Which of a repository's branches are read.
@@ -189,6 +204,15 @@ pub enum Event {
 }
 
 pub fn spawn(repos: Vec<PathBuf>, window: Window, branches: Branches) -> async_channel::Receiver<Event> {
+    spawn_with(repos, window, branches, Lines::Counted)
+}
+
+pub fn spawn_with(
+    repos: Vec<PathBuf>,
+    window: Window,
+    branches: Branches,
+    lines: Lines,
+) -> async_channel::Receiver<Event> {
     let (tx, rx) = async_channel::unbounded();
 
     std::thread::spawn(move || {
@@ -200,7 +224,7 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window, branches: Branches) -> async_c
             // A repository is read to the end before any of it is counted, so
             // one that fails part of the way through is left out whole and
             // named, not counted as far as it got.
-            match collect(path, &window, branches, &tally.counted) {
+            match collect(path, &window, branches, lines, &tally.counted) {
                 Ok(found) => tally.add(path, &name, found),
                 Err(err) => errors.push(format!("{name}: {err}")),
             }
@@ -487,6 +511,7 @@ fn collect(
     path: &Path,
     window: &Window,
     branches: Branches,
+    lines: Lines,
     counted: &HashSet<Oid>,
 ) -> Result<Found, String> {
     let said = |e: git2::Error| e.message().to_string();
@@ -603,7 +628,11 @@ fn collect(
             committed,
             day,
             merge,
-            lines: if merge { Some((0, 0, 0)) } else { diff_stats(&repo, &commit) },
+            lines: match lines {
+                _ if merge => Some((0, 0, 0)),
+                Lines::Counted => diff_stats(&repo, &commit),
+                Lines::Skipped => None,
+            },
         });
     }
 
@@ -1962,5 +1991,29 @@ mod tests {
         let result = contributions(&[&own, &global]);
         let mine: Vec<&str> = result.mine.iter().map(String::as_str).collect();
         assert_eq!(mine, ["fixture@example.invalid", "me@work.example"]);
+    }
+
+    /// Without line counts the same commits are counted on the same days, by
+    /// the same people, and none of them has lines.
+    #[test]
+    fn skipping_lines_counts_the_same_commits() {
+        let _guard = isolate();
+        let dir = scratch("stats-lines-skipped");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, BOB, "a.txt", &lines(5), "one");
+        commit_file(&dir, "b.txt", &lines(3), "two");
+        let read = |lines| {
+            let rx = spawn_with(vec![dir.clone()], window(7), Branches::CheckedOut, lines);
+            loop {
+                if let Event::Done(result) = rx.recv_blocking().unwrap() {
+                    break *result;
+                }
+            }
+        };
+        let (with, without) = (read(Lines::Counted), read(Lines::Skipped));
+        assert_eq!(by_author(&with), by_author(&without));
+        assert_eq!(with.per_day_total, without.per_day_total);
+        assert_eq!((with.total_insertions, with.uncounted), (8, 0));
+        assert_eq!((without.total_insertions, without.uncounted), (0, 2));
     }
 }

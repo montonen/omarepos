@@ -5,6 +5,7 @@ pub mod commit;
 pub mod debug;
 pub mod dialogs;
 pub mod graph;
+pub mod race;
 pub mod search;
 pub mod shortcuts;
 pub mod stats;

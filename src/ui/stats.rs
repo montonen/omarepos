@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use gtk::pango;
 
 use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
@@ -30,16 +30,25 @@ pub type OnOpen = Rc<dyn Fn(PathBuf, String, Option<String>)>;
 
 /// What searches the commits of some repositories, with what to call them.
 pub type OnSearch = Rc<dyn Fn(Vec<PathBuf>, String)>;
+/// What runs the race (`ui::race`) over what this page is showing.
+pub type OnRace = Rc<dyn Fn(crate::ui::race::Field)>;
 
 /// `scope` is shown as the page subtitle, e.g. "4 selected repos".
-pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen, on_search: OnSearch) -> adw::NavigationPage {
+pub fn page(
+    repos: Vec<PathBuf>,
+    scope: String,
+    on_open: OnOpen,
+    on_search: OnSearch,
+    on_race: OnRace,
+) -> adw::NavigationPage {
     // The subtitle also says which commits are counted. The totals mean one
     // thing for the branch that is checked out and another for every branch
     // there is, and the page gave no way to tell which it was showing. It is
     // written by `load`, which knows which was asked for.
     let title = adw::WindowTitle::new("Contributions", &scope);
-    // For the commit search, which is of the same repositories.
+    // For the commit search and the race, which are of the same repositories.
     let search_scope = scope.clone();
+    let race_scope = scope.clone();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
@@ -57,6 +66,11 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen, on_search: OnSe
     view.add_css_class("om-sort");
     view.set_tooltip_text(Some("Which branches are counted"));
     header.pack_end(&view);
+
+    let race = gtk::Button::from_icon_name("media-playback-start-symbolic");
+    race.set_tooltip_text(Some("Race: authors' commits, day by day (r)"));
+    race.set_action_name(Some("page.race"));
+    header.pack_end(&race);
 
     let spinner = gtk::Spinner::new();
     spinner.start();
@@ -227,6 +241,24 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen, on_search: OnSe
         search.connect_activate(move |_, _| on_search((*repos).clone(), search_scope.clone()));
     }
     actions.add_action(&search);
+    // The race is of this page as it stands: its repositories, the branches
+    // it counts, and without whoever it has set aside.
+    let run_race = gio::SimpleAction::new("race", None);
+    {
+        let (repos, aside, view) = (Rc::clone(&repos), Rc::clone(&aside), view.clone());
+        run_race.connect_activate(move |_, _| {
+            let branches = VIEWS
+                .get(view.selected() as usize)
+                .map_or(Branches::CheckedOut, |(_, branches)| *branches);
+            on_race(crate::ui::race::Field {
+                repos: (*repos).clone(),
+                scope: race_scope.clone(),
+                branches,
+                aside: aside.borrow().clone(),
+            });
+        });
+    }
+    actions.add_action(&run_race);
     let set_aside = gio::SimpleAction::new("set-aside", Some(glib::VariantTy::STRING));
     {
         let (content, status) = (content.clone(), status.clone());
@@ -248,6 +280,19 @@ pub fn page(repos: Vec<PathBuf>, scope: String, on_open: OnOpen, on_search: OnSe
     }
     actions.add_action(&set_aside);
     page.insert_action_group("page", Some(&actions));
+
+    // `r` for the race, from anywhere on the page.
+    let race_key = gtk::EventControllerKey::new();
+    race_key.connect_key_pressed(|controller, key, _, state| {
+        if key != gdk::Key::r || !crate::ui::unmodified(state) {
+            return glib::Propagation::Proceed;
+        }
+        if let Some(page) = controller.widget() {
+            let _ = page.activate_action("page.race", None);
+        }
+        glib::Propagation::Stop
+    });
+    page.add_controller(race_key);
 
     // The code is watched for on the way down to whatever has the keyboard,
     // and every key goes on to it: the page works as it would without.
@@ -358,12 +403,6 @@ fn counted(branches: Branches, repos: usize) -> (&'static str, &'static str) {
     }
 }
 
-/// What the page lists and counts an author under: their address, or their
-/// name where they have none, as `stats` keys them.
-fn key(author: &Author) -> String {
-    if author.email.is_empty() { author.name.to_lowercase() } else { author.email.clone() }
-}
-
 /// The page, from what was read: the overview of everybody not set aside,
 /// their rows, and under a gap whoever is.
 fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on_open: &OnOpen) {
@@ -382,7 +421,7 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
         content.append(&note);
     }
     let (listed, set_aside): (Vec<&Author>, Vec<&Author>) =
-        result.authors.iter().partition(|author| !aside.contains(&key(author)));
+        result.authors.iter().partition(|author| !aside.contains(&author.key()));
     content.append(&overview(result, &Figures::of(result, &listed)));
     for author in &listed {
         content.append(&author_row(author, result, on_open, false));
@@ -475,7 +514,7 @@ fn status_line(result: &Contributions, aside: &BTreeSet<String>) -> String {
     }
     // The bar keeps everybody's figures; the page above says how many are
     // not in its own.
-    let set_aside = result.authors.iter().filter(|author| aside.contains(&key(author))).count();
+    let set_aside = result.authors.iter().filter(|author| aside.contains(&author.key())).count();
     if set_aside > 0 {
         parts.push(format!("{set_aside} set aside"));
     }
@@ -751,7 +790,7 @@ fn author_row(author: &Author, result: &Contributions, on_open: &OnOpen, set_asi
     aside.set_valign(gtk::Align::Center);
     aside.set_tooltip_text(Some(says));
     aside.set_action_name(Some("page.set-aside"));
-    aside.set_action_target_value(Some(&key(author).to_variant()));
+    aside.set_action_target_value(Some(&author.key().to_variant()));
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     top.append(&toggle);
@@ -1052,11 +1091,11 @@ fn sparkline(author: &Author, result: &Contributions, color: &'static str) -> gt
     area
 }
 
-fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+pub(crate) fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
     if n == 1 { one } else { many }
 }
 
-fn thousands(n: usize) -> String {
+pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -1176,7 +1215,7 @@ mod tests {
         assert_eq!(all, counted);
 
         let me: BTreeSet<String> = ["me@example.invalid".to_string()].into();
-        let others: Vec<&Author> = result.authors.iter().filter(|author| !me.contains(&key(author))).collect();
+        let others: Vec<&Author> = result.authors.iter().filter(|author| !me.contains(&author.key())).collect();
         let without = Figures::of(&result, &others);
         assert_eq!((without.commits, without.authors, without.repos_active, without.insertions), (1, 1, 1, 1));
         assert_eq!(without.per_day.iter().sum::<usize>(), 1);

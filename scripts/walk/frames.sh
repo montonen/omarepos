@@ -120,6 +120,15 @@ X keys ctrl+r
 until_says "om-name" || wrong "the fleet did not appear after the empty page"
 sleep 2
 keyboard GtkText "leaving the empty page did not put the keyboard in the filter"
+# The race runs on frames, which a walk's window is never sent. With
+# animations off (as here) it opens at its end; from the start, played, its
+# date has to move on.
+X keys ctrl+g; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not open"
+X keys r; until_says "om-race-date" || wrong "r on Contributions did not open the race"
+X keys Home; started=$(X dump om-race-date)
+X keys space; sleep 4
+[ "$(X dump om-race-date)" != "$started" ] || wrong "the race did not run when played ($started)"
+X keys space Escape Escape; sleep 1
 python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || wrong "the program stopped: $(grep -m1 -A1 'panicked at' "$W/app.log" | cut -c1-200)"
 X stop
 echo "wrong: $WRONG"

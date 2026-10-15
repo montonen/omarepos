@@ -2841,6 +2841,12 @@ impl Ui {
         Rc::new(move |repos, scope| ui.search_commits(repos, scope))
     }
 
+    /// How Contributions runs the race over what it is showing.
+    fn race_runner(self: &Rc<Self>) -> ui::stats::OnRace {
+        let ui = Rc::clone(self);
+        Rc::new(move |field| ui.nav.push(&ui::race::page(field)))
+    }
+
     fn search_commits(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
             self.toasts
@@ -2873,7 +2879,7 @@ impl Ui {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            ui.nav.push(&ui::stats::page(vec![path], name, ui.commit_opener(), ui.commit_searcher()));
+            ui.nav.push(&ui::stats::page(vec![path], name, ui.commit_opener(), ui.commit_searcher(), ui.race_runner()));
         });
         let on_search: Rc<dyn Fn()> = {
             let ui = Rc::clone(self);
@@ -3149,7 +3155,7 @@ impl Ui {
             return;
         }
         self.nav
-            .push(&ui::stats::page(repos, scope, self.commit_opener(), self.commit_searcher()));
+            .push(&ui::stats::page(repos, scope, self.commit_opener(), self.commit_searcher(), self.race_runner()));
     }
 
     fn run_action(self: &Rc<Self>, action: Action, info: &RepoInfo) {

@@ -1180,6 +1180,24 @@ button.om-stat-aside:hover {{
   color: @om_fg;
 }}
 
+/* The race (`ui::race`): names, and totals in figures of one width so that
+   they do not shimmer as they count up, and the date large and quiet. */
+.om-race-name {{
+  color: @om_fg;
+}}
+
+.om-race-total {{
+  color: @om_fg;
+  font-feature-settings: "tnum";
+}}
+
+.om-race-date {{
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: @om_dim;
+  font-feature-settings: "tnum";
+}}
+
 {arcade}
 
 popover.menu contents, popover contents {{
