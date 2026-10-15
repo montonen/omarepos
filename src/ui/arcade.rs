@@ -711,7 +711,13 @@ impl Arcade {
             return;
         };
         self.range.remove_css_class("om-arcade-blink");
-        self.range.set_label(&format!("◀ LAST {} DAYS ▶", result.window.days()));
+        // The period by its name, as the page's drop-down has it.
+        let days = result.window.days();
+        let period = crate::ui::periods()
+            .iter()
+            .find(|(_, of)| *of == days)
+            .map_or_else(|| format!("LAST {days} DAYS"), |(name, _)| name.to_uppercase());
+        self.range.set_label(&format!("◀ {period} ▶"));
         self.foot.set_label(match state.screen {
             2 => "← → DAYS · TAB SCREEN · ESC GAME OVER",
             _ => "← → DAYS · ↑ ↓ CHOOSE · TAB SCREEN · ESC GAME OVER",

@@ -219,8 +219,8 @@ for shown in "HIGH SCORES" "1UP" "CO-OP"; do
 done
 step "arcade: stages" "X keys Tab"
 step "arcade: badges, the second player's" "X keys shift+Tab shift+Tab Down Tab Tab"
-step "arcade: 30 days" "X keys Left; sleep 1.6"
-X dump "LAST 30 DAYS" | grep -q "LAST 30 DAYS" || { WRONG=$((WRONG+1)); echo "WRONG: left in the arcade did not change the window of days"; }
+step "arcade: the last 12 months, round from the first" "X keys Left; sleep 2"
+X dump "LAST 12 MONTHS" | grep -q "LAST 12 MONTHS" || { WRONG=$((WRONG+1)); echo "WRONG: left in the arcade did not change the period"; }
 step "arcade: 7 days" "X keys Right; sleep 1.6"
 step "game over" "X keys Escape; sleep 1.8"
 X dump "HIGH SCORES" | grep -q "HIGH SCORES" && { WRONG=$((WRONG+1)); echo "WRONG: Escape did not end the game"; }
