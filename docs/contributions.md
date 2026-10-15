@@ -73,6 +73,11 @@ pauses, `←` `→` go a day back or on, and `Home` and `End` go to the start an
 the end; the progress bar can be dragged to any day. With animations turned
 off on the desktop it opens at the end and moves only when told to.
 
+The drop-down beside the period races the repositories instead: each one's
+commits, by everybody but whoever is set aside, whose commits are left out of
+every repository's total as they are out of the figures on Contributions.
+Switching between the two reads nothing again.
+
 It counts commits, not lines: a commit's lines are what reading it costs, and
 a year across a fleet is read in seconds without them.
 

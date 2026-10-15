@@ -256,6 +256,9 @@ step "race: play and pause" "X keys space space"
 step "race: to the end" "X keys End"
 step "race: this year" "X choose 'Period=4'; sleep 2"
 step "race: the last 12 months" "X choose 'Period=5'; sleep 2"
+step "race: the repositories" "X choose 'What races=1'; sleep 1"
+X dump "om-statusbar" | grep -q "repositories" || { WRONG=$((WRONG+1)); echo "WRONG: the race did not switch to the repositories ($(X dump om-statusbar))"; }
+step "race: the authors again" "X choose 'What races=0'; sleep 1"
 step "race: back" "X keys Escape; sleep 0.4"
 step "back" "X keys Escape"
 

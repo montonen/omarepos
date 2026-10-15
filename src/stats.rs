@@ -105,6 +105,8 @@ pub struct RepoCommits {
     pub name: String,
     pub commits: Vec<Commit>,
     pub total: usize,
+    /// `total`, day by day, for the race by repository (`ui::race`).
+    pub per_day: Vec<usize>,
 }
 
 /// Past this, the list is no longer telling anyone anything new.
@@ -386,9 +388,11 @@ fn credit(
 
     let in_repo = entry.repos.entry(path.to_path_buf()).or_insert_with(|| RepoCommits {
         name: repo_name.to_string(),
+        per_day: vec![0; days],
         ..RepoCommits::default()
     });
     in_repo.total += 1;
+    in_repo.per_day[commit.day] += 1;
     if in_repo.commits.len() < MAX_COMMITS_LISTED {
         in_repo.commits.push(Commit {
             id: commit.oid.to_string(),
@@ -2011,6 +2015,13 @@ mod tests {
             }
         };
         let (with, without) = (read(Lines::Counted), read(Lines::Skipped));
+        // Each repository's commits day by day add up to its total.
+        for author in &with.authors {
+            for repo in author.repos.values() {
+                assert_eq!(repo.per_day.len(), 7);
+                assert_eq!(repo.per_day.iter().sum::<usize>(), repo.total);
+            }
+        }
         assert_eq!(by_author(&with), by_author(&without));
         assert_eq!(with.per_day_total, without.per_day_total);
         assert_eq!((with.total_insertions, with.uncounted), (8, 0));

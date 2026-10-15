@@ -1,11 +1,12 @@
-//! The race: authors' commits over a period, as a bar chart race. Each
-//! author's running total is a bar; the bars grow day by day and pass one
-//! another, and the date counts up in the corner.
+//! The race: commits over a period, as a bar chart race, of the authors or
+//! of the repositories. Each one's running total is a bar; the bars grow day
+//! by day and pass one another, and the date counts up in the corner.
 //!
 //! Opened from Contributions with `r`, over the same repositories and the
 //! same period, which can be changed there as on Contributions. It reads what Contributions reads but for the line counts,
 //! which are most of what reading history costs: a year across a fleet would
-//! take a while with them. Authors set aside on Contributions stay out of it.
+//! take a while with them. Authors set aside on Contributions stay out of it,
+//! and so do their commits from every repository's total.
 //!
 //! The bars are ordinary widgets in a `gtk::Fixed`, moved on each frame, so
 //! that they are written in the app's own fonts and colours. Frames are asked
@@ -39,12 +40,32 @@ const SPEEDS: [f64; 3] = [1.0, 2.0, 4.0];
 /// most (63%) of the way.
 const SLIDE: f64 = 0.12;
 
-/// One author in the race.
+/// What races.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Racing {
+    Authors,
+    Repositories,
+}
+
+const RACING: [(&str, Racing); 2] = [("Authors", Racing::Authors), ("Repositories", Racing::Repositories)];
+
+/// Day by day, the running total: the first `d` days' at `d`, so nought
+/// first and everything last.
+fn running(per_day: &[usize]) -> Vec<usize> {
+    let mut running = Vec::with_capacity(per_day.len() + 1);
+    running.push(0);
+    for day in per_day {
+        running.push(running.last().copied().unwrap_or(0) + day);
+    }
+    running
+}
+
+/// One in the race: an author, or a repository.
 #[derive(Debug, Clone)]
 pub struct Racer {
     pub name: String,
-    /// Name and address, for the bar's tooltip: two authors of one name are
-    /// two addresses.
+    /// For the bar's tooltip: an author's name and address, since two
+    /// authors of one name are two addresses, or where a repository is.
     pub who: String,
     pub color: &'static str,
     /// Their total after each day: `running[d]` is the first `d` days', so
@@ -54,6 +75,7 @@ pub struct Racer {
 
 #[derive(Debug, Clone)]
 pub struct Race {
+    pub racing: Racing,
     pub racers: Vec<Racer>,
     pub days: usize,
     /// What each day is called in the corner: "15 Oct 2026".
@@ -69,11 +91,7 @@ impl Race {
             .iter()
             .filter(|author| author.commits > 0 && !is_aside(author))
             .map(|author| {
-                let mut running = Vec::with_capacity(author.per_day.len() + 1);
-                running.push(0);
-                for day in &author.per_day {
-                    running.push(running.last().copied().unwrap_or(0) + day);
-                }
+                let running = running(&author.per_day);
                 // The colour of their dot on Contributions.
                 let color = key_color(if author.email.is_empty() { &author.name } else { &author.email });
                 let who = if author.email.is_empty() {
@@ -84,19 +102,36 @@ impl Race {
                 Racer { name: author.name.clone(), who, color, running }
             })
             .collect();
-        let dates = result
-            .window
-            .day_starts
-            .iter()
-            .map(|start| {
-                glib::DateTime::from_unix_local(*start)
-                    .ok()
-                    .and_then(|day| day.format("%-d %b %Y").ok())
-                    .map(|day| day.to_string())
-                    .unwrap_or_default()
+        Race { racing: Racing::Authors, racers, days: result.window.days(), dates: dates(result) }
+    }
+
+    /// Every repository with a commit in the period, by anybody not set
+    /// aside: theirs are left out of every total, as they are out of the
+    /// figures on Contributions.
+    pub fn by_repository(result: &Contributions, aside: &BTreeSet<String>) -> Race {
+        let is_aside = crate::ui::stats::set_aside_in(&result.authors, aside);
+        let days = result.window.days();
+        let mut repos: std::collections::BTreeMap<&PathBuf, (&str, Vec<usize>)> = Default::default();
+        for author in result.authors.iter().filter(|author| !is_aside(author)) {
+            for (path, repo) in &author.repos {
+                let (_, per_day) = repos.entry(path).or_insert_with(|| (repo.name.as_str(), vec![0; days]));
+                for (total, day) in per_day.iter_mut().zip(&repo.per_day) {
+                    *total += day;
+                }
+            }
+        }
+        let racers = repos
+            .into_iter()
+            .filter(|(_, (_, per_day))| per_day.iter().any(|day| *day > 0))
+            .map(|(path, (name, per_day))| Racer {
+                name: name.to_string(),
+                who: crate::config::tildify(path),
+                // The colour of its dot in an author's commits.
+                color: key_color(name),
+                running: running(&per_day),
             })
             .collect();
-        Race { racers, days: result.window.days(), dates }
+        Race { racing: Racing::Repositories, racers, days, dates: dates(result) }
     }
 
     /// A racer's total `t` days in, `t` from nought to `days`. Between two
@@ -349,9 +384,13 @@ pub fn page(field: Field) -> adw::NavigationPage {
     header.set_title_widget(Some(&title));
     let period = gtk::DropDown::from_strings(&periods().map(|(label, _)| label));
     period.set_selected(showing);
+    let racing = gtk::DropDown::from_strings(&RACING.map(|(label, _)| label));
+    racing.add_css_class("om-sort");
+    racing.set_tooltip_text(Some("What races"));
     period.add_css_class("om-sort");
     period.set_tooltip_text(Some("Period"));
     header.pack_end(&period);
+    header.pack_end(&racing);
 
     let fixed = gtk::Fixed::new();
     fixed.set_hexpand(true);
@@ -557,10 +596,36 @@ pub fn page(field: Field) -> adw::NavigationPage {
     // one still on its way.
     let generation = Rc::new(Cell::new(0u64));
     let repos = Rc::new(repos);
+    // What was read last, which the race is made from: the authors' or the
+    // repositories', whichever is asked for, without reading it again.
+    let latest: Rc<RefCell<Option<Rc<Contributions>>>> = Rc::new(RefCell::new(None));
+    let show: Rc<dyn Fn()> = {
+        let (racing, stack, status, latest) = (racing.clone(), stack.clone(), status.clone(), Rc::clone(&latest));
+        let track = Rc::downgrade(&track);
+        let aside = aside.clone();
+        Rc::new(move || {
+            let Some(result) = latest.borrow().clone() else { return };
+            let race = match RACING.get(racing.selected() as usize).map_or(Racing::Authors, |(_, racing)| *racing) {
+                Racing::Authors => Race::of(&result, &aside),
+                Racing::Repositories => Race::by_repository(&result, &aside),
+            };
+            status.set_label(&status_line(&result, &race, &aside));
+            if race.racers.is_empty() {
+                stack.set_visible_child_name("empty");
+            } else if let Some(track) = track.upgrade() {
+                stack.set_visible_child_name("race");
+                track.load(race);
+            }
+        })
+    };
+    {
+        let show = Rc::clone(&show);
+        racing.connect_selected_notify(move |_| show());
+    }
+
     let load: Rc<dyn Fn()> = {
         let (period, stack, status, reading) = (period.clone(), stack.clone(), status.clone(), reading.clone());
         let title = title.clone();
-        let track = Rc::downgrade(&track);
         Rc::new(move || {
             let periods = periods();
             let (label, days) = periods.get(period.selected() as usize).copied().unwrap_or(periods[0]);
@@ -571,10 +636,8 @@ pub fn page(field: Field) -> adw::NavigationPage {
             stack.set_visible_child_name("loading");
             status.set_label("Reading history…");
             let rx = stats::spawn_with((*repos).clone(), day_window(days), branches, Lines::Skipped);
-            let (generation, stack, status, reading) =
-                (Rc::clone(&generation), stack.clone(), status.clone(), reading.clone());
-            let track = track.clone();
-            let aside = aside.clone();
+            let (generation, reading) = (Rc::clone(&generation), reading.clone());
+            let (latest, show) = (Rc::clone(&latest), Rc::clone(&show));
             glib::spawn_future_local(async move {
                 while let Ok(event) = rx.recv().await {
                     if generation.get() != mine {
@@ -585,14 +648,8 @@ pub fn page(field: Field) -> adw::NavigationPage {
                             reading.set_label(&format!("{name}  ({done}/{total})"));
                         }
                         stats::Event::Done(result) => {
-                            let race = Race::of(&result, &aside);
-                            status.set_label(&status_line(&result, &race));
-                            if race.racers.is_empty() {
-                                stack.set_visible_child_name("empty");
-                            } else if let Some(track) = track.upgrade() {
-                                stack.set_visible_child_name("race");
-                                track.load(race);
-                            }
+                            latest.replace(Some(Rc::from(result)));
+                            show();
                             return;
                         }
                     }
@@ -609,16 +666,37 @@ pub fn page(field: Field) -> adw::NavigationPage {
     page
 }
 
-fn status_line(result: &Contributions, race: &Race) -> String {
+/// What each day is called in the race's corner: "15 Oct 2026".
+fn dates(result: &Contributions) -> Vec<String> {
+    result
+        .window
+        .day_starts
+        .iter()
+        .map(|start| {
+            glib::DateTime::from_unix_local(*start)
+                .ok()
+                .and_then(|day| day.format("%-d %b %Y").ok())
+                .map(|day| day.to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn status_line(result: &Contributions, race: &Race, aside: &BTreeSet<String>) -> String {
     let mut parts = Vec::new();
     if !result.errors.is_empty() {
         parts.push(format!("{} unreadable", result.errors.len()));
     }
     let commits: usize = race.racers.iter().map(|racer| racer.running.last().copied().unwrap_or(0)).sum();
     parts.push(format!("{} {}", thousands(commits), plural(commits, "commit", "commits")));
-    parts.push(format!("{} {}", race.racers.len(), plural(race.racers.len(), "author", "authors")));
+    let (one, many) = match race.racing {
+        Racing::Authors => ("author", "authors"),
+        Racing::Repositories => ("repository", "repositories"),
+    };
+    parts.push(format!("{} {}", race.racers.len(), plural(race.racers.len(), one, many)));
     parts.push(format!("{}/{} repos active", result.repos_active, result.repos_scanned));
-    let aside = result.authors.len() - race.racers.len();
+    let is_aside = crate::ui::stats::set_aside_in(&result.authors, aside);
+    let aside = result.authors.iter().filter(|author| is_aside(author)).count();
     if aside > 0 {
         parts.push(format!("{aside} set aside"));
     }
@@ -716,5 +794,40 @@ mod tests {
         let mut race = Race::of(&result(vec![author("Ada", &[1, 1, 1])]), &BTreeSet::new());
         race.dates = vec!["1".into(), "2".into(), "3".into()];
         assert_eq!([race.date(0.0), race.date(1.5), race.date(3.0), race.date(-2.0)], ["1", "2", "3", "1"]);
+    }
+
+    /// A repository's total is everybody's commits there but those of
+    /// whoever is set aside, and a repository with none does not race.
+    #[test]
+    fn repositories_race_with_everybody_but_whoever_is_set_aside() {
+        let with_repos = |name: &str, repos: &[(&str, &[usize])]| {
+            let mut author = author(name, &[0, 0, 0]);
+            for (repo, per_day) in repos {
+                author.repos.insert(
+                    PathBuf::from(format!("/r/{repo}")),
+                    crate::stats::RepoCommits {
+                        name: repo.to_string(),
+                        total: per_day.iter().sum(),
+                        per_day: per_day.to_vec(),
+                        ..Default::default()
+                    },
+                );
+                for (total, day) in author.per_day.iter_mut().zip(per_day.iter()) {
+                    *total += day;
+                }
+            }
+            author.commits = author.per_day.iter().sum();
+            author
+        };
+        let ada = with_repos("Ada", &[("api", &[1, 0, 2]), ("web", &[0, 1, 0])]);
+        let bo = with_repos("Bo", &[("api", &[0, 3, 0]), ("idle", &[0, 0, 0])]);
+        let me = with_repos("Me", &[("web", &[5, 5, 5]), ("mine", &[1, 0, 0])]);
+        let aside: BTreeSet<String> = ["me@example.invalid".to_string()].into();
+        let race = Race::by_repository(&result(vec![ada, bo, me]), &aside);
+        assert_eq!(race.racing, Racing::Repositories);
+        let totals: Vec<(&str, &[usize])> =
+            race.racers.iter().map(|racer| (racer.name.as_str(), racer.running.as_slice())).collect();
+        assert_eq!(totals, [("api", &[0, 1, 4, 6][..]), ("web", &[0, 0, 1, 1][..])]);
+        assert_eq!(race.racers[0].who, "/r/api");
     }
 }

@@ -940,7 +940,7 @@ mod tests {
             repos: repos
                 .iter()
                 .map(|(repo, total)| {
-                    let commits = RepoCommits { name: repo.to_string(), commits: Vec::new(), total: *total };
+                    let commits = RepoCommits { name: repo.to_string(), total: *total, ..Default::default() };
                     (PathBuf::from(format!("/r/{repo}")), commits)
                 })
                 .collect(),

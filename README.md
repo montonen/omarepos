@@ -111,7 +111,8 @@ come first. `Enter` opens that repository's graph on that commit. More in
 grid or the repositories you ticked: commits and lines per author, and commits per day,
 with a mailmap honoured. A row opens to the commits themselves. A second view
 counts every branch and not only the checked-out ones, and `r` plays the
-same as a race, the authors' bars overtaking one another day by day. More in
+same as a race, the authors' or the repositories' bars overtaking one another
+day by day. More in
 [Contributions](docs/contributions.md).
 
 ### Fetching, and pulling when you ask
