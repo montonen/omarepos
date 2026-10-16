@@ -279,6 +279,28 @@ pub fn install(window: &adw::ApplicationWindow) {
     });
     window.add_action(&pick);
 
+    // An action of the page in front, by its full name, with a string if it
+    // takes one: `page-act` with "race.frame=33". What a page offers only to
+    // a debug build is reached this way.
+    let page_act = gio::SimpleAction::new("page-act", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    page_act.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (name, arg) = match wanted.split_once('=') {
+            Some((name, arg)) => (name, Some(arg.to_variant())),
+            None => (wanted, None),
+        };
+        let Some(page) = first_nav(window.upcast_ref()).and_then(|nav| nav.visible_page()) else {
+            note!("omarepos: no page in front");
+            return;
+        };
+        if page.activate_action(name, arg.as_ref()).is_err() {
+            note!("omarepos: the page in front has no {name:?}");
+        }
+    });
+    window.add_action(&page_act);
+
     // Draw, into nothing. A window that is sent no frames never runs a draw
     // function, and the lanes, the bars and the dots are drawn by code that
     // can fail like any other. `paint` gives every drawing area on screen the
@@ -380,6 +402,56 @@ pub fn install(window: &adw::ApplicationWindow) {
         }
     });
     window.add_action(&shot);
+
+    // The same, of the window as it is now rather than as it was last
+    // drawn: laid out and drawn into the picture there and then. `shot`
+    // goes by the window's last frame, which is gone from the moment
+    // anything in it changes until the display asks for the next, about a
+    // second where these windows are: a recorded race (`race.frame`)
+    // changes on every step. Takes what `shot` takes.
+    let render = gio::SimpleAction::new("render", Some(gtk::glib::VariantTy::STRING));
+    let window_weak = window.downgrade();
+    render.connect_activate(move |_, wanted| {
+        let Some(window) = window_weak.upgrade() else { return };
+        let Some(wanted) = wanted.and_then(|wanted| wanted.str()) else { return };
+        let (scale, path) = match wanted.split_once(':') {
+            Some((scale, path)) if !scale.is_empty() && scale.chars().all(|c| c.is_ascii_digit()) => {
+                (scale.parse::<f32>().unwrap_or(1.0).clamp(1.0, 4.0), path)
+            }
+            _ => (1.0, wanted),
+        };
+        let (width, height) = (window.width(), window.height());
+        window.allocate(width, height, -1, None);
+        let snapshot = gtk::Snapshot::new();
+        snapshot.scale(scale, scale);
+        // The window's own background, which is drawn by the window and not
+        // by anything in it.
+        #[allow(deprecated)]
+        if let Some(background) = window.style_context().lookup_color("om_bg") {
+            snapshot.append_color(&background, &gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32));
+        }
+        let mut child = window.first_child();
+        while let Some(current) = child {
+            window.snapshot_child(&current, &snapshot);
+            child = current.next_sibling();
+        }
+        let Some(node) = snapshot.to_node() else {
+            note!("omarepos: there is nothing to take a picture of");
+            return;
+        };
+        let renderer = gtk::gsk::CairoRenderer::new();
+        if let Err(err) = renderer.realize(gtk::gdk::Surface::NONE) {
+            note!("omarepos: no picture: {err}");
+            return;
+        }
+        let texture = renderer.render_texture(&node, None);
+        renderer.unrealize();
+        match texture.save_to_png(path) {
+            Ok(()) => note!("omarepos: picture in {path}"),
+            Err(err) => note!("omarepos: no picture: {err}"),
+        }
+    });
+    window.add_action(&render);
 
     // Where the divider of a split page stands, in pixels from its top: the
     // commit graph above, what a commit changed below. A person drags it; a
@@ -673,6 +745,20 @@ fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
 
 /// The grid of cards, whether or not it is the page in front. By its class:
 /// the tag editor lays its tags out in a flow box as well.
+fn first_nav(widget: &gtk::Widget) -> Option<adw::NavigationView> {
+    if let Some(nav) = widget.downcast_ref::<adw::NavigationView>() {
+        return Some(nav.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = first_nav(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
 fn first_flow(widget: &gtk::Widget) -> Option<gtk::FlowBox> {
     if let Some(flow) = widget.downcast_ref::<gtk::FlowBox>().filter(|flow| flow.has_css_class("om-flow")) {
         return Some(flow.clone());

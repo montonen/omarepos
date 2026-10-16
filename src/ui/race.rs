@@ -188,6 +188,9 @@ struct Track {
     /// When the last frame was, in the frame clock's microseconds.
     last: Cell<Option<i64>>,
     ticking: Cell<bool>,
+    /// Being recorded a frame at a time (`race.frame`, debug builds only):
+    /// time moves when it is told to, and never by the frame clock.
+    recording: Cell<bool>,
     /// How wide the track is, as last laid out.
     width: Cell<i32>,
     /// Whether the desktop wants things to move; with it off, bars go
@@ -297,12 +300,16 @@ impl Track {
 
     /// Ask for frames until the race is paused and every bar is in place.
     fn tick(self: &Rc<Self>) {
-        if self.ticking.replace(true) {
+        if self.recording.get() || self.ticking.replace(true) {
             return;
         }
         let weak: Weak<Track> = Rc::downgrade(self);
         self.fixed.add_tick_callback(move |_, clock| {
             let Some(track) = weak.upgrade() else { return glib::ControlFlow::Break };
+            if track.recording.get() {
+                track.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
             let now = clock.frame_time();
             let dt = track.last.replace(Some(now)).map_or(0.0, |last| (now - last) as f64 / 1e6).min(0.25);
             if track.playing.get() {
@@ -506,6 +513,7 @@ pub fn page(field: Field) -> adw::NavigationPage {
         speed: Cell::new(0),
         last: Cell::new(None),
         ticking: Cell::new(false),
+        recording: Cell::new(false),
         width: Cell::new(0),
         animate,
         date,
@@ -591,6 +599,42 @@ pub fn page(field: Field) -> adw::NavigationPage {
         });
     }
     page.add_controller(keys);
+
+    // For recording the race as a video: `race.frame` with "start" takes it
+    // back to its first day and stops the frame clock, and with a number of
+    // milliseconds moves it on by as much as a frame that long would, bars
+    // easing as they do on screen. A display sends a window a frame when it
+    // likes, about one a second where the walk's windows are, and a video
+    // wants thirty to the second, every one of them the same length.
+    #[cfg(debug_assertions)]
+    {
+        let actions = gtk::gio::SimpleActionGroup::new();
+        let frame = gtk::gio::SimpleAction::new("frame", Some(glib::VariantTy::STRING));
+        let track = Rc::downgrade(&track);
+        frame.connect_activate(move |_, said| {
+            let Some(track) = track.upgrade() else { return };
+            let Some(said) = said.and_then(|said| said.str()) else { return };
+            track.recording.set(true);
+            track.set_playing(false);
+            if said == "start" {
+                track.t.set(0.0);
+                track.render(true, 0.0);
+                track.fixed.queue_draw();
+                return;
+            }
+            let Ok(ms) = said.parse::<f64>() else { return };
+            let dt = ms / 1000.0;
+            let days = track.race.borrow().as_ref().map_or(0.0, |race| race.days as f64);
+            let speed = SPEEDS[track.speed.get()];
+            track.t.set((track.t.get() + dt * days / LENGTH * speed).min(days));
+            track.render(false, dt);
+            // A frame for every step, even one where nothing moved: what
+            // records it waits for one.
+            track.fixed.queue_draw();
+        });
+        actions.add_action(&frame);
+        page.insert_action_group("race", Some(&actions));
+    }
 
     // Read the period, without line counts. A newer read wins over an older
     // one still on its way.

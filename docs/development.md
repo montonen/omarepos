@@ -119,7 +119,7 @@ monospace instead. The walk types the code and checks the table.
 | `src/ui/shortcuts.rs` | The keyboard, written down |
 | `src/ui/debug.rs` | Debug builds only: what `scripts/walk` drives the window through |
 | `scripts/walk/` | The walk: fixtures, the driver, the script that uses everything once, and the one that checks what needs frames |
-| `scripts/shots/` | The README's pictures: the public repositories they are taken of, and the script that takes them |
+| `scripts/shots/` | The README's pictures and the race's video: the public repositories they are taken of, and the scripts that take them |
 | `docs/` | These pages, and the README's pictures in `docs/img` |
 | `src/ui/stats.rs` | Contributions page |
 | `src/ui/search.rs` | Commit search page |
@@ -160,6 +160,24 @@ two minutes to take the pictures. Delete the scratch directory afterwards.
 The same window can be driven by hand for a picture of anything else:
 `drive.py resize 1360x1010`, `drive.py split 440` for the divider of a commit
 graph, and `drive.py shot FILE.png 2`.
+
+A video of the race (Contributions, `r`) over the same fleet is a third:
+
+```bash
+OMAREPOS_SHOTS_DIR=/some/scratch/dir scripts/shots/race.sh
+```
+
+It opens Contributions over the last 12 months, starts the race, and moves it
+on a thirtieth of a second at a time with `race.frame`, a page action only a
+debug build has, which also stops the race's own clock. Each frame is drawn
+with `render` and not `shot`. `shot` is of the last frame the display drew,
+which is gone from the moment anything changes until it draws the next, and
+that display draws about once a second; `render` lays the window out and
+draws it there and then. 601 frames at twice the size, scaled down and
+encoded with ffmpeg as `race.mp4` and `race.webm`, with the last frame held
+three seconds and kept as `race-poster.png`. About six minutes. `drive.py act
+page-act race.frame=start` (and `=33.3`) is the same by hand: `page-act`
+reaches any action of the page in front.
 
 ---
 
