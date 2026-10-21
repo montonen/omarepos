@@ -62,6 +62,12 @@ new theme in that place; the window watches for it and repaints, the drawn
 parts of a card included. Nothing is cached and nothing needs restarting.
 `follow_omarchy_theme = false` keeps the palette the window started with.
 
+On a desktop that is not Omarchy there is no theme there to read, and the
+window follows the desktop's own light or dark setting, as any libadwaita app
+does, with a built-in palette for each; it changes with the desktop's
+setting. The built-in palettes are also what a theme that leaves a colour out
+gets that colour from.
+
 Three things keep colours of their own. The lanes of a commit graph, and the
 dots on tags and on authors, use a fixed set of eight (a darker eight on a
 light theme), because they have to stay apart from each other in every theme

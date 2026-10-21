@@ -1024,6 +1024,20 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     ui.apply_theme();
     ui.watch_theme();
+    {
+        // With no Omarchy theme the window follows the desktop's light or
+        // dark, and so has to hear when the desktop changes it. Not in the
+        // middle of being told: restyling sets the colour scheme, which is
+        // what says this.
+        let ui = Rc::clone(&ui);
+        adw::StyleManager::default().connect_dark_notify(move |manager| {
+            if crate::theme::has_omarchy_theme() || ui.light.get() != manager.is_dark() {
+                return;
+            }
+            let ui = Rc::clone(&ui);
+            glib::idle_add_local_once(move || ui.apply_theme());
+        });
+    }
     ui.schedule_refresh();
     ui.start_scan();
     // Before the window is shown: a window shown with nothing focused picks
@@ -1033,15 +1047,27 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 }
 
 impl Ui {
-    /// Recompile the stylesheet from the active Omarchy palette.
+    /// Recompile the stylesheet from the active Omarchy palette, or, where
+    /// there is none, from the built-in one for the desktop's light or dark.
     fn apply_theme(self: &Rc<Self>) {
+        let manager = adw::StyleManager::default();
+        let omarchy = crate::theme::has_omarchy_theme();
+        if !omarchy {
+            // Not Omarchy: the desktop's own light or dark, as any libadwaita
+            // app has it, and the built-in palette to match. It was the dark
+            // one on every desktop.
+            manager.set_color_scheme(adw::ColorScheme::Default);
+            crate::theme::set_desktop_dark(manager.is_dark());
+        }
         let palette = Palette::load();
         self.provider.load_from_string(&palette.stylesheet());
-        adw::StyleManager::default().set_color_scheme(if palette.dark {
-            adw::ColorScheme::ForceDark
-        } else {
-            adw::ColorScheme::ForceLight
-        });
+        if omarchy {
+            manager.set_color_scheme(if palette.dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+        }
         *self.theme_name.borrow_mut() = palette.name.clone();
         self.sync_subtitle();
         // The lane and tag colours come in a set for each kind of background.

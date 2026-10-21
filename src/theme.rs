@@ -7,8 +7,25 @@
 //! user switches themes.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::home;
+
+/// Whether the desktop asks for dark, which is what the built-in palette
+/// goes by where there is no Omarchy theme. The window says so before it
+/// loads a palette (`set_desktop_dark`); until then, and for whatever reads a
+/// palette without a window, dark.
+static DESKTOP_DARK: AtomicBool = AtomicBool::new(true);
+
+pub fn set_desktop_dark(dark: bool) {
+    DESKTOP_DARK.store(dark, Ordering::Relaxed);
+}
+
+/// Whether there is an Omarchy theme to follow: on another desktop there is
+/// none, and the window follows the desktop's light or dark instead.
+pub fn has_omarchy_theme() -> bool {
+    state_dir().join("theme/colors.toml").is_file()
+}
 
 pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
@@ -170,7 +187,8 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The built-in palette, used when Omarchy's state directory isn't there.
+    /// The built-in dark palette: for a theme that leaves colours out, and,
+    /// with `fallback_light`, for a desktop that is not Omarchy.
     pub fn fallback() -> Self {
         Self {
             name: "builtin".into(),
@@ -191,8 +209,43 @@ impl Palette {
         }
     }
 
-    /// Read the active Omarchy palette, or fall back to the built-in one.
+    /// The built-in light palette, for a light desktop with no Omarchy theme.
+    /// It was the dark one whatever the desktop said, and omarepos the one
+    /// dark window on a light GNOME or KDE. Coloured text on it is fitted to
+    /// its backgrounds like any theme's (`ink`).
+    pub fn fallback_light() -> Self {
+        Self {
+            name: "builtin".into(),
+            dark: false,
+            bg: "#fafafa".into(),
+            bg_raised: "#ffffff".into(),
+            bg_sunken: "#ebebed".into(),
+            fg: "#1e2128".into(),
+            fg_dim: "#5e636e".into(),
+            border: "#d8dadf".into(),
+            accent: "#3b6fd4".into(),
+            red: "#b8303f".into(),
+            yellow: "#b07a10".into(),
+            green: "#3f8a2f".into(),
+            blue: "#3b6fd4".into(),
+            cyan: "#1d8189".into(),
+            magenta: "#8656c9".into(),
+        }
+    }
+
+    /// The built-in palette for a desktop that asks for dark, or not.
+    pub fn builtin(dark: bool) -> Self {
+        if dark { Self::fallback() } else { Self::fallback_light() }
+    }
+
+    /// Read the active Omarchy palette, or fall back to the built-in one for
+    /// the desktop's light or dark (`set_desktop_dark`).
     pub fn load() -> Self {
+        Self::load_for(DESKTOP_DARK.load(Ordering::Relaxed))
+    }
+
+    /// `load`, for a desktop that asks for dark or not.
+    pub fn load_for(desktop_dark: bool) -> Self {
         let dir = state_dir();
         let name = std::fs::read_to_string(dir.join("theme.name"))
             // The name goes into the header's label, which takes no NUL.
@@ -200,7 +253,7 @@ impl Palette {
             .ok()
             .filter(|s| !s.is_empty());
         let Ok(text) = std::fs::read_to_string(dir.join("theme/colors.toml")) else {
-            let mut fb = Self::fallback();
+            let mut fb = Self::builtin(desktop_dark);
             if let Some(name) = name {
                 fb.name = name;
             }
@@ -1348,6 +1401,7 @@ mod tests {
             })
             .collect();
         all.push(Palette::fallback());
+        all.push(Palette::fallback_light());
         all
     }
 
@@ -1681,6 +1735,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir.join("theme/colors.toml"), colors);
         dir
+    }
+
+    /// Not on Omarchy there is no theme to follow, and the built-in palette
+    /// is the desktop's light or dark one. Where there is a theme, the theme
+    /// says, whatever the desktop asks.
+    #[test]
+    fn with_no_omarchy_theme_the_desktop_says_light_or_dark() {
+        let _guard = isolate();
+        let dir = install("background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\n");
+        assert!(has_omarchy_theme());
+        assert!(Palette::load_for(false).dark, "the theme is dark, the desktop light");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!has_omarchy_theme());
+
+        let light = Palette::load_for(false);
+        assert!(!light.dark);
+        assert_eq!(light.bg, Palette::fallback_light().bg);
+        let dark = Palette::load_for(true);
+        assert!(dark.dark);
+        assert_eq!(dark.bg, Palette::fallback().bg);
+        assert!(!light.stylesheet().contains(&Palette::fallback().bg));
     }
 
     /// A colour was accepted on its length in bytes and a leading `#`. A

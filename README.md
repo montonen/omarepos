@@ -134,7 +134,8 @@ only enters repositories you have already seen. More in
 The window, the cards and the text take their colours from the active Omarchy
 theme, used the way Omarchy's own templates use it. `omarchy theme set`
 repaints the window as it stands: nothing is cached and nothing needs
-restarting. The lanes of a graph and the dots on tags and authors keep a fixed
+restarting. On another desktop it follows the desktop's light or dark, with a
+built-in palette for each. The lanes of a graph and the dots on tags and authors keep a fixed
 set of eight colours, which a theme's own handful of hues could not keep
 apart. More in [Configuration and theme](docs/configuration.md#theme).
 
