@@ -73,10 +73,16 @@ runs no `git`, fetches nothing and writes no file ([What it changes](read-only.m
 omarepos --json | jq -r '.repos[] | select(.needs_attention) | .path'
 ```
 
-What is printed is one object, with `schema_version`, `roots` and `repos` in
-it. `schema_version` is 1. It goes up when a key is taken away, renamed or
-comes to hold something else, and not when one is added, so a script should
-pass over keys it does not know.
+What is printed is one object, with `schema_version`, `roots`, `repos` and
+`fetch_failures_unreadable` in it. `schema_version` is 1. It goes up when a
+key is taken away, renamed or comes to hold something else, and not when one
+is added, so a script should pass over keys it does not know.
+
+`fetch_failures_unreadable` is `null`, or why the record of failed fetches
+(`~/.local/state/omarepos/fetch-errors.toml`) could not be read. Then no
+failed fetch is known: every `fetch_failed` is `null`, and `needs_attention`
+counts none. The snapshot is printed all the same, standard error says why,
+and the exit status is 0. The window takes such a record for no failures.
 
 Each of `roots` is a root in force, in the order it is given: its `path`, how
 many repositories it `found`, and `problem`, which is what the status bar says

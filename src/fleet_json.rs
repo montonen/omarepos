@@ -40,6 +40,11 @@ const SCHEMA_VERSION: u32 = 1;
 #[derive(Serialize)]
 struct Fleet {
     schema_version: u32,
+    /// Why the record of failed fetches could not be read, when it could not.
+    /// Then no failed fetch is known: every `fetch_failed` is `null` for not
+    /// being known, and `needs_attention` counts none. The window takes such a
+    /// record for no failures, and a script is not to.
+    fetch_failures_unreadable: Option<String>,
     /// The roots in force, in the order they are given, and what each came
     /// to. A root that is not there is said here. Otherwise its repositories
     /// are merely missing, and a disk that is not mounted reads as a fleet
@@ -210,7 +215,17 @@ impl LastCommit {
 /// Whatever stopped it is said on standard error, but for a reader that went
 /// away (`omarepos --json | head`), who is not waiting to be told.
 pub fn print(roots: Vec<String>, depth: Option<usize>) -> bool {
-    let text = match take(roots, depth).and_then(|fleet| encode(&fleet)) {
+    let fleet = match take(roots, depth) {
+        Ok(fleet) => fleet,
+        Err(why) => {
+            note!("omarepos: {why}");
+            return false;
+        }
+    };
+    if let Some(why) = &fleet.fetch_failures_unreadable {
+        note!("omarepos: no failed fetch is in the snapshot, as their record cannot be read: {why}");
+    }
+    let text = match encode(&fleet) {
         Ok(text) => text,
         Err(why) => {
             note!("omarepos: {why}");
@@ -238,7 +253,15 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
         .map_err(|why| unusable(&Config::path(), &why))?
         .with_command_line(roots, depth);
     let mut meta = Meta::try_load().map_err(|why| unusable(&crate::meta::path(), &why))?;
-    let failed = crate::config::load_fetch_errors();
+    // State, and not what the user wrote: the snapshot is taken without it,
+    // and says that it was.
+    let (failed, fetch_failures_unreadable) = match crate::config::try_load_fetch_errors() {
+        Ok(failed) => (failed, None),
+        Err(why) => {
+            let path = crate::config::fetch_errors_path();
+            (Default::default(), Some(crate::config::why_unusable(&path, &why)))
+        }
+    };
     let one_off = cfg.one_off();
 
     let (events, reports) = scan::spawn(cfg.roots(), cfg.extra_repos(), cfg.depth());
@@ -269,6 +292,7 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
 
     Ok(Fleet {
         schema_version: SCHEMA_VERSION,
+        fetch_failures_unreadable,
         roots: reports.iter().map(Root::of).collect(),
         repos: read
             .iter()
@@ -403,8 +427,9 @@ mod tests {
         let printed = snapshot(Vec::new(), None);
         let mut top: Vec<&String> = printed.as_object().unwrap().keys().collect();
         top.sort();
-        assert_eq!(top, ["repos", "roots", "schema_version"]);
+        assert_eq!(top, ["fetch_failures_unreadable", "repos", "roots", "schema_version"]);
         assert_eq!(printed["schema_version"], 1);
+        assert!(printed["fetch_failures_unreadable"].is_null());
         assert_eq!(printed["roots"], json!([{ "path": root, "found": 4, "problem": null }]));
         assert_eq!(names(&printed), ["fresh", "quiet", "seed", "work"], "in the order of their paths");
         // Every key on every repository, `null` or not: a script need not ask
@@ -621,6 +646,31 @@ mod tests {
         let printed = snapshot(Vec::new(), None);
         assert_eq!(printed["roots"][0]["problem"], "does not exist");
         assert_eq!(printed["repos"], json!([]));
+
+        start_afresh();
+    }
+
+    /// A record of failed fetches that cannot be read does not stop the
+    /// snapshot, as the window goes on without it too. What is printed says
+    /// that the failures are not known, which is not the same as none.
+    #[test]
+    fn a_record_of_failed_fetches_that_cannot_be_read_is_said() {
+        let _guard = isolate();
+        start_afresh();
+        let f = fleet("json-unread-record");
+        let root = || vec![f.root.display().to_string()];
+        // As a write in place leaves it, caught half done.
+        write(&crate::config::fetch_errors_path(), &format!("{} = \"timed ou", quoted(&key(&f.work))));
+
+        let printed = snapshot(root(), None);
+        let why = printed["fetch_failures_unreadable"].as_str().expect("said in what is printed");
+        assert!(why.contains("fetch-errors.toml"), "{why}");
+        let work = repo(&printed, "work");
+        assert!(work["fetch_failed"].is_null(), "{work:#}");
+        assert_eq!(work["needs_attention"], false);
+
+        let _ = std::fs::remove_file(crate::config::fetch_errors_path());
+        assert!(snapshot(root(), None)["fetch_failures_unreadable"].is_null(), "no record is no failures");
 
         start_afresh();
     }

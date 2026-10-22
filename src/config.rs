@@ -281,12 +281,21 @@ pub fn fetch_errors_path() -> PathBuf {
     last_refresh_path().with_file_name("fetch-errors.toml")
 }
 
+/// The record as the window takes it: one that cannot be read is no failures,
+/// as it always was. `--json` says so instead; see [`try_load_fetch_errors`].
 pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
+    try_load_fetch_errors().unwrap_or_default()
+}
+
+/// The record, or why it is there and cannot be read. No file is no failures.
+pub fn try_load_fetch_errors() -> Result<std::collections::BTreeMap<String, String>, String> {
+    let text = match std::fs::read_to_string(fetch_errors_path()) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(err) => return Err(err.to_string()),
+    };
     let read: std::collections::BTreeMap<String, toml::Value> =
-        std::fs::read_to_string(fetch_errors_path())
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default();
+        toml::from_str(&text).map_err(|err| err.to_string())?;
     // A file from before the fast-forward was taken out can also hold what
     // an update was refused for, written as a table. Those were never fetch
     // failures, and are left behind here; read as text, one of them would
@@ -294,12 +303,13 @@ pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
     //
     // One written before logins were taken out of what git said can still
     // hold one, and it is not shown again, on a card or by `--json`.
-    read.into_iter()
+    Ok(read
+        .into_iter()
         .filter_map(|(path, said)| match said {
             toml::Value::String(said) => Some((path, crate::remote_url::without_logins_in(&said))),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, String>) {
@@ -308,12 +318,13 @@ pub fn save_fetch_errors(errors: &std::collections::BTreeMap<String, String>) {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     match toml::to_string_pretty(errors) {
+        // Whole or not at all. It was written in place, which empties the
+        // file first, and `--json` reads it from outside the window, from
+        // cron as likely as not: caught half written, it was a fleet where
+        // nothing had failed.
         Ok(body) => {
-            if let Err(err) = std::fs::write(&path, body) {
+            if let Err(err) = write_state(&path, &body) {
                 note!("omarepos: could not record fetch failures: {err}");
             }
         }
@@ -1095,6 +1106,38 @@ mod tests {
 
         save_fetch_errors(&BTreeMap::new());
         assert!(!fetch_errors_path().exists(), "nothing wrong leaves no file behind");
+    }
+
+    /// Replaced whole, and never written in place: `--json` reads it from
+    /// outside the window, and a file caught half written read as a fleet
+    /// where nothing had failed. One that cannot be read says so, to whoever
+    /// asks for the reason.
+    #[test]
+    fn the_record_of_failed_fetches_is_replaced_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let _guard = isolate();
+        let path = fetch_errors_path();
+        let mut failures = BTreeMap::new();
+        failures.insert("/b/one".to_string(), "timed out after 60s".to_string());
+        save_fetch_errors(&failures);
+        let first = std::fs::metadata(&path).unwrap().ino();
+
+        failures.insert("/b/two".to_string(), "Authentication failed".to_string());
+        save_fetch_errors(&failures);
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), first, "written over in place");
+        assert_eq!(try_load_fetch_errors(), Ok(failures));
+        let beside: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains("fetch-errors"))
+            .collect();
+        assert_eq!(beside, ["fetch-errors.toml"], "no copy kept, nothing half written left");
+
+        write(&path, "\"/b/one\" = \"timed out");
+        assert!(try_load_fetch_errors().is_err());
+        assert!(load_fetch_errors().is_empty(), "the window carries on, as it always has");
+        save_fetch_errors(&BTreeMap::new());
     }
 
     /// The file as a version that fast-forwarded left it: a fetch failure, a
