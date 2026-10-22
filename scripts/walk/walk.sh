@@ -14,7 +14,8 @@
 #     scripts/walk/walk.sh offscreen  on a display of its own, not Hyprland
 #
 # Offscreen is GTK's Broadway, as frames.sh has it: its own daemon, no port
-# open and no compositor at all. The words go together: `walk.sh quick
+# open and no compositor at all, which is how CI walks
+# (.github/workflows/ci.yml). The words go together: `walk.sh quick
 # offscreen`.
 #
 # Needs Hyprland (hyprctl), or gtk4-broadwayd offscreen; and python3, gdbus

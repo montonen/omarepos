@@ -25,7 +25,8 @@ runs the program itself, as `omarepos --json`, in a home of its own under
 `target/tmp` and with nothing else in its environment, and holds it to what
 reaches the caller: standard output, standard error and the exit status. Every push and
 pull request is built and tested on GitHub
-(`.github/workflows/ci.yml`), in an Arch container with the packages above.
+(`.github/workflows/ci.yml`), in an Arch container with the packages above,
+and walked there as well ([In CI](#in-ci), below).
 
 A panic inside a GTK callback ends the program, and most of what a window
 does cannot be reached by a unit test. So there is a second kind of test, a
@@ -96,6 +97,34 @@ a walk would say omarepos had stopped.
 
 Run the walk after changing anything a person can click, and `frames.sh` too
 after changing what has the keyboard or how the header is laid out.
+
+## In CI
+
+GitHub walks every push and pull request as well as building and testing
+it, in the same Arch container and in a job beside the build and the tests:
+`frames.sh`, then `walk.sh quick offscreen`, about seven minutes between
+them. Every night it runs `frames.sh` and the whole walk, `walk.sh
+offscreen`, on master with that night's packages, and the same can be
+started on any branch from the Actions tab. A container has no session bus
+to drive the window over and no runtime directory for the display's
+sockets, so CI gives the scripts one of each. The same by hand, outside a
+desktop session:
+
+```bash
+export XDG_RUNTIME_DIR=$(mktemp -d) ADW_DISABLE_PORTAL=1
+dbus-run-session -- scripts/walk/frames.sh
+dbus-run-session -- scripts/walk/walk.sh quick offscreen
+```
+
+`ADW_DISABLE_PORTAL` keeps libadwaita from asking the settings portal whether
+the desktop is light or dark, when there is no desktop: the bus would start
+the portal, and the portal would say at length why it cannot run. In a
+desktop session all of it is there already, and the scripts are run as they
+are. When either fails in CI, what the window and its display wrote
+(`app.log`, `broadway.log`, a log for each time the program stopped, the last
+`dump`, and the fixtures as they were found and as they were left) is kept
+with the run as `walk-logs`. The walk on Hyprland is still the one to run by
+hand: it is the window as a person has it, on Wayland, which no runner has.
 
 ## The arcade
 

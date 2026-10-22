@@ -1,33 +1,54 @@
-# Build and test, on every push and every pull request.
+# Build, test and walk, on every push and every pull request; and the whole
+# walk every night.
 #
 # In an Arch container, since that is what Omarchy is: the packages the README
 # tells a person to install, at the versions a person would get today. The
 # tests build their own repositories under target/ and need git and nothing
 # else, no display and no session bus.
 #
-# The walk and the frames check (scripts/walk) are not run here. One needs
-# Hyprland and the other a display of its own that draws a frame a second.
-# They are run by hand, after a change to anything a person can click.
+# The walk (scripts/walk) needs a display and a session bus, and gets one of
+# each of its own: GTK's Broadway, which needs no compositor and draws a frame
+# a second, and `dbus-run-session`. On a push, the frames check and the quick
+# walk, which opens one fixture repository's pages instead of eight and takes
+# every other step, the read-only comparison of every fixture among them:
+# about seven minutes of walking, in a job of its own beside the build and
+# the tests, which comes back some six minutes after them. The whole walk
+# takes twelve, more than every push should wait for or be billed for, and
+# runs every night instead, on master as it stands and on that night's
+# packages: a change in GTK or libadwaita shows there even when nothing here
+# changed. Should the quick walk prove flaky on every push, the night is the
+# place for it too. The walk on Hyprland is still the one run by hand, after
+# a change to anything a person can click.
+#
+# docs/development.md says how to run what this runs, by hand.
 name: CI
 
 on:
   push:
   pull_request:
+  # At 03:17 UTC rather than on the hour, which is when scheduled runs wait
+  # longest to start.
+  schedule:
+    - cron: '17 3 * * *'
+  # The whole walk, on any branch, from the Actions tab.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to the same branch makes the run before it moot.
+# A newer push to the same branch makes the run before it moot. A night's run
+# and a push are in groups of their own, so that neither cancels the other.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: Build and test
     # A pull request from a branch of this repository has been built already,
-    # by the push that made it. One from a fork has not.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    # by the push that made it. One from a fork has not. At night only the
+    # walk runs; it builds as well, on that night's packages.
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     container: archlinux:latest
     timeout-minutes: 30
@@ -40,3 +61,60 @@ jobs:
         run: cargo build --locked
       - name: Test
         run: cargo test --locked
+
+  walk:
+    name: Walk, headless
+    # As the build and the tests, and at night and by hand.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 45
+    env:
+      # Where GTK, the display's daemon and the driver keep their sockets. A
+      # container has no such directory; a step below makes it.
+      XDG_RUNTIME_DIR: /tmp/runtime
+      # libadwaita asks the desktop's settings portal whether it is light or
+      # dark. A container has no desktop: the session bus starts the portal
+      # anyway, which finds nothing it can run and says so in a hundred lines,
+      # around what the walk says. The answer is the default either way.
+      ADW_DISABLE_PORTAL: '1'
+      # The quick walk on a push or a pull request, the whole one otherwise.
+      WALK: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && 'quick offscreen' || 'offscreen' }}
+    steps:
+      # The display's daemon comes with gtk4, gdbus with glib2 and busctl with
+      # systemd; python runs the driver.
+      - name: Install what the README says to install, and what the walk drives the window with
+        run: pacman -Syu --noconfirm --needed gtk4 libadwaita libgit2 git rust base-devel python glib2 systemd dbus
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        id: build
+        run: cargo build --locked
+      - name: Make the runtime directory
+        run: install -d -m 700 "$XDG_RUNTIME_DIR"
+      # In a directory of its own: each script starts by deleting the one it
+      # walks in, and what the frames check left is wanted if the walk fails.
+      - name: Frames
+        timeout-minutes: 10
+        run: OMAREPOS_WALK_DIR="$PWD/target/frames" dbus-run-session -- scripts/walk/frames.sh
+      # Whatever the frames check said, as long as there is something to walk:
+      # the two fail for different reasons.
+      - name: Walk (${{ env.WALK }})
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 35
+        run: dbus-run-session -- scripts/walk/walk.sh $WALK
+      # What the window and its display said, and what was on screen last,
+      # for a failure seen only here.
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walk-logs
+          overwrite: true
+          path: |
+            target/frames/*.log
+            target/frames/dump.txt
+            target/walk/*.log
+            target/walk/dump.txt
+            target/walk/as-*.txt
+          retention-days: 14
