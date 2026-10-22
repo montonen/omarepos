@@ -122,11 +122,20 @@ sleep 2
 keyboard GtkText "leaving the empty page did not put the keyboard in the filter"
 # The race runs on frames, which a walk's window is never sent. With
 # animations off (as here) it opens at its end; from the start, played, its
-# date has to move on.
+# date has to move on. Over 90 days, which it opened on when this was
+# written. A frame moves a race on by a quarter of a second of its twenty at
+# most, and frames come a second apart here: that is a day a frame over 90
+# days, and a day in twelve seconds over Contributions' own 7, where the race
+# has opened since it took the page's period. The four seconds this slept
+# saw no day go by, and it said the race did not run, every time. Waited
+# for now, up to fifteen seconds.
 X keys ctrl+g; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not open"
+X choose 'Time window=3'; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not read 90 days"
 X keys r; until_says "om-race-date" || wrong "r on Contributions did not open the race"
+X dump WindowTitle | grep -q "last 90 days" || wrong "the race did not open on 90 days ($(X dump WindowTitle))"
 X keys Home; started=$(X dump om-race-date)
-X keys space; sleep 4
+X keys space
+for i in $(seq 1 30); do [ "$(X dump om-race-date)" != "$started" ] && break; sleep 0.5; done
 [ "$(X dump om-race-date)" != "$started" ] || wrong "the race did not run when played ($started)"
 X keys space Escape Escape; sleep 1
 python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || wrong "the program stopped: $(grep -m1 -A1 'panicked at' "$W/app.log" | cut -c1-200)"
