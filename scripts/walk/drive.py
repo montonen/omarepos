@@ -8,6 +8,7 @@ compositor, so the desktop it runs on is not disturbed.
 
     drive.py start | stop | alive
     drive.py start-offscreen [WxH]  on a display of its own instead (see below)
+    drive.py memory             the most memory the window has held, and holds now
     drive.py keys KEY...        e.g. keys ctrl+f Return shift+question
     drive.py type TEXT
     drive.py press LABEL        "!LABEL" reaches a button that is not on screen
@@ -37,7 +38,7 @@ unless set), and OMAREPOS_WALK_ROOT the directory scanned (fleet/ in there).
 Set to nothing, the roots are the scratch configuration's own, and the window
 is an ordinary one and not a one-off look: it has a refresh, and says so.
 """
-import contextlib, hashlib, io, json, os, subprocess, sys, time
+import contextlib, hashlib, io, json, os, re, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -150,10 +151,18 @@ def start_offscreen(size=None):
     # with GTK 4.24 it can name one the daemon does not have: the daemon stops on
     # an assertion ("decode_nodes: assertion failed: (node != NULL)"), the window
     # goes with it, and a walk says omarepos stopped. The walk met it at the same
-    # step every time, the grid filled again under a toast after Contributions
-    # had been opened and closed. With cairo a frame is one picture, and names
-    # nothing. Nothing here goes by how the daemon was sent a frame: `shot` and
-    # `render` draw with a renderer of their own.
+    # step every time: Contributions or a graph opened and closed, and then the
+    # grid cut down by the filter and filled again. With cairo a frame is one
+    # picture, and names nothing. Nothing here goes by how the daemon was sent a
+    # frame: `shot` and `render` draw with a renderer of their own.
+    #
+    # It costs memory. On this display GTK 4.24 keeps every picture cairo draws:
+    # the window grows by one of itself a frame, 4 MB at 1280 by 800 and 8 at
+    # 1920 by 1080, and a frame comes every second that anything changes. A
+    # quick walk in one window at the larger size came to 2.5 GB and the whole
+    # walk to 4.2, most of what a CI runner has. So the walk gives each of its
+    # parts a window of its own (walk.sh), and `memory` says what a window had
+    # come to.
     env = dict(os.environ, GDK_BACKEND='broadway', BROADWAY_DISPLAY=DISPLAY, GSK_RENDERER='cairo',
                XDG_CONFIG_HOME=f'{W}/config', XDG_STATE_HOME=f'{W}/state',
                GIT_CONFIG_GLOBAL=f'{W}/gitconfig', GIT_CONFIG_NOSYSTEM='1',
@@ -175,20 +184,29 @@ def start_offscreen(size=None):
 
 
 def come_to(size):
-    """Give a window on a display of its own a size, and wait until it is that wide and
-    at rest. A change of width across a breakpoint takes the content off screen until
-    a later frame, and frames come about one a second here; nothing is drawn while
-    nothing changes, so two seconds with no new frame is a window at rest."""
+    """Give a window on a display of its own a size, and wait until the change is over.
+    A change of width across a breakpoint takes the content off screen until a later
+    frame, and frames come about one a second here: it is over two frames after the
+    window is that wide, or once two seconds have gone by without one, since nothing is
+    drawn while nothing changes. Not when frames stop coming altogether: a window just
+    started draws one a second for a dozen seconds, with nothing to see changing."""
     act('resize', size)
     width = 'width: %s ' % size.split('x')[0]
-    last, still = None, 0
-    for _ in range(120):
+    wide, last, since, give_up = None, None, time.monotonic(), time.monotonic() + 30
+    while time.monotonic() < give_up:
         time.sleep(0.25)
-        now = (look('width:'), look('frames:'))
-        still = still + 1 if now == last and width in (now[0] or '') else 0
-        if still >= 8:
+        now = look('width:', 'frames:') or ''
+        drawn = re.search(r'frames: (\d+)', now)
+        if width not in now or not drawn:
+            continue
+        drawn = int(drawn[1])
+        wide = drawn if wide is None else wide
+        if drawn >= wide + 2:
             return
-        last = now
+        if drawn != last:
+            last, since = drawn, time.monotonic()
+        elif time.monotonic() - since >= 2:
+            return
     raise SystemExit(f'did not come to {size}: {look("width:")}')
 
 
@@ -224,15 +242,35 @@ def settle():
         last = now
 
 
-def look(needle):
-    """What `dump NEEDLE` would print, as a string; None while the window cannot say."""
+def memory():
+    """The most memory the window has held, and what it holds now, as the kernel
+    counts it, in MB; offscreen, the display's daemon's as well."""
+    def held(pid):
+        said = {}
+        with contextlib.suppress(OSError):
+            for line in open(f'/proc/{pid}/status'):
+                key, _, value = line.partition(':')
+                if key in ('VmHWM', 'VmRSS'):
+                    said[key] = int(value.split()[0]) // 1024
+        return said
+    window = held(mine())
+    print(f"window {window.get('VmHWM', '?')} MB at most, {window.get('VmRSS', '?')} MB now", end='')
+    if daemon():
+        print(f"; display {held(daemon()).get('VmHWM', '?')} MB at most", end='')
+    print()
+
+
+def look(*needles):
+    """The lines of one `dump` that say any of these, as a string; None while the window
+    cannot say."""
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            dump(needle)
+            dump()
     except (SystemExit, OSError):
         return None
-    return buf.getvalue().strip()
+    return '\n'.join(line.strip() for line in buf.getvalue().splitlines()
+                     if any(needle in line.lower() for needle in needles))
 
 
 def bus():
@@ -297,6 +335,8 @@ def main(argv):
         stop_daemon()
     elif cmd == 'alive':
         print('alive', mine())
+    elif cmd == 'memory':
+        memory()
     elif cmd == 'keys':
         keys(rest)
     elif cmd == 'dump':

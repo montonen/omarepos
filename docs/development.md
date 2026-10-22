@@ -93,7 +93,14 @@ display's own 1024 by 768 the header has no room for the tag buttons the walk
 counts. It needs `gtk4-broadwayd` instead of Hyprland. A window there is drawn
 with cairo, since GTK's own renderer for it can send the display's daemon a
 frame the daemon cannot read: the daemon stops, the window goes with it, and
-a walk would say omarepos had stopped.
+a walk would say omarepos had stopped. Drawn with cairo, though, a window on
+that display keeps every frame it draws, a picture of itself a second while
+anything changes (GTK 4.24), and the whole walk in one window came to 4.2
+GB. So offscreen each part of the walk that stands on its own (the grid,
+each repository, the commit search, contributions, the tags and themes, the
+settings) gets a window of its own. Whichever way it runs, the walk says at
+the end of each part how much memory the window had come to, and calls it
+wrong past 2 GB.
 
 Run the walk after changing anything a person can click, and `frames.sh` too
 after changing what has the keyboard or how the header is laid out.
@@ -121,10 +128,11 @@ the desktop is light or dark, when there is no desktop: the bus would start
 the portal, and the portal would say at length why it cannot run. In a
 desktop session all of it is there already, and the scripts are run as they
 are. When either fails in CI, what the window and its display wrote
-(`app.log`, `broadway.log`, a log for each time the program stopped, the last
-`dump`, and the fixtures as they were found and as they were left) is kept
-with the run as `walk-logs`. The walk on Hyprland is still the one to run by
-hand: it is the window as a person has it, on Wayland, which no runner has.
+(`app.log`, each earlier part's as `app-N.log`, `broadway.log`, a log for
+each time the program stopped, the last `dump`, and the fixtures as they were
+found and as they were left) is kept with the run as `walk-logs`. The walk on
+Hyprland is still the one to run by hand: it is the window as a person has
+it, on Wayland, which no runner has.
 
 ## The arcade
 

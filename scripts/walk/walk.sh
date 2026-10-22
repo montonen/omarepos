@@ -31,7 +31,10 @@ for word in "$@"; do
     quick) QUICK=quick ;;
     # The size of a screen. On a hidden workspace the window is as large as
     # the one it is on, and at Broadway's own 1024 by 768 the header has no
-    # room for five tag buttons, which the walk counts.
+    # room for five tag buttons, which the walk counts. Smaller would cost
+    # less memory a frame (drive.py), but below some 1350 the five tags take
+    # the header across a breakpoint, which here is over a frame or two after
+    # the walk has counted them: at 1280 by 800 it counted none.
     offscreen) START="start-offscreen 1920x1080" ;;
     *) echo "usage: walk.sh [quick] [offscreen]"; exit 2 ;;
   esac
@@ -49,6 +52,22 @@ config() { printf 'roots = [\n    { path = "%s/fleet", tag = "JM" },\n]\nmax_dep
 # after a start's wait of ten seconds, for an hour and a half.
 boot() { config; X $START
   python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || { echo "the window did not start"; X stop; exit 2; }; }
+# What the window came to, said as it is let go of. Past 2 GB one window has
+# been given too much of the walk: a CI runner has 7, and the kernel stops a
+# window that takes them without a word to say so.
+memory() { local said; said=$(python3 "$HERE/drive.py" memory 2>&1); echo "memory, $1: $said"
+  if [[ $said =~ ^window\ ([0-9]+)\ MB ]] && [ "${BASH_REMATCH[1]}" -ge 2048 ]; then
+    WRONG=$((WRONG+1)); echo "WRONG: the window came to ${BASH_REMATCH[1]} MB in $1"; fi; }
+# Offscreen, each part of the walk that stands on its own gets a window of its
+# own, since a window there keeps every frame it has drawn. Nothing a check
+# looks at is carried from one part into the next but what is on disk, the tag
+# file and the theme, which a new window reads. The settings and the files
+# changed under the window are one part, being one configuration's story. The
+# window's log goes with it, as app-N.log. On Hyprland the one window walks
+# on, and says what it has come to at the same places.
+PART=0; NOW="the launch and the grid"
+part() { memory "$NOW"; NOW=$1; [ "$START" = start ] && return
+  PART=$((PART+1)); cp "$W/app.log" "$W/app-$PART.log"; boot; }
 step() { # what it is, then the commands
   STEPS=$((STEPS+1)); local what="$1"; shift
   eval "$@" >/dev/null 2>&1
@@ -156,6 +175,7 @@ step "back" "X keys Escape Escape"
 REPOS="merges detached conflicted broken lots delta alpha beta"
 [ "$QUICK" = quick ] && REPOS="merges"
 for repo in $REPOS; do
+  part "$repo"
   step "open $repo" "open_repo $repo"
   for row in 0 1 2 3 4 5 6 7 8 9 10 11 12 13; do WAIT=0.45 step "$repo: commit row $row" "X pick 0:$row"; done
   step "$repo: into the files" "X pick 0:0; X keys Tab"
@@ -185,6 +205,7 @@ for repo in $REPOS; do
 done
 
 # ---- a repository with a page on the web: the button and the key
+part "widgets, alpha and the commit search"
 step "widgets: open" "open_repo widgets"
 N=$(asked); step "widgets: the button in the header" 'X press "Open on git.example.invalid"'
 asks $N 1 "the button on a graph page did not ask for the page"
@@ -209,6 +230,7 @@ step "walk the windowed graph" "X pick 0:3; X pick 0:1"
 step "back to the grid" "X keys Escape Escape Escape"
 
 # ---- contributions across the fleet
+part "contributions"
 step "contributions" "X keys ctrl+g; sleep 1.6"
 step "14 days" "X choose 'Time window=1'; sleep 1.3"
 step "30 days" "X choose 'Time window=2'; sleep 1.5"
@@ -286,6 +308,7 @@ step "back" "X keys Escape"
 # ---- tags: the menu, the editor, the chips
 # Up to five tags have a button each in the header; more than that and the
 # menu lists them.
+part "tags and themes"
 buttons() { [ "$(X dump | grep -c 'om-quick-tag')" = "$1" ] || { WRONG=$((WRONG+1)); echo "WRONG: the header does not have $1 tag buttons"; }; }
 tags "one two three four five"; step "five tags: a button each" "X keys ctrl+r; sleep 1.2"
 buttons 5
@@ -349,6 +372,7 @@ named walk-dark
 step "no theme" "rm -rf $C/theme $C/theme.name; sleep 1"
 
 # ---- settings, row by row
+part "the settings and the files under the window"
 step "settings" "X act settings; sleep 0.6"
 for r in "Look inside repositories=on" "Show the containing repository=on" "Show the containing repository=off" \
   "Look inside repositories=off" "Tag what is found here=WORK" "Tag what is found here=two words" "Tag what is found here=" \
@@ -371,6 +395,7 @@ step "both mended" "config; rm -f $W/config/omarepos/repos.toml; X keys ctrl+r; 
 step "a root that is not there, and one that is a file" "printf 'roots = [\"/nonexistent/place\", \"%s/fleet/alpha/README.md\"]\n' $W > $W/config/omarepos/config.toml; X keys ctrl+r; sleep 1.2"
 step "settings on that" "X act settings; sleep 0.5; X keys Escape"
 
+memory "$NOW"
 X stop
 # ---- and nothing was written, but by the `p` that was asked for
 b="$W/fleet/beta"
