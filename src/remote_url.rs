@@ -4,24 +4,59 @@
 //! A URL can carry whoever it logs in as, a token included, and each of these
 //! ends up somewhere that keeps it: on screen, in the log a `--json` run is
 //! piped to, in a browser's history. So all of them go through [`login`], the
-//! one place that says where a login ends. It errs on the side of taking out
-//! too much.
+//! one place that says where a login ends, and whether that can be told.
 
-/// Where the login in `url` is: from just after the scheme's `://`, or from
-/// the start of a remote written as scp writes one (`who@host:path`), to just
-/// after the last `@` there is.
+use std::ops::Range;
+
+/// What is shown where something cannot be: a login, or the host of a remote
+/// that could be read as naming more than one.
+pub const HIDDEN: &str = "•••";
+
+/// A login in a remote's URL: from just after the scheme's `://`, or from the
+/// start of a remote written as scp writes one (`who@host:path`), to just
+/// after the `@` that ends it.
+#[derive(Debug, PartialEq)]
+enum Login {
+    /// It ends at the last `@` before the first `/`, where git ends it, and
+    /// what follows it is the host.
+    Plain(Range<usize>),
+    /// There is no telling where it ends: an `@` comes after the first `/`,
+    /// and it is a login with a slash in it or a path with an `@` in it. It is
+    /// taken to run to the last `@` of all, which may take the front of the
+    /// path with it, that being the side to fail on. No page is named for it.
+    Unsure(Range<usize>),
+    /// It holds a `?`, `#`, `[` or `]`, at which git stops reading for a host,
+    /// and so goes to a host other than the one that seems to follow the `@`:
+    /// `https://evil.invalid#@other.invalid/x` reaches `evil.invalid`. Neither
+    /// is named, nor a page.
+    Misleading(Range<usize>),
+}
+
+impl Login {
+    fn at(&self) -> Range<usize> {
+        match self {
+            Login::Plain(at) | Login::Unsure(at) | Login::Misleading(at) => at.clone(),
+        }
+    }
+}
+
+/// The login in `url`, if it has one.
 ///
-/// The last `@`, and not the first, nor the last before the first `/`. A login
-/// is not supposed to hold either unencoded, and one that does is configured
-/// all the same: `https://me:p@ss@host/x` and `https://me:a/b@host/x` both
-/// reach a remote that way, or fail to with the URL in git's error. Cut at the
-/// first `@`, or ended at the first `/`, what was shown held the rest of the
-/// password. An `@` in the path is taken for the end of a login as well, and
-/// the path loses what comes before it. That is the side to fail on.
+/// Where git ends a login is at the last `@` before the first `/` that follows
+/// the scheme, which is also where its address goes on to the path. That keeps
+/// `https://me:p@ss@host/x` and `oauth2:token@gitlab.com:group/repo` from
+/// showing half of their secret, and leaves `git@host.example:acme/w@v2` its
+/// host and its path.
+///
+/// An `@` after the first `/` as well makes two readings of it. `@` before the
+/// slash, and what lies between that `@` and the slash is not something that
+/// can be a host, as in `me:p@ss/word@host/x`, and the login is taken to run
+/// to the last `@` (unsure); no `@` before the slash, and there is no telling
+/// either (unsure).
 ///
 /// A path on disk has no login. git takes a remote for one when it has no
 /// colon, or a slash before the first.
-fn login(url: &str) -> Option<std::ops::Range<usize>> {
+fn login(url: &str) -> Option<Login> {
     let start = match url.find("://") {
         Some(at) => at + "://".len(),
         None => {
@@ -32,14 +67,36 @@ fn login(url: &str) -> Option<std::ops::Range<usize>> {
             0
         }
     };
-    let end = start + url[start..].rfind('@')? + 1;
-    Some(start..end)
+    let rest = &url[start..];
+    let last = rest.rfind('@')?;
+    let slash = rest.find('/').unwrap_or(rest.len());
+    let to = |at: usize| start..start + at + 1;
+    match rest[..slash].rfind('@') {
+        Some(at) if at == last || can_be_a_host(&rest[at + 1..slash]) => {
+            if rest[..at].contains(['?', '#', '[', ']']) {
+                Some(Login::Misleading(to(at)))
+            } else {
+                Some(Login::Plain(to(at)))
+            }
+        }
+        _ => Some(Login::Unsure(to(last))),
+    }
+}
+
+/// Whether what follows a login, up to the first `/`, can be the host: a name
+/// with a dot in it, or one followed by a port, or, as scp writes it, by a
+/// colon and the path.
+fn can_be_a_host(text: &str) -> bool {
+    text.contains(['.', ':'])
 }
 
 /// `url` without whoever it logs in as: see [`login`].
 fn without_login(url: &str) -> String {
     match login(url) {
-        Some(login) => format!("{}{}", &url[..login.start], &url[login.end..]),
+        Some(login) => {
+            let at = login.at();
+            format!("{}{}", &url[..at.start], &url[at.end..])
+        }
         None => url.to_string(),
     }
 }
@@ -70,8 +127,16 @@ pub fn without_logins_in(text: &str) -> String {
 
 /// What a card calls a remote: `git@github.com:owner/repo.git` and
 /// `https://me:token@host/owner/repo.git` both come to `host/owner/repo`.
+///
+/// A remote whose login is [misleading](Login::Misleading) is called
+/// [`HIDDEN`]. The host it seems to name is not where git goes, and the one
+/// git does go to can be the front of a password.
 pub fn tidy(url: &str) -> String {
-    let url = without_login(url.trim());
+    let url = url.trim();
+    if matches!(login(url), Some(Login::Misleading(_))) {
+        return HIDDEN.to_string();
+    }
+    let url = without_login(url);
     let url = url.trim_end_matches('/');
     let url = url.strip_suffix(".git").unwrap_or(url);
     if let Some((_, rest)) = url.split_once("://") {
@@ -122,17 +187,15 @@ pub fn web_url(remote: &str) -> Option<String> {
         return None;
     }
     let scp = !url.contains("://");
-    if let Some(login) = login(url) {
-        let login = &url[login];
-        // A slash in what is taken for the login is a password with one in
-        // it, or a path with an `@` in it, and there is no telling which. In
-        // a remote written as scp writes one, git takes whatever comes before
-        // the first colon for the host, and a login with a colon in it puts
-        // the host somewhere else than it seems to be. No page, rather than
-        // the wrong one, or one with half a password in its path.
-        if login.contains('/') || (scp && login.contains(':')) {
-            return None;
-        }
+    match login(url) {
+        // In a remote written as scp writes one, git takes whatever comes
+        // before the first colon for the host, and a login with a colon in it
+        // puts the host somewhere else than it seems to be.
+        Some(Login::Plain(at)) if scp && url[at.clone()].contains(':') => return None,
+        Some(Login::Plain(_)) | None => {}
+        // No page, rather than the wrong one, or one with half a password in
+        // its path.
+        Some(Login::Unsure(_) | Login::Misleading(_)) => return None,
     }
     let url = without_login(url);
     let url = url.trim_end_matches('/');
@@ -218,28 +281,88 @@ pub fn web_site(page: &str) -> &str {
 mod tests {
     use super::*;
 
-    /// Remotes with a login in them, as they have been configured: written
-    /// properly, and three ways that are not proper and still configured. A
-    /// password with an `@` in it, a token put in front of a remote written
-    /// as scp writes one, and a password with a `/` in it each showed some of
-    /// the secret on the card, and the last in the page `o` opens.
-    const LOGINS: &[&str] = &[
-        "https://jm:ghp_SECRET0123456789@github.com/acme/widgets.git",
-        "https://jm:p@SECRET@github.com/acme/widgets.git",
-        "oauth2:glpat-SECRET@gitlab.com:group/repo.git",
-        "https://deploy:abc/SECRET@example.invalid/x.git",
-        "ssh://deploy:SECRET@git.example.org:2222/acme/widgets.git",
+    /// A remote, what a card calls it, and the page `o` opens for it.
+    type Shown = (&'static str, &'static str, Option<&'static str>);
+
+    fn shown(cases: &[Shown]) {
+        for (remote, named, page) in cases {
+            assert_eq!((tidy(remote).as_str(), web_url(remote).as_deref()), (*named, *page), "{remote}");
+        }
+    }
+
+    /// Every way two reviews found a login written into a remote: properly,
+    /// and the ways that are not proper and are configured all the same. None
+    /// of the secret may reach the card or the page.
+    const LOGINS: &[Shown] = &[
+        (
+            "https://jm:ghp_SECRET0123456789@github.com/acme/widgets.git",
+            "github.com/acme/widgets",
+            Some("https://github.com/acme/widgets"),
+        ),
+        (
+            "ssh://deploy:SECRET@git.example.org:2222/acme/widgets.git",
+            "git.example.org:2222/acme/widgets",
+            Some("https://git.example.org/acme/widgets"),
+        ),
+        // An `@` in the password.
+        ("https://jm:p@SECRET@github.com/acme/widgets.git", "github.com/acme/widgets", Some("https://github.com/acme/widgets")),
+        // A token in front of a remote written as scp writes one, which git
+        // reads as a host called `oauth2`.
+        ("oauth2:glpat-SECRET@gitlab.com:group/repo.git", "gitlab.com/group/repo", None),
+        // A `/` in the password, alone and with a quote or a space beside it,
+        // which cannot be told from a path with an `@` in it.
+        ("https://deploy:abc/SECRET@example.invalid/x.git", "example.invalid/x", None),
+        ("https://user:it's/SECRET@example.invalid/x.git", "example.invalid/x", None),
+        ("https://user:pa ss/SECRET@example.invalid/x.git", "example.invalid/x", None),
+        // An `@` and then a `/`, with no host between them.
+        ("https://me:p@SE/CRET@example.invalid/x.git", "example.invalid/x", None),
+        // A `?` in the password, at which git stops reading for the host.
+        ("https://me:p@SE?CRET@example.invalid/x.git", HIDDEN, None),
     ];
 
     #[test]
-    fn a_card_never_names_a_remote_with_its_login() {
+    fn no_login_reaches_the_card_or_the_page() {
+        shown(LOGINS);
+        for (remote, ..) in LOGINS {
+            let (named, page) = (tidy(remote), web_url(remote).unwrap_or_default());
+            assert!(!named.contains("CRET") && !page.contains("CRET"), "{remote}: {named} {page}");
+        }
+    }
+
+    /// Working remotes with an `@` in the path, and a login in front of the
+    /// host. Taking the login to the last `@` of all made `git@host:acme/w@v2`
+    /// a remote called `v2` with no page.
+    #[test]
+    fn a_remote_with_an_at_in_its_path_keeps_its_name_and_its_page() {
+        shown(&[
+            ("git@host.example:acme/w@v2.git", "host.example/acme/w@v2", Some("https://host.example/acme/w@v2")),
+            ("ssh://git@host.example/acme/w@v2.git", "host.example/acme/w@v2", Some("https://host.example/acme/w@v2")),
+            (
+                "https://jm:ghp_SECRET@host.example/acme/w@v2.git",
+                "host.example/acme/w@v2",
+                Some("https://host.example/acme/w@v2"),
+            ),
+            // With no login there is no telling it from a login with a `/` in
+            // it, and the path pays for that.
+            ("https://git.example.org/team@2024/widgets.git", "2024/widgets", None),
+        ]);
+    }
+
+    /// A login with a `?`, `#`, `[` or `]` in it. git stops reading for the
+    /// host there, and goes somewhere other than the host that seems to
+    /// follow the `@`, which was named on the card and opened by `o`.
+    #[test]
+    fn a_login_that_hides_where_git_goes_names_no_host() {
+        shown(&[
+            ("https://evil.invalid#@other.invalid/acme/w", HIDDEN, None),
+            ("https://evil.invalid?@other.invalid/acme/w", HIDDEN, None),
+            ("[git@host.example:2222]:acme/w.git", HIDDEN, None),
+        ]);
+    }
+
+    #[test]
+    fn a_card_names_a_remote_by_its_host_and_path() {
         for (remote, named) in [
-            ("https://jm:ghp_SECRET0123456789@github.com/acme/widgets.git", "github.com/acme/widgets"),
-            ("https://jm:p@SECRET@github.com/acme/widgets.git", "github.com/acme/widgets"),
-            ("oauth2:glpat-SECRET@gitlab.com:group/repo.git", "gitlab.com/group/repo"),
-            ("https://deploy:abc/SECRET@example.invalid/x.git", "example.invalid/x"),
-            ("ssh://deploy:SECRET@git.example.org:2222/acme/widgets.git", "git.example.org:2222/acme/widgets"),
-            // The everyday spellings, which never had a secret in them.
             ("https://github.com/acme/widgets.git", "github.com/acme/widgets"),
             ("git@github.com:acme/widgets.git", "github.com/acme/widgets"),
             ("ssh://git@github.com/acme/widgets.git", "github.com/acme/widgets"),
@@ -248,14 +371,8 @@ mod tests {
             ("/srv/git/widgets.git", "/srv/git/widgets"),
             ("/srv/backups@2024/widgets.git", "/srv/backups@2024/widgets"),
             ("./with:colon/widgets", "./with:colon/widgets"),
-            // An `@` in the path is taken for the end of a login, and costs
-            // the path its front. Never the other way round.
-            ("https://git.example.org/team@2024/widgets.git", "2024/widgets"),
         ] {
             assert_eq!(tidy(remote), named, "{remote}");
-        }
-        for remote in LOGINS {
-            assert!(!tidy(remote).contains("SECRET"), "{remote}: {}", tidy(remote));
         }
     }
 
@@ -300,13 +417,6 @@ mod tests {
                 "https://acme@dev.azure.com/acme/Shop/_git/widgets",
                 Some("https://dev.azure.com/acme/Shop/_git/widgets"),
             ),
-            // A login that cannot be told from the rest: a slash in it, which
-            // is a password with one or a path with an `@` in it; and a colon
-            // in front of the host of a remote written as scp writes one,
-            // where git looks for the host before that colon.
-            ("https://deploy:abc/SECRET@example.invalid/x.git", None),
-            ("https://git.example.org/team@2024/widgets.git", None),
-            ("oauth2:glpat-SECRET@gitlab.com:group/repo.git", None),
             // Subgroups, a namespace with a tilde, a path from the root.
             (
                 "git@gitlab.com:acme/platform/widgets.git",
@@ -359,10 +469,6 @@ mod tests {
         ];
         for (remote, page) in cases {
             assert_eq!(web_url(remote).as_deref(), *page, "{remote:?}");
-        }
-        for remote in LOGINS {
-            let page = web_url(remote);
-            assert!(!page.as_deref().unwrap_or("").contains("SECRET"), "{remote}: {page:?}");
         }
     }
 

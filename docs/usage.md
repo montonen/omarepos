@@ -100,7 +100,7 @@ every key:
 | `name`, `path` | The folder's name, and its absolute path |
 | `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote on any of its branches, or the last fetch failed on it |
 | `error` | Why the repository could not be read at all |
-| `remote` | The remote as a card shows it, `host/owner/repository`: `origin`, or the first remote there is |
+| `remote` | The remote as a card shows it, `host/owner/repository`: `origin`, or the first remote there is. `•••` where its login hides which host git goes to |
 | `web` | The remote's page on the web, where its URL says where one is |
 | `head` | The branch, or a short commit id when HEAD is detached |
 | `detached`, `unborn`, `bare` | HEAD is detached; there are no commits yet, and `head` is the branch the first will be on; there is no working tree |

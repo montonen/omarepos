@@ -543,7 +543,7 @@ mod tests {
         let base = scratch("json-token");
         // The remote; what the card calls it; its page; and what git said
         // when it was fetched, as git said it.
-        let remotes: [(&str, &str, &str, Option<&str>, Option<&str>); 4] = [
+        let remotes: [(&str, &str, &str, Option<&str>, Option<&str>); 7] = [
             (
                 "token",
                 "https://someone:SECRET-t0ken@git.example.invalid/acme/billing.git",
@@ -573,6 +573,17 @@ mod tests {
                      URL rejected: Port number was not a decimal number between 0 and 65535",
                 ),
             ),
+            ("at-slash", "https://me:p@SE/CRET@example.invalid/x.git", "example.invalid/x", None, None),
+            // A working remote with an `@` in its path keeps its name and page.
+            (
+                "path-at",
+                "git@host.example:acme/w@v2.git",
+                "host.example/acme/w@v2",
+                Some("https://host.example/acme/w@v2"),
+                None,
+            ),
+            // One that goes somewhere other than it seems names nothing.
+            ("decoy", "https://evil.invalid#@other.invalid/acme/w", crate::remote_url::HIDDEN, None, None),
         ];
         let mut record = String::new();
         for (name, url, _, _, said) in remotes {
@@ -588,7 +599,7 @@ mod tests {
 
         let fleet = take(vec![base.display().to_string()], None).expect("a snapshot");
         let text = encode(&fleet).unwrap();
-        for secret in ["SECRET", "someone", "deploy", "oauth2"] {
+        for secret in ["SECRET", "CRET", "someone", "deploy", "oauth2", "other.invalid"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
 

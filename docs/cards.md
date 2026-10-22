@@ -88,11 +88,16 @@ worked out from the remote the card names (`origin`, or the first one there
 is): `git@github.com:acme/widgets.git` and `https://github.com/acme/widgets.git`
 both become `https://github.com/acme/widgets`. A user name or token written
 into the remote is left out, and so is an ssh port; an `http://` remote keeps
-its port, being a web address already. The login is taken to end at the last
-`@`, so a password with an `@` in it leaves nothing of itself behind. One with
-a `/` in it cannot be told from a path with an `@` in it, and that remote gets
-no page at all. The remote on the card, and the reason a fetch failed, leave
-the login out in the same way. The tooltip shows exactly what will be
+its port, being a web address already. The login is taken to end where git
+ends it, at the last `@` before the first `/`: a password with an `@` in it
+leaves nothing of itself behind, and a path with an `@` in it keeps its place.
+Where an `@` comes after the first `/` as well, and nothing that can be a host
+comes between, a password with a `/` in it cannot be told from a path with an
+`@` in it: the login is taken to run to the last `@`, and that remote gets no
+page at all. A login with a `?`, `#`, `[` or `]` in it sends git to another
+host than the one that seems to follow the `@`, and the card calls that remote
+`•••`, with no page. The remote on the card, and the reason a fetch failed,
+leave the login out in the same way. The tooltip shows exactly what will be
 opened, and the menu names the site: GitHub, GitLab, Bitbucket, Codeberg and
 Azure DevOps by name, anything else by its host.
 
