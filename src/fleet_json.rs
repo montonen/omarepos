@@ -41,8 +41,9 @@ struct Fleet {
     schema_version: u32,
     /// Why the record of failed fetches could not be read, when it could not.
     /// Then no failed fetch is known: every `fetch_failed` is `null` for not
-    /// being known, and `needs_attention` counts none. The window takes such a
-    /// record for no failures, and a script is not to.
+    /// being known, and so is `needs_attention` where nothing else makes it
+    /// `true`. The window takes such a record for no failures, and a script
+    /// is not to.
     fetch_failures_unreadable: Option<String>,
     /// The roots in force, in the order they are given, and what each came
     /// to. A root that is not there is said here. Otherwise its repositories
@@ -92,8 +93,12 @@ struct Repo {
     name: String,
     path: String,
     /// What the window's warning toggle keeps: see
-    /// [`RepoInfo::needs_attention`].
-    needs_attention: bool,
+    /// [`RepoInfo::needs_attention`]. `null` where nothing else makes it
+    /// `true` and the record of failed fetches could not be read, as whether
+    /// the last fetch failed is then not known. It was `false`, and
+    /// `select(.needs_attention)` passed over a repository whose fetch had
+    /// failed.
+    needs_attention: Option<bool>,
     /// Why the repository could not be read at all. Then all that is read
     /// from it is `null`: everything below, but for `fetch_failed` and
     /// `tags`, which omarepos keeps itself.
@@ -168,7 +173,10 @@ struct LastCommit {
 }
 
 impl Repo {
-    fn of(info: &RepoInfo, tags: Vec<String>, fetch_failed: Option<&str>) -> Self {
+    /// `fetch_failed` is what the record of failed fetches says of it, which
+    /// is nothing as well where `failures_known` is false, the record being
+    /// there and not readable.
+    fn of(info: &RepoInfo, tags: Vec<String>, fetch_failed: Option<&str>, failures_known: bool) -> Self {
         // What could be read at all, and of that what was counted.
         let read = info.error.is_none();
         let history = read && info.history_unreadable.is_none();
@@ -180,7 +188,11 @@ impl Repo {
         Repo {
             name: info.name.clone(),
             path: info.path.display().to_string(),
-            needs_attention: info.needs_attention(fetch_failed.is_some()),
+            needs_attention: match info.needs_attention(fetch_failed.is_some()) {
+                true => Some(true),
+                false if !failures_known => None,
+                false => Some(false),
+            },
             error: info.error.clone(),
             remote: info.remote.clone(),
             web: info.web.clone(),
@@ -310,6 +322,7 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
     // Sent before anything else, so there by now.
     let reports = reports.try_recv().unwrap_or_default();
 
+    let failures_known = fetch_failures_unreadable.is_none();
     Ok(Fleet {
         schema_version: SCHEMA_VERSION,
         fetch_failures_unreadable,
@@ -319,7 +332,7 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
             .map(|info| {
                 let tags = meta.tags_for(&info.path).to_vec();
                 let fetch_failed = failed.get(&info.path.display().to_string());
-                Repo::of(info, tags, fetch_failed.map(String::as_str))
+                Repo::of(info, tags, fetch_failed.map(String::as_str), failures_known)
             })
             .collect(),
     })
@@ -733,18 +746,24 @@ mod tests {
         start_afresh();
         let f = fleet("json-unread-record");
         let root = || vec![f.root.display().to_string()];
+        write(&f.work.join("README.md"), "edited\n");
         // As a write in place leaves it, caught half done.
-        write(&crate::config::fetch_errors_path(), &format!("{} = \"timed ou", quoted(&key(&f.work))));
+        write(&crate::config::fetch_errors_path(), &format!("{} = \"timed ou", quoted(&key(&f.seed))));
 
         let printed = snapshot(root(), None);
         let why = printed["fetch_failures_unreadable"].as_str().expect("said in what is printed");
         assert!(why.contains("fetch-errors.toml"), "{why}");
-        let work = repo(&printed, "work");
-        assert!(work["fetch_failed"].is_null(), "{work:#}");
-        assert_eq!(work["needs_attention"], false);
+        // Level and clean, and whether its last fetch failed is not known.
+        let seed = repo(&printed, "seed");
+        assert!(seed["fetch_failed"].is_null(), "{seed:#}");
+        assert!(seed["needs_attention"].is_null(), "not false: {seed:#}");
+        // Something to look at, whatever the record would have said.
+        assert_eq!(repo(&printed, "work")["needs_attention"], true);
 
         let _ = std::fs::remove_file(crate::config::fetch_errors_path());
-        assert!(snapshot(root(), None)["fetch_failures_unreadable"].is_null(), "no record is no failures");
+        let printed = snapshot(root(), None);
+        assert!(printed["fetch_failures_unreadable"].is_null(), "no record is no failures");
+        assert_eq!(repo(&printed, "seed")["needs_attention"], false);
 
         start_afresh();
     }

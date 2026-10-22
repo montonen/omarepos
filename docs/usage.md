@@ -70,7 +70,7 @@ it a one-off look as they do for the window. It reads and does nothing else: it
 runs no `git`, fetches nothing and writes no file ([What it changes](read-only.md)).
 
 ```bash
-omarepos --json | jq -r '.repos[] | select(.needs_attention) | .path'
+omarepos --json | jq -r '.repos[] | select(.needs_attention != false) | .path'
 ```
 
 What is printed is one object, with `schema_version`, `roots`, `repos` and
@@ -80,9 +80,11 @@ is added, so a script should pass over keys it does not know.
 
 `fetch_failures_unreadable` is `null`, or why the record of failed fetches
 (`~/.local/state/omarepos/fetch-errors.toml`) could not be read. Then no
-failed fetch is known: every `fetch_failed` is `null`, and `needs_attention`
-counts none. The snapshot is printed all the same, standard error says why,
-and the exit status is 0. The window takes such a record for no failures.
+failed fetch is known: every `fetch_failed` is `null`, and so is
+`needs_attention` wherever nothing else makes it `true`. That is why the
+example above asks for `!= false`, which keeps a repository that may need
+looking at. The snapshot is printed all the same, standard error says why, and
+the exit status is 0. The window takes such a record for no failures.
 
 Each of `roots` is a root in force, in the order it is given: its `path`, how
 many repositories it `found`, and `problem`, which is what the status bar says
@@ -98,7 +100,7 @@ every key:
 | Key | What it holds |
 | --- | --- |
 | `name`, `path` | The folder's name, and its absolute path |
-| `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote on any of its branches, or the last fetch failed on it |
+| `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote on any of its branches, or the last fetch failed on it. `null` where nothing else makes it `true` and whether the last fetch failed is not known (see `fetch_failures_unreadable`) |
 | `error` | Why the repository could not be read at all |
 | `remote` | The remote as a card shows it, `host/owner/repository`: `origin`, or the first remote there is. `•••` where its login hides which host git goes to |
 | `web` | The remote's page on the web, where its URL says where one is |
