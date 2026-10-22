@@ -691,6 +691,9 @@ pub fn page(field: Field) -> adw::NavigationPage {
                         stats::Event::Progress(name, done, total) => {
                             reading.set_label(&format!("{name}  ({done}/{total})"));
                         }
+                        // Sent only where lines are counted, and they are not
+                        // here.
+                        stats::Event::Counted(_) => {}
                         stats::Event::Done(result) => {
                             latest.replace(Some(Rc::from(result)));
                             show();
@@ -789,6 +792,7 @@ mod tests {
             uncounted: 0,
             future: 0,
             errors: Vec::new(),
+            lines_pending: false,
         }
     }
 

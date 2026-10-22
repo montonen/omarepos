@@ -32,6 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use git2::{Mailmap, Oid, Repository, Signature, Sort, Time};
 
@@ -197,11 +198,21 @@ pub struct Contributions {
     /// One line for each repository that could not be read: what it is called
     /// and why. None of its commits are counted.
     pub errors: Vec<String>,
+    /// Whether the lines are still being counted: every figure here is in
+    /// but insertions, deletions and files, which follow (`Event::Done`).
+    /// Until then a commit without lines is one not counted yet, and not one
+    /// that could not be read.
+    pub lines_pending: bool,
 }
 
 pub enum Event {
-    /// A repository has been read; carries its name and how many repos remain.
+    /// A repository has been read: its name, and how many of how many are.
+    /// They finish in whatever order they finish in.
     Progress(String, usize, usize),
+    /// Everything but the lines, which are still being counted: sent ahead
+    /// of `Done` when lines are counted, so that the page can go up first.
+    Counted(Box<Contributions>),
+    /// Everything, lines and all. Always the last.
     Done(Box<Contributions>),
 }
 
@@ -209,6 +220,20 @@ pub fn spawn(repos: Vec<PathBuf>, window: Window, branches: Branches) -> async_c
     spawn_with(repos, window, branches, Lines::Counted)
 }
 
+/// Read `repos` over `window`, on worker threads, and say what was found.
+///
+/// It is done in two passes. The first reads every repository's history at
+/// once, a worker each, and diffs nothing: who wrote what, and when, is all
+/// a commit header holds, and it is what the page shows first (`Counted`).
+/// The second counts the lines of the commits that were credited, again a
+/// repository to a worker, and is most of the cost (`Done`). They were one
+/// pass, one repository after another, and twelve months across a fleet was
+/// a long look at "Reading history…".
+///
+/// What comes out is what that one pass gave. The repositories are put
+/// together in the order they were given, and a commit that more than one of
+/// them holds (a linked worktree, a second clone, a fork beside its upstream)
+/// is credited to the first that has it, and is diffed there alone.
 pub fn spawn_with(
     repos: Vec<PathBuf>,
     window: Window,
@@ -219,30 +244,134 @@ pub fn spawn_with(
 
     std::thread::spawn(move || {
         let total = repos.len();
-        let mut tally = Tally::new(window.days());
+        let names = labels(&repos);
+
+        // A repository is read to the end before any of it is counted, so one
+        // that fails part of the way through is left out whole and named, not
+        // counted as far as it got.
+        let mut finished = 0;
+        let read = in_parallel(
+            total,
+            |at| collect(&repos[at], &window, branches),
+            |at| {
+                finished += 1;
+                tx.send_blocking(Event::Progress(names[at].clone(), finished, total)).is_ok()
+            },
+        );
+        let Some(read) = read else { return };
+
+        let mut counted: HashSet<Oid> = HashSet::new();
+        let mut kept: Vec<Option<Found>> = Vec::with_capacity(total);
         let mut errors = Vec::new();
-
-        for (n, (path, name)) in repos.iter().zip(labels(&repos)).enumerate() {
-            // A repository is read to the end before any of it is counted, so
-            // one that fails part of the way through is left out whole and
-            // named, not counted as far as it got.
-            match collect(path, &window, branches, lines, &tally.counted) {
-                Ok(found) => tally.add(path, &name, found),
-                Err(err) => errors.push(format!("{name}: {err}")),
-            }
-
-            if tx
-                .send_blocking(Event::Progress(name, n + 1, total))
-                .is_err()
-            {
-                return;
+        for (at, found) in read.into_iter().enumerate() {
+            match found {
+                Ok(mut found) => {
+                    found.commits.retain(|commit| !counted.contains(&commit.oid));
+                    found.future.retain(|oid| !counted.contains(oid));
+                    counted.extend(found.commits.iter().map(|commit| commit.oid));
+                    counted.extend(found.future.iter().copied());
+                    kept.push(Some(found));
+                }
+                Err(err) => {
+                    errors.push(format!("{}: {err}", names[at]));
+                    kept.push(None);
+                }
             }
         }
+        let tally = |kept: &[Option<Found>], lines_pending: bool| {
+            let mut tally = Tally::new(window.days());
+            for (at, found) in kept.iter().enumerate() {
+                if let Some(found) = found {
+                    tally.add(&repos[at], &names[at], found.clone());
+                }
+            }
+            tally.finish(window.clone(), branches, total, errors.clone(), lines_pending)
+        };
 
-        let _ = tx.send_blocking(Event::Done(Box::new(tally.finish(window, branches, total, errors))));
+        if lines == Lines::Skipped {
+            let _ = tx.send_blocking(Event::Done(Box::new(tally(&kept, false))));
+            return;
+        }
+        if tx.send_blocking(Event::Counted(Box::new(tally(&kept, true)))).is_err() {
+            return;
+        }
+        let counts = in_parallel(
+            total,
+            |at| kept[at].as_ref().map(|found| lines_of(&repos[at], &found.commits)),
+            |_| !tx.is_closed(),
+        );
+        let Some(counts) = counts else { return };
+        for (found, counts) in kept.iter_mut().zip(counts) {
+            if let (Some(found), Some(counts)) = (found, counts) {
+                for (commit, lines) in found.commits.iter_mut().zip(counts) {
+                    commit.lines = lines;
+                }
+            }
+        }
+        let _ = tx.send_blocking(Event::Done(Box::new(tally(&kept, false))));
     });
 
     rx
+}
+
+/// `each` of `0..count`, on as many workers as there are cores and at most
+/// eight, handed back in order. `done` is told of each as it finishes, in
+/// whatever order that is, and answers whether to go on: once it says no,
+/// the workers stop after what they are on, and nothing is handed back.
+fn in_parallel<T: Send>(
+    count: usize,
+    each: impl Fn(usize) -> T + Sync,
+    mut done: impl FnMut(usize) -> bool,
+) -> Option<Vec<T>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8)
+        .min(count.max(1));
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let mut out: Vec<Option<T>> = (0..count).map(|_| None).collect();
+    let mut whole = true;
+    std::thread::scope(|scope| {
+        let (sent, heard) = std::sync::mpsc::channel();
+        for _ in 0..workers {
+            let sent = sent.clone();
+            let (next, stop, each) = (&next, &stop, &each);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let at = next.fetch_add(1, Ordering::Relaxed);
+                    if at >= count || sent.send((at, each(at))).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(sent);
+        for (at, value) in heard {
+            out[at] = Some(value);
+            if !done(at) {
+                stop.store(true, Ordering::Relaxed);
+                whole = false;
+                break;
+            }
+        }
+    });
+    if whole { out.into_iter().collect() } else { None }
+}
+
+/// The lines of each of `commits`, read in the repository at `path`, in the
+/// same order: a merge has none of its own, and a commit whose diff cannot be
+/// read has none to give.
+fn lines_of(path: &Path, commits: &[Seen]) -> Vec<Option<(usize, usize, usize)>> {
+    let Ok(repo) = Repository::open(path) else { return vec![None; commits.len()] };
+    commits
+        .iter()
+        .map(|seen| {
+            if seen.merge {
+                return Some((0, 0, 0));
+            }
+            repo.find_commit(seen.oid).ok().and_then(|commit| diff_stats(&repo, &commit))
+        })
+        .collect()
 }
 
 /// Each person, keyed by address, and beside them every spelling of their
@@ -256,12 +385,6 @@ struct Tally {
     co_authors: People,
     mine: BTreeSet<String>,
     per_day_total: Vec<usize>,
-    /// Every commit counted or set aside, in any repository. A linked
-    /// worktree, a second clone and a fork beside its upstream are each a card
-    /// of their own and hold the same commits; counted once per path, one
-    /// repository with a worktree and a spare clone tripled everything on the
-    /// page.
-    counted: HashSet<Oid>,
     repos_active: usize,
     total_commits: usize,
     total_insertions: usize,
@@ -278,7 +401,6 @@ impl Tally {
             co_authors: HashMap::new(),
             mine: BTreeSet::new(),
             per_day_total: vec![0; days],
-            counted: HashSet::new(),
             repos_active: 0,
             total_commits: 0,
             total_insertions: 0,
@@ -288,16 +410,18 @@ impl Tally {
         }
     }
 
-    /// Count what [`collect`] found in the repository at `path`.
+    /// Count what [`collect`] found in the repository at `path`, less what
+    /// another repository was credited with already. A linked worktree, a
+    /// second clone and a fork beside its upstream are each a card of their
+    /// own and hold the same commits; counted once per path, one repository
+    /// with a worktree and a spare clone tripled everything on the page.
     fn add(&mut self, path: &Path, repo_name: &str, found: Found) {
         if !found.commits.is_empty() {
             self.repos_active += 1;
         }
         self.mine.extend(found.identity);
         self.future += found.future.len();
-        self.counted.extend(found.future);
         for commit in found.commits {
-            self.counted.insert(commit.oid);
             for (name, email) in &commit.co_authors {
                 credit(&mut self.co_authors, self.days, path, repo_name, name, email, &commit);
             }
@@ -320,6 +444,7 @@ impl Tally {
         branches: Branches,
         repos_scanned: usize,
         errors: Vec<String>,
+        lines_pending: bool,
     ) -> Contributions {
         Contributions {
             window,
@@ -336,6 +461,7 @@ impl Tally {
             uncounted: self.uncounted,
             future: self.future,
             errors,
+            lines_pending,
         }
     }
 }
@@ -482,6 +608,7 @@ pub(crate) fn labels(paths: &[PathBuf]) -> Vec<String> {
 }
 
 /// One commit inside the window, read and not yet counted.
+#[derive(Clone)]
 struct Seen {
     oid: Oid,
     name: String,
@@ -492,14 +619,14 @@ struct Seen {
     day: usize,
     merge: bool,
     /// Insertions, deletions and files changed, or nothing where they could
-    /// not be read.
+    /// not be read, or have not been yet: see [`lines_of`].
     lines: Option<(usize, usize, usize)>,
     /// Name and address of each co-author: see [`co_authors`].
     co_authors: Vec<(String, String)>,
 }
 
-/// What one repository holds that is not in `counted` already.
-#[derive(Default)]
+/// What one repository holds inside the window.
+#[derive(Clone, Default)]
 struct Found {
     /// Written inside the window, newest commit first.
     commits: Vec<Seen>,
@@ -509,15 +636,10 @@ struct Found {
     identity: Option<String>,
 }
 
-/// Read one repository to the end, counting nothing. The error is what libgit2
-/// said, for the page to show beside the repository's name.
-fn collect(
-    path: &Path,
-    window: &Window,
-    branches: Branches,
-    lines: Lines,
-    counted: &HashSet<Oid>,
-) -> Result<Found, String> {
+/// Read one repository to the end, counting nothing and diffing nothing: a
+/// commit's lines are for [`lines_of`]. The error is what libgit2 said, for
+/// the page to show beside the repository's name.
+fn collect(path: &Path, window: &Window, branches: Branches) -> Result<Found, String> {
     let said = |e: git2::Error| e.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
     let mut walk = repo.revwalk().map_err(said)?;
@@ -594,7 +716,7 @@ fn collect(
         if committed < window.since() {
             break;
         }
-        if rewritten.contains(&oid) || counted.contains(&oid) {
+        if rewritten.contains(&oid) {
             continue;
         }
 
@@ -632,11 +754,7 @@ fn collect(
             committed,
             day,
             merge,
-            lines: match lines {
-                _ if merge => Some((0, 0, 0)),
-                Lines::Counted => diff_stats(&repo, &commit),
-                Lines::Skipped => None,
-            },
+            lines: merge.then_some((0, 0, 0)),
         });
     }
 
@@ -1429,6 +1547,85 @@ mod tests {
             (2, 3),
             "the copy holds nothing the other two did not"
         );
+    }
+
+    /// The repositories are read at once and finish in any order. A commit
+    /// two of them hold is still credited to the one given first, every time.
+    #[test]
+    fn a_shared_commit_goes_to_the_repository_given_first() {
+        let _guard = isolate();
+        let f = fleet("stats-first-given");
+        commit_file(&f.work, "a.txt", &lines(4), "shared");
+        git(&f.root, &["clone", "-q", f.work.to_str().unwrap(), "copy"]);
+        let copy = f.root.join("copy");
+        let credited = |paths: &[&Path]| -> Vec<PathBuf> {
+            let result = contributions(paths);
+            let author = &result.authors[0];
+            author.repos.keys().cloned().collect()
+        };
+        for _ in 0..5 {
+            assert_eq!(credited(&[&f.work, &copy]), [f.work.clone()]);
+            assert_eq!(credited(&[&copy, &f.work]), [copy.clone()]);
+        }
+    }
+
+    /// Everything but the lines comes first, and then everything: the same
+    /// commits, the same people, the same days. A page that counts no lines
+    /// is sent the one result, as it was.
+    #[test]
+    fn the_lines_follow_what_was_counted_without_them() {
+        let _guard = isolate();
+        let dir = scratch("stats-two-passes");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit_as(&dir, BOB, "a.txt", &lines(5), "one");
+        commit_file(&dir, "b.txt", &lines(3), "two");
+
+        let events = |lines| {
+            let rx = spawn_with(vec![dir.clone()], window(7), Branches::CheckedOut, lines);
+            let mut heard = Vec::new();
+            while let Ok(event) = rx.recv_blocking() {
+                match event {
+                    Event::Progress(..) => {}
+                    Event::Counted(result) => heard.push(("counted", *result)),
+                    Event::Done(result) => heard.push(("done", *result)),
+                }
+            }
+            heard
+        };
+        let heard = events(Lines::Counted);
+        let said: Vec<&str> = heard.iter().map(|(said, _)| *said).collect();
+        assert_eq!(said, ["counted", "done"]);
+        let (first, last) = (&heard[0].1, &heard[1].1);
+        assert!(first.lines_pending && !last.lines_pending);
+        assert_eq!(by_author(first), by_author(last));
+        assert_eq!(first.per_day_total, last.per_day_total);
+        assert_eq!((first.total_insertions, last.total_insertions, last.uncounted), (0, 8, 0));
+
+        let heard = events(Lines::Skipped);
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].0, "done");
+        assert!(!heard[0].1.lines_pending);
+    }
+
+    /// Handed back in the order asked for, whatever order they finish in;
+    /// and nothing at all once told to give up.
+    #[test]
+    fn work_shared_out_comes_back_in_order() {
+        let slow_first = |at: usize| {
+            std::thread::sleep(std::time::Duration::from_millis(((20 - at) * 2) as u64));
+            at * 10
+        };
+        assert_eq!(in_parallel(20, slow_first, |_| true), Some((0..20).map(|at| at * 10).collect()));
+        assert_eq!(in_parallel(0, slow_first, |_| true), Some(Vec::new()));
+        let mut told = 0;
+        assert_eq!(
+            in_parallel(20, slow_first, |_| {
+                told += 1;
+                told < 3
+            }),
+            None
+        );
+        assert_eq!(told, 3);
     }
 
     #[test]

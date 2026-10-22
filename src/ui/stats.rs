@@ -2,7 +2,7 @@
 //! set of repositories.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -138,12 +138,14 @@ pub fn page(
     // above. Remembered between sessions and across pages, since it is
     // mostly oneself, for a picture of what the others did.
     let aside = Rc::new(RefCell::new(crate::config::load_set_aside()));
+    let rows = Rc::new(Rows::default());
 
     let load: Rc<dyn Fn()> = {
         let generation = Rc::clone(&generation);
         let repos = Rc::clone(&repos);
         let stack = stack.clone();
         let content = content.clone();
+        let scroller = scroller.clone();
         let empty = empty.clone();
         let status = status.clone();
         let progress = progress.clone();
@@ -151,6 +153,7 @@ pub fn page(
         let title = title.clone();
         let game = game.clone();
         let aside = Rc::clone(&aside);
+        let rows = Rc::clone(&rows);
         let on_open = Rc::clone(&on_open);
         Rc::new(move || {
             let days = crate::ui::periods().get(range.selected() as usize).map_or(7, |(_, days)| *days);
@@ -170,18 +173,63 @@ pub fn page(
             game.show(None);
             status.set_label("Reading history…");
             status.set_tooltip_text(None);
+            // A new period or view starts with every row closed, as it did.
+            rows.expanded.borrow_mut().clear();
 
             let rx = stats::spawn((*repos).clone(), day_window(days), branches);
             let generation = Rc::clone(&generation);
             let stack = stack.clone();
             let content = content.clone();
+            let scroller = scroller.clone();
             let empty = empty.clone();
             let status = status.clone();
             let progress = progress.clone();
             let on_open = Rc::clone(&on_open);
             let game = game.clone();
             let aside = Rc::clone(&aside);
+            let rows = Rc::clone(&rows);
             glib::spawn_future_local(async move {
+                // Everything but the lines comes first, and the page goes up
+                // with it; the lines follow, and the page is put together
+                // again around them. It keeps where it was scrolled to, which
+                // rows were open, and the keyboard on the author it was on:
+                // a year across a fleet takes a while to diff, and the page
+                // is in use by then.
+                let show = |result: Box<Contributions>| {
+                    let result: Rc<Contributions> = Rc::from(result);
+                    game.show(Some(Rc::clone(&result)));
+                    let offset = scroller.vadjustment().value();
+                    let had = rows.focused_author(&content);
+                    while let Some(child) = content.first_child() {
+                        content.remove(&child);
+                    }
+                    if result.total_commits == 0 {
+                        let (title, description) = empty_state(&result);
+                        empty.set_title(title);
+                        // The description is markup, and what goes in it now
+                        // includes paths and what libgit2 said.
+                        empty.set_description(Some(&glib::markup_escape_text(&description)));
+                        game.rest(&stack, "empty");
+                    } else {
+                        fill(&content, &result, &aside.borrow(), &on_open, &rows);
+                        game.rest(&stack, "content");
+                        if let Some(head) = had.and_then(|key| rows.head(&key)) {
+                            head.grab_focus();
+                        }
+                        if offset > 0.0 {
+                            let adjustment = scroller.vadjustment();
+                            glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+                                adjustment.set_value(offset);
+                            });
+                        }
+                    }
+                    status.set_label(&status_line(&result, &aside.borrow()));
+                    // The label is one line and cut short when the window is
+                    // narrow; the reasons are many lines.
+                    status.set_tooltip_text(
+                        (!result.errors.is_empty()).then(|| result.errors.join("\n")).as_deref(),
+                    );
+                };
                 while let Ok(event) = rx.recv().await {
                     if *generation.borrow() != mine {
                         break;
@@ -190,31 +238,9 @@ pub fn page(
                         stats::Event::Progress(name, done, total) => {
                             progress.set_label(&format!("{name}  ({done}/{total})"));
                         }
+                        stats::Event::Counted(result) => show(result),
                         stats::Event::Done(result) => {
-                            let result: Rc<Contributions> = Rc::from(result);
-                            game.show(Some(Rc::clone(&result)));
-                            while let Some(child) = content.first_child() {
-                                content.remove(&child);
-                            }
-                            if result.total_commits == 0 {
-                                let (title, description) = empty_state(&result);
-                                empty.set_title(title);
-                                // The description is markup, and what goes in
-                                // it now includes paths and what libgit2 said.
-                                empty.set_description(Some(&glib::markup_escape_text(
-                                    &description,
-                                )));
-                                game.rest(&stack, "empty");
-                            } else {
-                                fill(&content, &result, &aside.borrow(), &on_open);
-                                game.rest(&stack, "content");
-                            }
-                            status.set_label(&status_line(&result, &aside.borrow()));
-                            // The label is one line and cut short when the
-                            // window is narrow; the reasons are many lines.
-                            if !result.errors.is_empty() {
-                                status.set_tooltip_text(Some(&result.errors.join("\n")));
-                            }
+                            show(result);
                             break;
                         }
                     }
@@ -289,7 +315,7 @@ pub fn page(
                 crate::config::save_set_aside(&aside);
             }
             if let Some(result) = latest.borrow().as_deref().filter(|result| result.total_commits > 0) {
-                fill(&content, result, &aside.borrow(), &on_open);
+                fill(&content, result, &aside.borrow(), &on_open, &rows);
                 status.set_label(&status_line(result, &aside.borrow()));
             }
         });
@@ -401,6 +427,41 @@ impl Game {
     }
 }
 
+/// The author rows as last put on the page: which are open, and the head of
+/// each, by the key the author is counted under. The page is put together
+/// again when the lines arrive, and again when somebody is set aside, and a
+/// row is found again by its author.
+#[derive(Default)]
+struct Rows {
+    expanded: RefCell<BTreeSet<String>>,
+    heads: RefCell<HashMap<String, glib::WeakRef<gtk::Button>>>,
+}
+
+impl Rows {
+    fn head(&self, key: &str) -> Option<gtk::Button> {
+        self.heads.borrow().get(key).and_then(|head| head.upgrade())
+    }
+
+    /// Whose row the keyboard is in, on the head or in the commits under it.
+    fn focused_author(&self, content: &gtk::Box) -> Option<String> {
+        let focus = content.root()?.focus()?;
+        if !focus.is_ancestor(content) {
+            return None;
+        }
+        let row = focus.ancestor(gtk::Box::static_type()).and_then(|mut widget| {
+            while !widget.has_css_class("om-stat-row") {
+                widget = widget.parent()?;
+            }
+            Some(widget)
+        })?;
+        self.heads
+            .borrow()
+            .iter()
+            .find(|(_, head)| head.upgrade().is_some_and(|head| head.is_ancestor(&row)))
+            .map(|(key, _)| key.clone())
+    }
+}
+
 /// What a view counts: in a word or two for the subtitle, and in full.
 fn counted(branches: Branches, repos: usize) -> (&'static str, &'static str) {
     match branches {
@@ -436,10 +497,11 @@ pub(crate) fn set_aside_in(authors: &[Author], aside: &BTreeSet<String>) -> impl
 
 /// The page, from what was read: the overview of everybody not set aside,
 /// their rows, and under a gap whoever is.
-fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on_open: &OnOpen) {
+fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on_open: &OnOpen, rows: &Rc<Rows>) {
     while let Some(child) = content.first_child() {
         content.remove(&child);
     }
+    rows.heads.borrow_mut().clear();
     if !result.errors.is_empty() {
         content.append(&not_counted(&result.errors));
     }
@@ -455,9 +517,9 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
     let (listed, set_aside): (Vec<&Author>, Vec<&Author>) =
         result.authors.iter().partition(|author| !is_aside(author));
     let drawn = Drawn::of(result);
-    content.append(&overview(&Figures::of(result, &listed), &drawn));
+    content.append(&overview(&Figures::of(result, &listed), &drawn, result.lines_pending));
     for author in &listed {
-        content.append(&author_row(author, result, on_open, false, &drawn));
+        content.append(&author_row(author, result, on_open, false, &drawn, rows));
     }
     if set_aside.is_empty() {
         return;
@@ -477,7 +539,7 @@ fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on
     heading.add_css_class("om-meta");
     content.append(&heading);
     for author in &set_aside {
-        content.append(&author_row(author, result, on_open, true, &drawn));
+        content.append(&author_row(author, result, on_open, true, &drawn, rows));
     }
 }
 
@@ -533,14 +595,18 @@ fn status_line(result: &Contributions, aside: &BTreeSet<String>) -> String {
             plural(result.authors.len(), "author", "authors")
         ),
         format!("{}/{} repos active", result.repos_active, result.repos_scanned),
-        format!(
+    ]);
+    if result.lines_pending {
+        parts.push("counting lines…".to_string());
+    } else {
+        parts.push(format!(
             "+{} −{}",
             thousands(result.total_insertions),
             thousands(result.total_deletions)
-        ),
-    ]);
-    if result.uncounted > 0 {
-        parts.push(format!("{} without line counts", thousands(result.uncounted)));
+        ));
+        if result.uncounted > 0 {
+            parts.push(format!("{} without line counts", thousands(result.uncounted)));
+        }
     }
     if result.future > 0 {
         parts.push(format!("{} dated in the future", thousands(result.future)));
@@ -651,9 +717,13 @@ fn in_bucket(per_day: &[usize], bucket: &crate::ui::Bucket) -> usize {
     per_day.get(bucket.days.clone()).map_or(0, |days| days.iter().sum())
 }
 
-fn overview(figures: &Figures, drawn: &Drawn) -> gtk::Widget {
+fn overview(figures: &Figures, drawn: &Drawn, lines_pending: bool) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
     card.add_css_class("om-card");
+    // Not +0 while the lines are being counted: nothing has been added up yet.
+    let lines = |sign: &str, n: usize| {
+        if lines_pending { format!("{sign}…") } else { format!("{sign}{}", thousands(n)) }
+    };
 
     let numbers = gtk::Box::new(gtk::Orientation::Horizontal, 26);
     numbers.append(&big_number(
@@ -668,14 +738,8 @@ fn overview(figures: &Figures, drawn: &Drawn) -> gtk::Widget {
         &figures.repos_active.to_string(),
         "active repos",
     ));
-    numbers.append(&big_number(
-        &format!("+{}", thousands(figures.insertions)),
-        "insertions",
-    ));
-    numbers.append(&big_number(
-        &format!("−{}", thousands(figures.deletions)),
-        "deletions",
-    ));
+    numbers.append(&big_number(&lines("+", figures.insertions), "insertions"));
+    numbers.append(&big_number(&lines("−", figures.deletions), "deletions"));
     card.append(&numbers);
 
     let counts: Vec<usize> = drawn.buckets.iter().map(|bucket| in_bucket(&figures.per_day, bucket)).collect();
@@ -741,6 +805,7 @@ fn author_row(
     on_open: &OnOpen,
     set_aside: bool,
     drawn: &Drawn,
+    rows: &Rc<Rows>,
 ) -> gtk::Widget {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.add_css_class("om-card");
@@ -826,8 +891,11 @@ fn author_row(
         thousands(author.deletions)
     );
     // Somebody whose commits could not be diffed is not somebody who changed
-    // nothing, which is what a bare +0 −0 said of them.
-    if author.uncounted > 0 {
+    // nothing, which is what a bare +0 −0 said of them. Nor is somebody whose
+    // commits have not been diffed yet.
+    if result.lines_pending {
+        lines = "counting lines…".to_string();
+    } else if author.uncounted > 0 {
         lines.push_str(&format!(" and {} unread", thousands(author.uncounted)));
     }
     let churn = gtk::Label::builder().label(lines).xalign(1.0).build();
@@ -841,7 +909,8 @@ fn author_row(
     // keyboard like anything else.
     let toggle = gtk::Button::builder().child(&head).hexpand(true).build();
     toggle.add_css_class("om-stat-head");
-    toggle.set_tooltip_text(Some(&tooltip(author)));
+    toggle.set_tooltip_text(Some(&tooltip(author, result.lines_pending)));
+    rows.heads.borrow_mut().insert(author.key(), toggle.downgrade());
 
     // Beside the row and not in it, so it is a stop of its own for the
     // keyboard. Out of sight until the row is pointed at or the keyboard
@@ -864,27 +933,37 @@ fn author_row(
     top.append(&aside);
     card.append(&top);
 
+    let open = rows.expanded.borrow().contains(&author.key());
     let revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
         .transition_duration(160)
-        .child(&commit_list(&repos, on_open, &toggle))
+        .child(&commit_list(&repos, on_open, &toggle, result.lines_pending))
+        .reveal_child(open)
         .build();
     card.append(&revealer);
+    let chevron_for = |open: bool| if open { "pan-down-symbolic" } else { "pan-end-symbolic" };
+    chevron.set_icon_name(Some(chevron_for(open)));
 
+    let key = author.key();
+    let rows = Rc::downgrade(rows);
     toggle.connect_clicked(move |_| {
         let opening = !revealer.reveals_child();
         revealer.set_reveal_child(opening);
-        chevron.set_icon_name(Some(if opening {
-            "pan-down-symbolic"
-        } else {
-            "pan-end-symbolic"
-        }));
+        chevron.set_icon_name(Some(chevron_for(opening)));
+        if let Some(rows) = rows.upgrade() {
+            let mut expanded = rows.expanded.borrow_mut();
+            if opening {
+                expanded.insert(key.clone());
+            } else {
+                expanded.remove(&key);
+            }
+        }
     });
 
     card.upcast()
 }
 
-fn tooltip(author: &Author) -> String {
+fn tooltip(author: &Author, lines_pending: bool) -> String {
     let mut tip = format!(
         "{} <{}>\n{} commits",
         author.name,
@@ -897,7 +976,9 @@ fn tooltip(author: &Author) -> String {
             author.merges
         ));
     }
-    if author.uncounted > 0 {
+    if lines_pending {
+        tip.push_str("\nTheir lines are still being counted");
+    } else if author.uncounted > 0 {
         tip.push_str(&format!(
             "\n{} of them with lines that could not be read (not counted in lines)",
             author.uncounted
@@ -915,7 +996,12 @@ fn tooltip(author: &Author) -> String {
 
 /// The author's commits, grouped by repository, busiest first. `head` is
 /// the row they open from, which Up from the first commit goes back to.
-fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen, head: &gtk::Button) -> gtk::Box {
+fn commit_list(
+    repos: &[(&PathBuf, &RepoCommits)],
+    on_open: &OnOpen,
+    head: &gtk::Button,
+    lines_pending: bool,
+) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
     list.set_margin_top(12);
     list.set_margin_start(26);
@@ -986,6 +1072,7 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen, head: &gtk:
                     Some((insertions, deletions)) => {
                         format!("+{} −{}", thousands(insertions), thousands(deletions))
                     }
+                    None if lines_pending => "…".to_string(),
                     // Not +0 −0, which is what it used to say: lines that
                     // could not be read are not lines that are not there.
                     None => "?".to_string(),
@@ -1013,7 +1100,7 @@ fn commit_list(repos: &[(&PathBuf, &RepoCommits)], on_open: &OnOpen, head: &gtk:
             if committed != written {
                 tip.push_str(&format!("\ncommitted {committed}"));
             }
-            if commit.lines.is_none() {
+            if commit.lines.is_none() && !lines_pending {
                 tip.push_str(
                     "\nIts lines could not be counted: this clone does not hold \
                      everything the commit changed, or the commit it was made on.",
@@ -1192,6 +1279,7 @@ mod tests {
             uncounted: 0,
             future: 0,
             errors: errors.iter().map(|error| error.to_string()).collect(),
+            lines_pending: false,
         }
     }
 
@@ -1231,6 +1319,11 @@ mod tests {
 
         let (_, text) = empty_state(&result);
         assert!(text.contains("\n\n1 commit is dated in the future and not counted."), "{text}");
+
+        // Lines still being counted are neither +0 −0 nor without counts.
+        result.lines_pending = true;
+        let line = status_line(&result, &BTreeSet::new());
+        assert!(line.ends_with("0/3 repos active  ·  counting lines…  ·  1 dated in the future"), "{line}");
     }
 
     /// The overview is of the authors listed, and with nobody set aside it

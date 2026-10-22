@@ -969,6 +969,7 @@ mod tests {
             uncounted: 0,
             future: 0,
             errors: Vec::new(),
+            lines_pending: false,
         }
     }
 

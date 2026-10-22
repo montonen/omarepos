@@ -53,9 +53,14 @@ months a month, so that a year is a dozen columns and not 365.
 
 Line counts come from diffing each commit against its first parent, which is the
 expensive part. Only the paths a commit changed are diffed, so the cost follows
-the size of the change and not of the repository; a week across a dozen repos
-takes well under a second, and a 30-day window over a large fleet is the case
-that can still be felt.
+the size of the change and not of the repository. So the page is put up in two
+steps. The repositories are read at once, several at a time, without a single
+diff, and the page goes up with every commit, author and day in it and
+`counting lines…` where the lines go. Then the lines are counted, again
+several repositories at a time, and filled in where you are, the rows you
+opened staying open. A commit that two repositories hold (a worktree, a second
+clone, a fork beside its upstream) is credited to the one first in the list
+and diffed only there, as before.
 
 ## The race
 
