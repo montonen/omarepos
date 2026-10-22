@@ -4,6 +4,7 @@
 //! `refreshing`, and the tag chrome in `tags`; what is left here is the
 //! widgets, the scan that fills them, and the wiring between the parts.
 
+mod grid;
 mod keyboard;
 mod query;
 mod refreshing;
@@ -25,7 +26,7 @@ use crate::refresh;
 use crate::git::RepoInfo;
 use crate::scan::{self, Event};
 use crate::theme::Palette;
-use crate::ui::{self, Action, card};
+use crate::ui::{self, Action};
 
 /// What the header needs with everything showing and no tag buttons in it,
 /// and what the label of its Tags button takes of that. With tag buttons
@@ -121,6 +122,15 @@ struct Ui {
     repos: RefCell<Vec<RepoInfo>>,
     /// The filtered, sorted repos currently in the grid, in flow box order.
     shown: RefCell<Vec<RepoInfo>>,
+    /// What each card in `shown` was built from, as text, in the same order;
+    /// see `grid`.
+    signatures: RefCell<Vec<String>>,
+    /// Bumped to have every card built again although nothing it says has
+    /// changed: see `grid`.
+    card_epoch: Cell<u64>,
+    /// When every card was last built afresh, which is when the ages on
+    /// them were last read off the clock.
+    drawn_at: Cell<Option<std::time::Instant>>,
     /// Repos ticked for a contributions run. Keyed by path so the selection
     /// survives filtering and re-sorting.
     selected: RefCell<HashSet<PathBuf>>,
@@ -397,6 +407,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         toasts,
         repos: RefCell::new(Vec::new()),
         shown: RefCell::new(Vec::new()),
+        signatures: RefCell::new(Vec::new()),
+        card_epoch: Cell::new(0),
+        drawn_at: Cell::new(None),
         selected: RefCell::new(HashSet::new()),
         contrib_content,
         generation: Cell::new(0),
@@ -1050,7 +1063,7 @@ impl Ui {
         let was_light = self.light.replace(!palette.dark);
         ui::accents_for(palette.dark);
         if was_light == palette.dark && !self.repos.borrow().is_empty() {
-            self.rebuild();
+            self.redraw_cards();
         }
     }
 
@@ -1278,139 +1291,6 @@ impl Ui {
                 }
             }
         });
-    }
-
-    fn rebuild(self: &Rc<Self>) {
-        // A background refresh rebuilds the grid under the user's hands, so
-        // the scroll position has to survive it. Restoring on the next frame
-        // rather than immediately gives the flow box time to allocate, without
-        // which the adjustment clamps the value back to zero.
-        let offset = self.scroller.vadjustment().value();
-        // Rebuilding destroys the focused card. Without putting focus back on
-        // the same repository, a background refresh would throw a keyboard
-        // user to the top of the grid every few minutes.
-        let focused = self.focused_repo();
-
-        while let Some(child) = self.flow.first_child() {
-            self.flow.remove(&child);
-        }
-
-        // A filter on a tag that nothing on the grid carries matches nothing,
-        // and the controls that could take it off are built from the tags
-        // that are there: the grid stayed empty until the app was restarted.
-        // Not while the first scan is still bringing cards in, when a tag's
-        // repositories may simply not have arrived yet.
-        if !self.scanning.get() {
-            let live: BTreeSet<String> = self
-                .grid_tags()
-                .into_iter()
-                .map(|(tag, _)| tag.to_lowercase())
-                .collect();
-            self.tag_filter.borrow_mut().retain(|tag| live.contains(tag));
-        }
-
-        let repos = self.visible();
-        let ui = Rc::clone(self);
-        let on_action: Rc<dyn Fn(Action, &RepoInfo)> =
-            Rc::new(move |action, info| ui.run_action(action, info));
-        let ui = Rc::clone(self);
-        let on_select: Rc<dyn Fn(&RepoInfo, bool)> = Rc::new(move |info, selected| {
-            {
-                let mut set = ui.selected.borrow_mut();
-                if selected {
-                    set.insert(info.path.clone());
-                } else {
-                    set.remove(&info.path);
-                }
-            }
-            ui.update_selection_label();
-            ui.update_status();
-        });
-
-        *self.shown.borrow_mut() = repos.clone();
-        for (index, info) in repos.iter().enumerate() {
-            let tags = self.meta.borrow().tags_for(&info.path).to_vec();
-            let errors = self.fetch_errors.borrow();
-            let ctx = card::Context {
-                tags: &tags,
-                selected: self.selected.borrow().contains(&info.path),
-                fetch_failed: errors.get(&info.path.display().to_string()).map(String::as_str),
-                unseen: !self.is_known(&info.path),
-                // The one Enter opens from the filter: `visible()` again,
-                // which is what the filter itself asks.
-                top_hit: index == 0,
-            };
-            self.flow.append(&card::build(
-                info,
-                &ctx,
-                Rc::clone(&on_action),
-                Rc::clone(&on_select),
-            ));
-        }
-        self.update_selection_label();
-        self.sync_tag_controls();
-
-        let page = if repos.is_empty() && !self.scanning.get() { "empty" } else { "grid" };
-        // Nothing to list at all, as against nothing that passes the filter.
-        let nothing_at_all = self.repos.borrow().is_empty();
-        if page == "empty" {
-            // Why, where it can be said. "No repositories found" over a
-            // filter that hides forty of them, or over a root that has been
-            // moved, sent the reader looking in the wrong place.
-            let amiss = self.roots_amiss();
-            let (title, why) = if !nothing_at_all {
-                ("Nothing matches", "No repository on the grid passes the filter in force.".to_string())
-            } else if amiss.is_empty() {
-                ("No repositories found", "No folder is set to be scanned.".to_string())
-            } else {
-                ("No repositories found", amiss.join("\n"))
-            };
-            self.empty.set_title(title);
-            self.empty.set_description(Some(&glib::markup_escape_text(&why)));
-            // A filter that hides everything is undone in the filter. A
-            // fleet with nothing in it is put right in Settings.
-            self.empty_action.set_visible(nothing_at_all);
-        }
-        // Taken before the page changes: the button leaves the screen with
-        // the page, and the keyboard with the button.
-        let leaving_the_way = page != "empty" && self.empty_action.has_focus();
-        self.stack.set_visible_child_name(page);
-        self.update_status();
-        if page == "empty" && nothing_at_all {
-            self.unstarted.set(true);
-            self.offer_settings();
-        } else if nothing_at_all {
-            // A scan has begun and found nothing yet. Left where it was,
-            // the keyboard would be moved by GTK to whatever comes next,
-            // which is a button in the header.
-            if leaving_the_way {
-                self.focus_filter();
-            }
-        } else if self.unstarted.get() {
-            self.start_keyboard();
-        }
-
-        if let Some(path) = focused {
-            if let Some(index) = repos.iter().position(|repo| repo.path == path) {
-                if let Some(child) = self.flow.child_at_index(index as i32) {
-                    // Through the flow box's own focus path, not `grab_focus`.
-                    // The box keeps a cursor of its own, which is where the
-                    // arrow keys start from, and `grab_focus` on a card moves
-                    // the window's focus without moving that. The cursor went
-                    // on naming a card this rebuild had just removed, and the
-                    // next arrow key started from it: from the wrong place at
-                    // best, from freed memory at worst.
-                    child.child_focus(gtk::DirectionType::Down);
-                }
-            }
-        }
-
-        if offset > 0.0 {
-            let adjustment = self.scroller.vadjustment();
-            glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
-                adjustment.set_value(offset);
-            });
-        }
     }
 
     fn update_status(&self) {

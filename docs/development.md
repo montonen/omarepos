@@ -112,7 +112,7 @@ monospace instead. The walk types the code and checks the table.
 | `src/refresh.rs` | Fetching: one repository, or a pass across the fleet with what may run on it fenced off |
 | `src/lang.rs` | Extension → language table |
 | `src/testkit.rs` | Test fixtures: scratch repositories with a bare remote, an isolated home |
-| `src/ui/window/` | The main window. `mod.rs` composes the grid and its pages; `query.rs` is the filter and the sort, `keyboard.rs` the keyboard and the pointer, `refreshing.rs` the window's side of fetching, `tags.rs` the tag chrome |
+| `src/ui/window/` | The main window. `mod.rs` composes the grid and its pages; `grid.rs` keeps the cards up to date by touching only those that changed, `query.rs` is the filter and the sort, `keyboard.rs` the keyboard and the pointer, `refreshing.rs` the window's side of fetching, `tags.rs` the tag chrome |
 | `src/ui/card.rs` | One repository card |
 | `src/ui/graph.rs` | Commit graph page and its cairo row renderer |
 | `src/ui/commit.rs` | The pane under the graph: changed files and their diff |
