@@ -147,9 +147,11 @@ and otherwise with 1, saying why on standard error:
 - The scan read fewer repositories than it found, which only a crash in the
   middle of reading one does. Nothing is printed: a snapshot one short is not
   the fleet.
-- Standard output cannot be written to, as `/dev/full` cannot. A reader that
-  stops reading early (`| head`) is 1 as well, and the one failure that is
-  told nothing.
+- Standard output cannot be written to, as `/dev/full` cannot, or its reader
+  has gone by the time a write needs it, which is the one failure told
+  nothing. Piped into `head`, that happens only to a snapshot longer than the
+  pipe holds (64 KiB on Linux). One that fits is written whole before `head`
+  goes, and the run is 0.
 
 A standard output that was closed when omarepos started is not a failure.
 Rust's runtime opens `/dev/null` in its place before omarepos begins, so

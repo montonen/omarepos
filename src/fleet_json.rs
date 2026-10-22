@@ -236,7 +236,9 @@ impl LastCommit {
 /// or the roots and depth the command line gives (`--root`, `--depth`) for a
 /// one-off look, as the window takes them. Whether it was printed whole.
 /// Whatever stopped it is said on standard error, but for a reader that went
-/// away (`omarepos --json | head`), who is not waiting to be told.
+/// away before it was all written, who is not waiting to be told: `| head`,
+/// when the snapshot is longer than the pipe holds and `head` leaves while it
+/// is still being written. A shorter one is all in the pipe by then.
 ///
 /// A standard output that was closed when the program started does not stop
 /// it. Rust's runtime opens `/dev/null` in its place before `main`, so
