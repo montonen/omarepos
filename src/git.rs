@@ -178,7 +178,9 @@ pub struct RepoInfo {
     /// see [`remote_url::web_url`].
     pub web: Option<String>,
     pub local_branches: usize,
-    pub stashes: usize,
+    /// How many stashes it holds, or `None` where they could not be counted:
+    /// the repository could not be read, or its list of stashes could not.
+    pub stashes: Option<usize>,
     pub tracked_files: usize,
     /// Every language among the tracked files, largest share first. The card
     /// draws the first few; the `lang:` filter has to see all of them.
@@ -798,7 +800,7 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         remote: None,
         web: None,
         local_branches: 0,
-        stashes: 0,
+        stashes: None,
         tracked_files: 0,
         langs: Vec::new(),
         last_commit: None,
@@ -1042,12 +1044,14 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         }
     }
 
+    // A list of stashes that could not be read is not an empty one. It was
+    // counted as far as it got, and nothing said it had stopped.
     let mut stashes = 0usize;
-    let _ = repo.stash_foreach(|_, _, _| {
+    let counted = repo.stash_foreach(|_, _, _| {
         stashes += 1;
         true
     });
-    info.stashes = stashes;
+    info.stashes = counted.is_ok().then_some(stashes);
 
     // Language mix from the index: fast, and it only ever sees tracked files.
     let index = match repo.index() {
@@ -1335,7 +1339,7 @@ mod tests {
             ("history unreadable", |r| r.history_unreadable = Some("lost".into())),
         ];
         let unmarked: [(&str, fn(&mut RepoInfo)); 5] = [
-            ("stashes", |r| r.stashes = 2),
+            ("stashes", |r| r.stashes = Some(2)),
             ("detached", |r| r.detached = true),
             ("no commits yet", |r| r.unborn = true),
             ("no upstream", |r| r.upstream = None),
@@ -1679,6 +1683,22 @@ mod tests {
         let info = inspect(&f.work);
         assert!(info.tree.unreadable.is_some() && !info.tree.is_clean());
         assert_eq!(info.error, None);
+    }
+
+    /// The stashes are `refs/stash` and its log, and a ref libgit2 cannot
+    /// read was counted as far as it got: as none.
+    #[test]
+    fn stashes_that_cannot_be_counted_are_not_counted_as_none() {
+        let _guard = isolate();
+        let f = fleet("inspect-stashes");
+        write(&f.work.join("README.md"), "edited\n");
+        git(&f.work, &["stash", "-q"]);
+        assert_eq!(inspect(&f.work).stashes, Some(1));
+
+        write(&f.work.join(".git/refs/stash"), "cut short by a crash\n");
+        let info = inspect(&f.work);
+        assert_eq!(info.stashes, None);
+        assert_eq!((info.error, info.tree.unreadable), (None, None), "nothing else was lost");
     }
 
     #[test]

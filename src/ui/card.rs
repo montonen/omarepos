@@ -578,10 +578,12 @@ fn tree_slot(info: &RepoInfo) -> Vec<(String, &'static str, Option<String>)> {
             parts.push(("clean".to_string(), "word", None));
         }
     }
-    if info.stashes > 0 {
+    // Stashes not counted say nothing, as none do: the card has never had
+    // a word for them that was not a number.
+    if let Some(count) = info.stashes.filter(|count| *count > 0) {
         let lead = if parts.is_empty() { "" } else { "· " };
-        let stashes = if info.stashes == 1 { "stash" } else { "stashes" };
-        parts.push((format!("{lead}{} {stashes}", info.stashes), "word", None));
+        let stashes = if count == 1 { "stash" } else { "stashes" };
+        parts.push((format!("{lead}{count} {stashes}"), "word", None));
     }
     parts
 }
@@ -1319,9 +1321,11 @@ mod tests {
         let mut info = repo();
         assert_eq!(says(&info), [("clean".to_string(), "word")]);
 
-        info.stashes = 2;
+        info.stashes = Some(2);
         assert_eq!(says(&info), [("clean".to_string(), "word"), ("· 2 stashes".to_string(), "word")]);
-        info.stashes = 0;
+        info.stashes = None;
+        assert_eq!(says(&info), [("clean".to_string(), "word")]);
+        info.stashes = Some(0);
 
         info.tree.staged = 1;
         info.tree.unstaged = 3;
@@ -1342,7 +1346,7 @@ mod tests {
         let mut info = repo();
         info.unborn = true;
         assert_eq!(says(&info), []);
-        info.stashes = 1;
+        info.stashes = Some(1);
         assert_eq!(says(&info), [("1 stash".to_string(), "word")]);
     }
 

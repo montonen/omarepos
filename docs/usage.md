@@ -107,7 +107,7 @@ every key:
 | `upstream` | The branch it tracks, as `origin/main` |
 | `working_tree` | `staged`, `unstaged`, `untracked` and `conflicted`: entries as `git status --short` lists them, each counted once. A directory with nothing tracked in it is one entry, however much it holds. One in conflict is `conflicted`, and one staged and edited again since is `staged` |
 | `working_tree_unreadable` | Why the index could not be read |
-| `stashes` | How many stashes it holds |
+| `stashes` | How many stashes it holds, or `null` when its list of stashes could not be read |
 | `ahead`, `behind` | Commits the upstream does not have, and commits on it that are not here yet, as of the last fetch. `0` with no upstream |
 | `unpushed` | Commits on HEAD that are on no remote at all, counted up to 1000, which then means that many or more |
 | `stray_branches` | Other local branches that hold commits on no remote |

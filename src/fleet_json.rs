@@ -117,6 +117,7 @@ struct Repo {
     working_tree: Option<WorkingTree>,
     /// Why the index could not be read.
     working_tree_unreadable: Option<String>,
+    /// `null` where the list of stashes could not be read.
     stashes: Option<usize>,
     /// Commits here that the upstream does not have, and commits on the
     /// upstream that are not here yet, as of the last fetch. Zero with no
@@ -196,7 +197,7 @@ impl Repo {
                 conflicted: t.conflicted,
             }),
             working_tree_unreadable: t.unreadable.clone(),
-            stashes: read.then_some(info.stashes),
+            stashes: info.stashes.filter(|_| read),
             ahead: history.then_some(info.ahead),
             behind: history.then_some(info.behind),
             unpushed: walked.then_some(info.unpushed),
@@ -802,6 +803,12 @@ mod tests {
         git(&split, &["update-index", "--split-index"]);
         write(&split.join("a.txt"), "edited\n");
         git(&base, &["init", "-q", "--bare", "-b", "main", "bare/.git"]);
+        let stashed = base.join("stashed");
+        git(&base, &["init", "-q", "-b", "main", "stashed"]);
+        commit_file(&stashed, "a.txt", "a\n", "a");
+        write(&stashed.join("a.txt"), "edited\n");
+        git(&stashed, &["stash", "-q"]);
+        write(&stashed.join(".git/refs/stash"), "cut short by a crash\n");
 
         let printed = snapshot(vec![base.display().to_string()], None);
         let null = |repo: &Value, keys: &[&str]| {
@@ -832,6 +839,10 @@ mod tests {
         let bare = repo(&printed, "bare");
         assert_eq!(bare["bare"], true, "{bare:#}");
         null(bare, &["working_tree", "working_tree_unreadable", "unpushed", "stray_branches", "error"]);
+
+        let stashed = repo(&printed, "stashed");
+        null(stashed, &["stashes", "error"]);
+        assert_eq!(stashed["head"], "main", "{stashed:#}");
 
         start_afresh();
     }

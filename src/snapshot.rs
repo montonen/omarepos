@@ -21,8 +21,9 @@ use crate::config::Root;
 use crate::git::RepoInfo;
 
 /// Bumped whenever what a reading holds changes shape. A file of any other
-/// version is not read.
-const VERSION: u32 = 1;
+/// version is not read. 2: a count of stashes that could not be made is no
+/// count, where it was a zero.
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct File {
@@ -142,7 +143,7 @@ mod tests {
         assert!(load(&scope(&[root(std::path::Path::new("/srv/code"))], &[], 4)).is_none());
 
         let text = std::fs::read_to_string(path()).unwrap();
-        std::fs::write(path(), text.replace("version = 1", "version = 999")).unwrap();
+        std::fs::write(path(), text.replace(&format!("version = {VERSION}"), "version = 999")).unwrap();
         assert!(load(&here).is_none());
         std::fs::write(path(), "repos = [").unwrap();
         assert!(load(&here).is_none());
