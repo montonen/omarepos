@@ -11,15 +11,31 @@
 #
 #     scripts/walk/walk.sh            the whole walk, about ten minutes
 #     scripts/walk/walk.sh quick      one repository instead of eight
+#     scripts/walk/walk.sh offscreen  on a display of its own, not Hyprland
 #
-# Needs Hyprland (hyprctl), python3, gdbus and busctl. Exits non-zero when
-# the program stopped anywhere, having printed where and the panic, or did
-# not say what it was expected to.
+# Offscreen is GTK's Broadway, as frames.sh has it: its own daemon, no port
+# open and no compositor at all. The words go together: `walk.sh quick
+# offscreen`.
+#
+# Needs Hyprland (hyprctl), or gtk4-broadwayd offscreen; and python3, gdbus
+# and busctl. Exits non-zero when the program stopped anywhere, having
+# printed where and the panic, or did not say what it was expected to.
 HERE=$(dirname "$(readlink -f "$0")")
 REPO=$(dirname "$(dirname "$HERE")")
 export OMAREPOS_WALK_DIR=${OMAREPOS_WALK_DIR:-$REPO/target/walk}
 W=$OMAREPOS_WALK_DIR
-QUICK=$1
+QUICK=; START=start
+for word in "$@"; do
+  case $word in
+    quick) QUICK=quick ;;
+    # The size of a screen. On a hidden workspace the window is as large as
+    # the one it is on, and at Broadway's own 1024 by 768 the header has no
+    # room for five tag buttons, which the walk counts.
+    offscreen) START="start-offscreen 1920x1080" ;;
+    *) echo "usage: walk.sh [quick] [offscreen]"; exit 2 ;;
+  esac
+done
+[ "$START" = start ] || command -v gtk4-broadwayd >/dev/null || { echo "needs gtk4-broadwayd"; exit 2; }
 
 ( cd "$REPO" && cargo build --offline 2>&1 | tail -1 ) || exit 2
 "$HERE/fixtures.sh" || exit 2
@@ -27,7 +43,11 @@ QUICK=$1
 X() { python3 "$HERE/drive.py" "$@" 2>&1 | grep -v "^$"; }
 STEPS=0; DEATHS=0; WRONG=0
 config() { printf 'roots = [\n    { path = "%s/fleet", tag = "JM" },\n]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"; }
-boot() { config; X start >/dev/null; }
+# A window that will not start, at first or again after the program stopped,
+# ends the walk: every step after it would say the program had stopped, each
+# after a start's wait of ten seconds, for an hour and a half.
+boot() { config; X $START
+  python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || { echo "the window did not start"; X stop; exit 2; }; }
 step() { # what it is, then the commands
   STEPS=$((STEPS+1)); local what="$1"; shift
   eval "$@" >/dev/null 2>&1

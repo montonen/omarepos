@@ -80,6 +80,20 @@ filter with what was typed there, on a card, on a commit. About a minute,
 nothing on screen, and no compositor involved (`drive.py start-offscreen` and
 `resize` are the same by hand).
 
+The walk can be run on that display as well, instead of on Hyprland:
+
+```bash
+scripts/walk/walk.sh quick offscreen
+```
+
+The same steps and the same checks, with no compositor at all. The window is
+given a screen's size, 1920 by 1080, as a workspace gives it one: at the
+display's own 1024 by 768 the header has no room for the tag buttons the walk
+counts. It needs `gtk4-broadwayd` instead of Hyprland. A window there is drawn
+with cairo, since GTK's own renderer for it can send the display's daemon a
+frame the daemon cannot read: the daemon stops, the window goes with it, and
+a walk would say omarepos had stopped.
+
 Run the walk after changing anything a person can click, and `frames.sh` too
 after changing what has the keyboard or how the header is laid out.
 

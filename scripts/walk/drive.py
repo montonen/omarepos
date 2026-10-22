@@ -7,7 +7,7 @@ D-Bus to the actions `src/ui/debug.rs` adds: nothing passes through the
 compositor, so the desktop it runs on is not disturbed.
 
     drive.py start | stop | alive
-    drive.py start-offscreen    on a display of its own instead (see below)
+    drive.py start-offscreen [WxH]  on a display of its own instead (see below)
     drive.py keys KEY...        e.g. keys ctrl+f Return shift+question
     drive.py type TEXT
     drive.py press LABEL        "!LABEL" reaches a button that is not on screen
@@ -29,7 +29,8 @@ A hidden workspace sends a window no frames, so nothing there is laid out or
 drawn unless asked, and a change of width never finishes. `start-offscreen`
 runs the window on GTK's Broadway display instead, with its own daemon and no
 port open: frames arrive, sizes are real and can be chosen, and Hyprland is
-not involved at all. Everything else is driven the same way.
+not involved at all. Given a size, it is started at that size and has come to
+rest there when this returns. Everything else is driven the same way.
 
 OMAREPOS_WALK_DIR is where the scratch configuration and state are (target/walk
 unless set), and OMAREPOS_WALK_ROOT the directory scanned (fleet/ in there).
@@ -132,7 +133,7 @@ def stop_daemon():
                 os.remove(os.path.join(runtime, 'broadway%d.socket' % (int(DISPLAY[1:]) + 1)))
 
 
-def start_offscreen():
+def start_offscreen(size=None):
     stop_all()
     time.sleep(0.4)
     if not daemon():
@@ -144,7 +145,16 @@ def start_offscreen():
                                   stderr=subprocess.STDOUT, start_new_session=True)
         open(DAEMON_PID, 'w').write(str(server.pid))
         time.sleep(0.6)
-    env = dict(os.environ, GDK_BACKEND='broadway', BROADWAY_DISPLAY=DISPLAY,
+    # Drawn with cairo. GTK's own renderer for this display sends the daemon each
+    # frame as a tree of nodes, naming those it keeps from the frame before, and
+    # with GTK 4.24 it can name one the daemon does not have: the daemon stops on
+    # an assertion ("decode_nodes: assertion failed: (node != NULL)"), the window
+    # goes with it, and a walk says omarepos stopped. The walk met it at the same
+    # step every time, the grid filled again under a toast after Contributions
+    # had been opened and closed. With cairo a frame is one picture, and names
+    # nothing. Nothing here goes by how the daemon was sent a frame: `shot` and
+    # `render` draw with a renderer of their own.
+    env = dict(os.environ, GDK_BACKEND='broadway', BROADWAY_DISPLAY=DISPLAY, GSK_RENDERER='cairo',
                XDG_CONFIG_HOME=f'{W}/config', XDG_STATE_HOME=f'{W}/state',
                GIT_CONFIG_GLOBAL=f'{W}/gitconfig', GIT_CONFIG_NOSYSTEM='1',
                GDK_DEBUG='no-portals', OMAREPOS_DUMP=f'{W}/dump.txt')
@@ -157,8 +167,29 @@ def start_offscreen():
         with contextlib.suppress(SystemExit):
             bus()
             settle()
+            break
+    else:
+        raise SystemExit('did not start')
+    if size:
+        come_to(size)
+
+
+def come_to(size):
+    """Give a window on a display of its own a size, and wait until it is that wide and
+    at rest. A change of width across a breakpoint takes the content off screen until
+    a later frame, and frames come about one a second here; nothing is drawn while
+    nothing changes, so two seconds with no new frame is a window at rest."""
+    act('resize', size)
+    width = 'width: %s ' % size.split('x')[0]
+    last, still = None, 0
+    for _ in range(120):
+        time.sleep(0.25)
+        now = (look('width:'), look('frames:'))
+        still = still + 1 if now == last and width in (now[0] or '') else 0
+        if still >= 8:
             return
-    raise SystemExit('did not start')
+        last = now
+    raise SystemExit(f'did not come to {size}: {look("width:")}')
 
 
 def start():
@@ -187,16 +218,21 @@ def settle():
     last = None
     for _ in range(40):
         time.sleep(0.25)
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                dump('width:')
-        except (SystemExit, OSError):
-            continue
-        now = buf.getvalue().strip()
+        now = look('width:')
         if now and now == last and 'width: 1000' not in now:
             return
         last = now
+
+
+def look(needle):
+    """What `dump NEEDLE` would print, as a string; None while the window cannot say."""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            dump(needle)
+    except (SystemExit, OSError):
+        return None
+    return buf.getvalue().strip()
 
 
 def bus():
@@ -255,7 +291,7 @@ def main(argv):
     if cmd == 'start':
         start()
     elif cmd == 'start-offscreen':
-        start_offscreen()
+        start_offscreen(first)
     elif cmd == 'stop':
         stop_all()
         stop_daemon()
