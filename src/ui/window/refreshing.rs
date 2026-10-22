@@ -587,6 +587,9 @@ fn refused_by_remote(err: &str) -> bool {
         "could not read username",
         "could not read password",
         "permission denied",
+        // ssh's word for the same refusal when the agent holds more keys
+        // than the server lets it try: every one of them was turned away.
+        "too many authentication failures",
         "access denied",
         "repository not found",
         "does not appear to be a git repository",
@@ -665,6 +668,12 @@ mod tests {
         let ssh = dir.join("bin").join("ssh");
         for (said, refused) in [
             ("git@example.invalid: Permission denied (publickey).", true),
+            // The server's reason, and then ssh saying it was cut off.
+            (
+                "Received disconnect from 192.0.2.1 port 22:2: Too many authentication failures\n\
+                 Disconnected from 192.0.2.1 port 22",
+                true,
+            ),
             ("ssh: connect to host example.invalid port 22: Connection timed out", false),
         ] {
             // As ssh does it: its own words on stderr, and 255.
