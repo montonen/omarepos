@@ -20,7 +20,10 @@ sudo pacman -S --needed gtk4 libadwaita libgit2 git rust base-devel
 
 `cargo test` builds its own repositories under `target/test-fixtures`, each
 with a bare remote beside it and a home directory of its own, and touches
-nothing else on the machine. It needs `git` and no display. Every push and
+nothing else on the machine. It needs `git` and no display. `tests/json.rs`
+runs the program itself, as `omarepos --json`, in a home of its own under
+`target/tmp` and with nothing else in its environment, and holds it to what
+reaches the caller: standard output, standard error and the exit status. Every push and
 pull request is built and tested on GitHub
 (`.github/workflows/ci.yml`), in an Arch container with the packages above.
 
@@ -115,6 +118,7 @@ monospace instead. The walk types the code and checks the table.
 | `src/refresh.rs` | Fetching: one repository, or a pass across the fleet with what may run on it fenced off |
 | `src/lang.rs` | Extension → language table |
 | `src/testkit.rs` | Test fixtures: scratch repositories with a bare remote, an isolated home |
+| `tests/json.rs` | `omarepos --json` run as a script runs it: its output and exit status |
 | `src/ui/window/` | The main window. `mod.rs` composes the grid and its pages; `grid.rs` keeps the cards up to date by touching only those that changed, `scanning.rs` fills the grid, from the last run's readings first, `query.rs` is the filter and the sort, `keyboard.rs` the keyboard and the pointer, `refreshing.rs` the window's side of fetching, `tags.rs` the tag chrome |
 | `src/ui/card.rs` | One repository card |
 | `src/ui/graph.rs` | Commit graph page and its cairo row renderer |

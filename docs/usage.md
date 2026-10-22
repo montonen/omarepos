@@ -86,8 +86,11 @@ and the exit status is 0. The window takes such a record for no failures.
 
 Each of `roots` is a root in force, in the order it is given: its `path`, how
 many repositories it `found`, and `problem`, which is what the status bar says
-of it (`"does not exist"`, `"no repositories found"`) or `null`. A disk that is
-not mounted shows up here, and not only as repositories missing from the list.
+of it (`"does not exist"`, `"no repositories found"`, which repositories a
+workspace left out) or `null`. A disk that is not mounted shows up here, and
+not only as repositories missing from the list. The `path` is absolute, and
+resolved as the repositories' paths are, so what a root found has a path that
+starts with it.
 
 Each of `repos` is a repository, in the order of their paths, and every one has
 every key:
@@ -102,7 +105,7 @@ every key:
 | `head` | The branch, or a short commit id when HEAD is detached |
 | `detached`, `unborn`, `bare` | HEAD is detached; there are no commits yet, and `head` is the branch the first will be on; there is no working tree |
 | `upstream` | The branch it tracks, as `origin/main` |
-| `working_tree` | `staged`, `unstaged`, `untracked` and `conflicted`: files, each counted once. One in conflict is `conflicted`, and one staged and edited again since is `staged` |
+| `working_tree` | `staged`, `unstaged`, `untracked` and `conflicted`: entries as `git status --short` lists them, each counted once. A directory with nothing tracked in it is one entry, however much it holds. One in conflict is `conflicted`, and one staged and edited again since is `staged` |
 | `working_tree_unreadable` | Why the index could not be read |
 | `stashes` | How many stashes it holds |
 | `ahead`, `behind` | Commits the upstream does not have, and commits on it that are not here yet, as of the last fetch. `0` with no upstream |
@@ -132,12 +135,17 @@ a user name and a token. The remote is given tidied, as the card gives it, and
 a URL in what a failed fetch said loses whoever it logs in as.
 
 It exits with 0 when it has printed the snapshot, whatever the snapshot says.
-If `config.toml` or `repos.toml` is there and cannot be read, it prints nothing
-on standard output, says why on standard error and exits with 1. The window
-carries on with the defaults under a banner, but a script has no banner to
-read, and a snapshot of `~/Work` in place of the roots the file names, or of
-every repository without its tags, would be wrong without saying so. Standard
-output that cannot be written to is 1 as well.
+Otherwise it exits with 1, has printed nothing on standard output, and says
+why on standard error:
+
+- `config.toml` or `repos.toml` is there and cannot be read. The window
+  carries on with the defaults under a banner, but a script has no banner to
+  read, and a snapshot of `~/Work` in place of the roots the file names, or of
+  every repository without its tags, would be wrong without saying so.
+- The scan read fewer repositories than it found, which only a crash in the
+  middle of reading one does. A snapshot one short is not the fleet.
+- Standard output is closed (`>&-`), or cannot be written to. A reader that
+  stops reading early (`| head`) is the one case that is told nothing.
 
 ---
 

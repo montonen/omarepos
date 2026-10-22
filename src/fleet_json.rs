@@ -21,13 +21,13 @@
 //! (`crate::remote_url`). And it stays a snapshot. A fetch from the command
 //! line is not what this grows into.
 
-use std::io::Write as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::git::{Commit, RepoInfo, RootReport};
+use crate::git::{Commit, RepoInfo, RootReport, Seed};
 use crate::meta::Meta;
 use crate::scan::{self, Event};
 
@@ -57,7 +57,8 @@ struct Fleet {
 /// A root, as the status bar speaks of it.
 #[derive(Serialize)]
 struct Root {
-    /// As configured, with `~` expanded.
+    /// Absolute, and where it is there, resolved as the repositories' paths
+    /// are: what a root found has a path that starts with it.
     path: String,
     /// The repositories it put among `repos`. One that a narrower root also
     /// reaches is that root's.
@@ -69,7 +70,15 @@ struct Root {
 
 impl Root {
     fn of(report: &RootReport) -> Self {
-        Root { path: report.root.clone(), found: report.found, problem: report.says() }
+        // A root is held as it was given, and `--root .` was printed as "."
+        // beside repositories with whole paths, which nothing could tell
+        // were under it.
+        let given = Path::new(&report.root);
+        let path = given
+            .canonicalize()
+            .or_else(|_| std::path::absolute(given))
+            .unwrap_or_else(|_| given.to_path_buf());
+        Root { path: path.display().to_string(), found: report.found, problem: report.says() }
     }
 }
 
@@ -132,9 +141,11 @@ struct Repo {
     tags: Vec<String>,
 }
 
-/// What is uncommitted: a card's `+1 ~3 ?4`, and what is in conflict. A file
-/// is counted once, in the first of these it is: in conflict, staged,
-/// untracked, modified.
+/// What is uncommitted: a card's `+1 ~3 ?4`, and what is in conflict. These
+/// are entries, as `git status --short` lists them, and not files: a
+/// directory with nothing tracked in it is one, whatever it holds. Each is
+/// counted once, in the first of these it is: in conflict, staged, untracked,
+/// modified.
 #[derive(Serialize)]
 struct WorkingTree {
     staged: usize,
@@ -215,32 +226,68 @@ impl LastCommit {
 /// Whatever stopped it is said on standard error, but for a reader that went
 /// away (`omarepos --json | head`), who is not waiting to be told.
 pub fn print(roots: Vec<String>, depth: Option<usize>) -> bool {
-    let fleet = match take(roots, depth) {
-        Ok(fleet) => fleet,
-        Err(why) => {
-            note!("omarepos: {why}");
-            return false;
-        }
-    };
-    if let Some(why) = &fleet.fetch_failures_unreadable {
-        note!("omarepos: no failed fetch is in the snapshot, as their record cannot be read: {why}");
+    if !STDOUT_WAS_OPEN.load(Ordering::Relaxed) {
+        note!("omarepos: standard output is closed, so there is nowhere to print the snapshot");
+        return false;
     }
-    let text = match encode(&fleet) {
-        Ok(text) => text,
-        Err(why) => {
-            note!("omarepos: {why}");
-            return false;
-        }
-    };
-    let mut out = std::io::stdout().lock();
-    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+    match write_to(&mut std::io::stdout().lock(), roots, depth) {
         Ok(()) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => false,
-        Err(err) => {
-            note!("omarepos: the snapshot could not be written: {err}");
+        Err(Unprinted::ReaderGone) => false,
+        Err(Unprinted::Because(why)) => {
+            note!("omarepos: {why}");
             false
         }
     }
+}
+
+/// Whether standard output was open when the program was started.
+///
+/// A run with it closed (`omarepos --json >&-`) printed nothing and exited
+/// with 0. Rust's runtime opens `/dev/null` in the place of a closed one
+/// before `main`, so by then every write to it is done, and a closed one
+/// looks like one sent to `/dev/null` on purpose. Only how it was opened
+/// could tell them apart, and a script's own "throw this away" opens it
+/// the same way: Python's `subprocess.DEVNULL` and Node's `'ignore'` both
+/// do. So this looks before the runtime does: an entry in `.init_array`
+/// runs as the program is loaded, ahead of the runtime's start.
+static STDOUT_WAS_OPEN: AtomicBool = AtomicBool::new(true);
+
+#[used]
+#[unsafe(link_section = ".init_array")]
+static LOOK_AT_STDOUT: extern "C" fn() = look_at_stdout;
+
+extern "C" fn look_at_stdout() {
+    // SAFETY: fcntl(2) with F_GETFD asks about a descriptor and changes
+    // nothing. Neither it nor the store needs the runtime, which is not up.
+    let open = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFD) } != -1;
+    STDOUT_WAS_OPEN.store(open, Ordering::Relaxed);
+}
+
+/// Why the snapshot was not printed, or not all of it.
+#[derive(Debug, PartialEq)]
+enum Unprinted {
+    /// What to say on standard error.
+    Because(String),
+    /// The reader closed its end, and is not waiting to be told.
+    ReaderGone,
+}
+
+/// [`print`], to `out`. Nothing is written to it unless the snapshot was
+/// taken whole.
+fn write_to(
+    out: &mut impl std::io::Write,
+    roots: Vec<String>,
+    depth: Option<usize>,
+) -> Result<(), Unprinted> {
+    let fleet = take(roots, depth).map_err(Unprinted::Because)?;
+    if let Some(why) = &fleet.fetch_failures_unreadable {
+        note!("omarepos: no failed fetch is in the snapshot, as their record cannot be read: {why}");
+    }
+    let text = encode(&fleet).map_err(Unprinted::Because)?;
+    out.write_all(text.as_bytes()).and_then(|()| out.flush()).map_err(|err| match err.kind() {
+        std::io::ErrorKind::BrokenPipe => Unprinted::ReaderGone,
+        _ => Unprinted::Because(format!("the snapshot could not be written: {err}")),
+    })
 }
 
 /// Read the fleet, or say why there is nothing to print.
@@ -266,25 +313,16 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
 
     let (events, reports) = scan::spawn(cfg.roots(), cfg.extra_repos(), cfg.depth());
     let mut read = Vec::new();
-    loop {
-        match events.recv_blocking() {
-            Ok(Event::Discovered(_)) => {}
-            Ok(Event::Repo { info, seed }) => {
-                // What the window's scan does with a root's tag, here in
-                // memory and never saved: the tags printed are the ones the
-                // window shows from its next scan on. Not for a one-off look,
-                // as there: its roots are not the configured ones, and "this
-                // root gives no tag" would take the tag away.
-                if let Some(seed) = seed.filter(|_| !one_off) {
-                    meta.apply_root_tag(&info.path, &seed.root, seed.tag.as_deref());
-                }
-                read.push(info);
-            }
-            Ok(Event::Done) => break,
-            // Only a panic on the scan's own thread ends it without `Done`,
-            // and a fleet less whatever it had not reached is not the fleet.
-            Err(_) => return Err("the scan stopped before it had read every repository".to_string()),
+    for (info, seed) in gather(&events)? {
+        // What the window's scan does with a root's tag, here in memory and
+        // never saved: the tags printed are the ones the window shows from
+        // its next scan on. Not for a one-off look, as there: its roots are
+        // not the configured ones, and "this root gives no tag" would take
+        // the tag away.
+        if let Some(seed) = seed.filter(|_| !one_off) {
+            meta.apply_root_tag(&info.path, &seed.root, seed.tag.as_deref());
         }
+        read.push(info);
     }
     read.sort_by(|a, b| a.path.cmp(&b.path));
     // Sent before anything else, so there by now.
@@ -303,6 +341,36 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
             })
             .collect(),
     })
+}
+
+/// Everything a scan sends, to its end: each repository it read, with what
+/// the root it was found under wants tagged on it. An error when that is not
+/// every repository it found.
+fn gather(events: &async_channel::Receiver<Event>) -> Result<Vec<(RepoInfo, Option<Seed>)>, String> {
+    let mut found = None;
+    let mut read = Vec::new();
+    loop {
+        match events.recv_blocking() {
+            Ok(Event::Discovered(count)) => found = Some(count),
+            Ok(Event::Repo { info, seed }) => read.push((info, seed)),
+            Ok(Event::Done) => break,
+            // Only a panic on the scan's own thread ends it without `Done`.
+            Err(_) => {
+                return Err("no snapshot, because the scan stopped before it was done".to_string());
+            }
+        }
+    }
+    // A worker that panics is let go, and `Done` is sent all the same, for
+    // the window has the rest of the grid to show. A snapshot short of a
+    // repository is not the fleet, and would say nothing of the one missing.
+    match found {
+        Some(count) if count == read.len() => Ok(read),
+        _ => Err(format!(
+            "no snapshot, because the scan found {} repositories and read {} of them",
+            found.unwrap_or(0),
+            read.len()
+        )),
+    }
 }
 
 /// Why there is no snapshot, when a file it reads is there and cannot be
@@ -430,7 +498,7 @@ mod tests {
         assert_eq!(top, ["fetch_failures_unreadable", "repos", "roots", "schema_version"]);
         assert_eq!(printed["schema_version"], 1);
         assert!(printed["fetch_failures_unreadable"].is_null());
-        assert_eq!(printed["roots"], json!([{ "path": root, "found": 4, "problem": null }]));
+        assert_eq!(printed["roots"], json!([{ "path": key(&f.root), "found": 4, "problem": null }]));
         assert_eq!(names(&printed), ["fresh", "quiet", "seed", "work"], "in the order of their paths");
         // Every key on every repository, `null` or not: a script need not ask
         // whether one is there.
@@ -701,7 +769,7 @@ mod tests {
 
         let printed = snapshot(vec![elsewhere.clone()], Some(1));
         assert_eq!(names(&printed), ["top"], "one level down, and not the configured root");
-        assert_eq!(printed["roots"], json!([{ "path": elsewhere, "found": 1, "problem": null }]));
+        assert_eq!(printed["roots"], json!([{ "path": key(&base.join("elsewhere")), "found": 1, "problem": null }]));
         assert_eq!(repo(&printed, "top")["tags"], json!(["old"]));
 
         assert_eq!(names(&snapshot(vec![elsewhere], None)), ["deep", "top"], "the configured depth");
@@ -764,6 +832,140 @@ mod tests {
         let bare = repo(&printed, "bare");
         assert_eq!(bare["bare"], true, "{bare:#}");
         null(bare, &["working_tree", "working_tree_unreadable", "unpushed", "stray_branches", "error"]);
+
+        start_afresh();
+    }
+
+    /// A root that is there and gives nothing is said as the status bar says
+    /// it: one with no repository in it, and a workspace whose clones its own
+    /// repository does not ignore, which are left out and named.
+    #[test]
+    fn a_root_that_gives_nothing_says_why() {
+        let _guard = isolate();
+        start_afresh();
+        let base = scratch("json-roots");
+        std::fs::create_dir_all(base.join("empty/notes")).unwrap();
+        git(&base, &["init", "-q", "-b", "main", "workspace"]);
+        git(&base.join("workspace"), &["init", "-q", "-b", "main", "clone"]);
+        let (empty, workspace) = (base.join("empty"), base.join("workspace"));
+        write(
+            &Config::path(),
+            &format!(
+                "roots = [{}, {{ path = {}, nested = true }}]\n",
+                quoted(&empty.display().to_string()),
+                quoted(&workspace.display().to_string()),
+            ),
+        );
+
+        let printed = snapshot(Vec::new(), None);
+        assert_eq!(
+            printed["roots"],
+            json!([
+                { "path": key(&empty), "found": 0, "problem": "no repositories found" },
+                {
+                    "path": key(&workspace),
+                    "found": 0,
+                    "problem": "no repositories found: 1 repository in it is not ignored by its own \
+                                repository, and so is left out (clone)",
+                },
+            ])
+        );
+        assert_eq!(printed["repos"], json!([]));
+
+        start_afresh();
+    }
+
+    /// A root given as a relative path is printed whole, as the paths of the
+    /// repositories under it are, whether it is there or not. The tests run
+    /// in the crate's own directory, which is what these are relative to.
+    #[test]
+    fn a_relative_root_is_printed_whole() {
+        let _guard = isolate();
+        start_afresh();
+        let base = scratch("json-relative");
+        git(&base, &["init", "-q", "-b", "main", "app"]);
+        let relative = "target/test-fixtures/json-relative";
+        assert_eq!(Path::new(relative).canonicalize().unwrap(), base.canonicalize().unwrap());
+
+        let printed = snapshot(vec![relative.to_string(), format!("{relative}-missing")], None);
+        let (here, missing) = (&printed["roots"][0], &printed["roots"][1]);
+        assert_eq!(here["path"], key(&base));
+        assert!(repo(&printed, "app")["path"].as_str().unwrap().starts_with(&key(&base)));
+        let absolute = std::path::absolute(format!("{relative}-missing")).unwrap();
+        assert_eq!(missing["path"], absolute.display().to_string());
+        assert_eq!(missing["problem"], "does not exist");
+
+        start_afresh();
+    }
+
+    /// A worker that panics is let go, and the scan still ends with `Done`:
+    /// the window has the rest of the grid to show. A snapshot one short is
+    /// not the fleet, and is not printed.
+    #[test]
+    fn a_scan_that_read_fewer_than_it_found_is_no_snapshot() {
+        let _guard = isolate();
+        let dir = scratch("json-gather");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let reading = || Event::Repo { info: crate::git::inspect(&dir), seed: None };
+        let gathered = |events: Vec<Event>| {
+            let (tx, rx) = async_channel::unbounded();
+            for event in events {
+                tx.send_blocking(event).unwrap();
+            }
+            drop(tx);
+            gather(&rx).map(|read| read.len())
+        };
+
+        assert_eq!(gathered(vec![Event::Discovered(2), reading(), reading(), Event::Done]), Ok(2));
+        assert_eq!(
+            gathered(vec![Event::Discovered(2), reading(), Event::Done]),
+            Err("no snapshot, because the scan found 2 repositories and read 1 of them".to_string())
+        );
+        assert!(gathered(vec![Event::Discovered(1), reading()]).is_err(), "it never said Done");
+    }
+
+    /// A reader that is not there, in the way given.
+    struct Gone(std::io::ErrorKind);
+
+    impl std::io::Write for Gone {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// What reaches standard output: the whole snapshot or nothing, and what
+    /// is said when it cannot be written, which is nothing to a reader that
+    /// went away (`omarepos --json | head`).
+    #[test]
+    fn the_snapshot_is_printed_whole_or_not_at_all() {
+        let _guard = isolate();
+        start_afresh();
+        let f = fleet("json-printed");
+        let root = || vec![f.root.display().to_string()];
+
+        let mut out = Vec::new();
+        assert_eq!(write_to(&mut out, root(), None), Ok(()));
+        let printed: Value = serde_json::from_slice(&out).expect("JSON, and nothing else");
+        assert_eq!(names(&printed), ["seed", "work"]);
+        assert!(out.ends_with(b"}\n"));
+
+        write(&Config::path(), "max_dpeth = 4\n");
+        let mut out = Vec::new();
+        let Err(Unprinted::Because(why)) = write_to(&mut out, root(), None) else { panic!("printed") };
+        assert!(why.contains("config.toml"), "{why}");
+        assert!(out.is_empty(), "something printed: {}", String::from_utf8_lossy(&out));
+        let _ = std::fs::remove_file(Config::path());
+
+        let gone = write_to(&mut Gone(std::io::ErrorKind::BrokenPipe), root(), None);
+        assert_eq!(gone, Err(Unprinted::ReaderGone));
+        let Err(Unprinted::Because(why)) = write_to(&mut Gone(std::io::ErrorKind::StorageFull), root(), None)
+        else {
+            panic!("a full disk said nothing")
+        };
+        assert!(why.starts_with("the snapshot could not be written"), "{why}");
 
         start_afresh();
     }
