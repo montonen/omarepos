@@ -193,14 +193,15 @@ fn a_reader_that_went_away_is_a_failure_and_is_told_nothing() {
     assert_eq!(said(&out), "");
 }
 
-/// A remote's login is not printed, written in the way git itself cannot
-/// leave out of what it says (a password with a `/` in it), neither as the
-/// remote nor out of the record of a failed fetch in the state directory.
+/// A remote's login is not printed, written in a way git itself cannot leave
+/// out of what it says, a password with a `/` and a quote in it, which no
+/// look for addresses finds either: neither as the remote nor out of the
+/// record of a failed fetch in the state directory.
 #[test]
 fn no_login_is_printed() {
     let home = Home::new("json-cli-login");
     let app = home.app();
-    let url = "https://deploy:abc/SECRET@example.invalid/x.git";
+    let url = "https://deploy:it's/SECRET@example.invalid/x.git";
     git(&app, &["remote", "add", "origin", url]);
     let key = app.canonicalize().unwrap().display().to_string();
     let said_then = format!("fatal: unable to access '{url}/': URL rejected");
@@ -209,12 +210,14 @@ fn no_login_is_printed() {
     let out = home.omarepos(&["--json"]).output().expect("omarepos runs");
     assert_eq!(out.status.code(), Some(0), "{}", said(&out));
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(!text.contains("SECRET") && !text.contains("deploy"), "{text}");
+    for secret in ["SECRET", "it's", "deploy"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
     let printed: Value = serde_json::from_str(&text).expect("JSON, and nothing else");
     let repo = &printed["repos"][0];
     assert_eq!(repo["remote"], "example.invalid/x");
     assert!(repo["web"].is_null(), "{repo:#}");
-    assert_eq!(repo["fetch_failed"], "fatal: unable to access 'https://example.invalid/x.git/': URL rejected");
+    assert_eq!(repo["fetch_failed"], "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected");
 }
 
 #[test]

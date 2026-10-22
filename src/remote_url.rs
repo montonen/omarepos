@@ -1,10 +1,12 @@
 //! A remote's URL, made fit to be shown: the remote a card names, the page
-//! `o` opens, and an address in what git said when a fetch failed.
+//! `o` opens, and what git said when a fetch failed, which names it.
 //!
 //! A URL can carry whoever it logs in as, a token included, and each of these
 //! ends up somewhere that keeps it: on screen, in the log a `--json` run is
 //! piped to, in a browser's history. So all of them go through [`login`], the
-//! one place that says where a login ends, and whether that can be told.
+//! one place that says where a login ends, and whether that can be told; and
+//! what git said loses the password of the repository's remotes as well,
+//! which is known, wherever git put it ([`without_secrets`]).
 
 use std::ops::Range;
 
@@ -101,25 +103,83 @@ fn without_login(url: &str) -> String {
     }
 }
 
-/// `text` with the login taken out of every address in it.
+/// The password in `url`: what follows the first `:` of its login.
+fn password(url: &str) -> Option<&str> {
+    let url = url.trim();
+    let at = login(url)?.at();
+    let login = &url[at.start..at.end - 1];
+    login.split_once(':').map(|(_, password)| password)
+}
+
+/// How long a password, or a piece of one, has to be to be looked for in
+/// what git said. Anything shorter is common enough to be found inside words
+/// that are nobody's, and taken out of them.
+const LOOKED_FOR: usize = 4;
+
+/// What git said when a fetch failed, fit to be shown: the password of each
+/// of `urls`, the repository's remotes, taken out of it wherever it is, and
+/// then whatever login is still in an address in it (see [`without_logins_in`]).
 ///
-/// For what git said when a fetch failed, which names the remote. git leaves
-/// the login out of most of what it prints, and not out of an address it
-/// cannot make sense of, which a password with a `/` in it makes of one. An
-/// address is taken to run from one space or quote to the next, and every
-/// word with an `@` in it is held to [`login`]. One that is not an address,
-/// such as an email, is left alone, having no colon; `git@host:` in "git@host:
-/// Permission denied" loses its `git@`, which is nobody's secret.
+/// git leaves a remote's login out of most of what it prints, and not out of
+/// an address it cannot make sense of. That one it prints whole, inside
+/// quotes, and a password with a quote, a space or a `<` in it is then no one
+/// word that could be found by looking for addresses
+/// (`'https://me:it's/x@host'`). And curl names what it took for the host,
+/// which can be the front of a password: `me:p@SECR/ET@host` comes out as
+/// "Could not resolve host: SECR". The password is known, being in the
+/// remote's URL, so it is taken out as it is, and so are the pieces it breaks
+/// into at an `@`, `/`, `?` or `#`, where they are long enough to look for.
+/// Each gives way to [`HIDDEN`], so that it is plain something was there.
+///
+/// A user name with no password is not looked for: `git` and `deploy` are
+/// nobody's secret, and would be taken out of every sentence they are in.
+pub fn without_secrets(said: &str, urls: &[String]) -> String {
+    let mut said = said.to_string();
+    for password in urls.iter().filter_map(|url| password(url)) {
+        let mut secrets: Vec<&str> = std::iter::once(password)
+            .chain(password.split(['@', '/', '?', '#']))
+            .filter(|secret| secret.chars().count() >= LOOKED_FOR)
+            .collect();
+        // Longest first: a piece taken out ahead of the whole would leave
+        // the rest of the whole behind.
+        secrets.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+        secrets.dedup();
+        for secret in secrets {
+            said = said.replace(secret, HIDDEN);
+        }
+    }
+    without_logins_in(&said)
+}
+
+/// `text` with the login of every address in it put out of sight: a word
+/// that names a scheme (`https://`, `ssh://`) and has an `@` after it. What
+/// the address logs in as gives way to [`HIDDEN`].
+///
+/// The net under [`without_secrets`], for a password nobody knows: in a
+/// record of failed fetches written before passwords were taken out of what
+/// git said, or one whose remote has since changed. A word runs from one
+/// space or quote to the next, so a password with one in it gets through this
+/// net, and only the known one is sure to go.
+///
+/// Nothing without a scheme is touched. Taken for logins, `contact
+/// admin@x.invalid:`, `stash@{0}:` and `deploy@host: Permission denied` came
+/// out without their front; a token in a remote written as scp writes one is
+/// known, and goes by name.
 pub fn without_logins_in(text: &str) -> String {
     let ends = |c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`' | '<' | '>');
     let mut out = String::with_capacity(text.len());
     for piece in text.split_inclusive(ends) {
         let word = piece.strip_suffix(ends).unwrap_or(piece);
-        if word.contains('@') {
-            out.push_str(&without_login(word));
-            out.push_str(&piece[word.len()..]);
-        } else {
-            out.push_str(piece);
+        let login = if word.contains("://") { login(word) } else { None };
+        match login {
+            Some(login) => {
+                let at = login.at();
+                out.push_str(&word[..at.start]);
+                out.push_str(HIDDEN);
+                // From the `@` on, which says that a login was there.
+                out.push_str(&piece[at.end - 1..]);
+            }
+            None => out.push_str(piece),
         }
     }
     out
@@ -491,43 +551,108 @@ mod tests {
     }
 
     /// What git says when a fetch fails, with the remote's address in it as
-    /// git prints it: its login left out where git could tell where that
-    /// ends, and whole where it could not.
+    /// git prints it, and no password known: the login of every address with
+    /// a scheme gives way to the mark, where git could tell where it ends and
+    /// where it could not.
     #[test]
-    fn whoever_an_address_logs_in_as_is_taken_out_of_what_git_said() {
+    fn the_login_of_an_address_in_what_git_said_is_put_out_of_sight() {
         for (said, shown) in [
             (
                 "fatal: unable to access 'https://deploy:abc/SECRET@example.invalid/x.git/': \
                  URL rejected: Port number was not a decimal number between 0 and 65535",
-                "fatal: unable to access 'https://example.invalid/x.git/': \
+                "fatal: unable to access 'https://•••@example.invalid/x.git/': \
                  URL rejected: Port number was not a decimal number between 0 and 65535",
             ),
             (
                 "fatal: unable to access 'https://SECRET@github.com/acme/widgets.git/': URL rejected: Bad hostname",
-                "fatal: unable to access 'https://github.com/acme/widgets.git/': URL rejected: Bad hostname",
+                "fatal: unable to access 'https://•••@github.com/acme/widgets.git/': URL rejected: Bad hostname",
             ),
             (
                 "fatal: unable to access 'https://me:tok@en@host.example/x.git/': error: 403",
-                "fatal: unable to access 'https://host.example/x.git/': error: 403",
+                "fatal: unable to access 'https://•••@host.example/x.git/': error: 403",
             ),
-            ("ssh://deploy:hunter2@host.example:2222/x.git: refused", "ssh://host.example:2222/x.git: refused"),
-            ("could not reach https://ghp_token@host.example", "could not reach https://host.example"),
-            (
-                "fatal: 'oauth2:glpat-SECRET@gitlab.com:group/repo.git' does not appear to be a git repository",
-                "fatal: 'gitlab.com:group/repo.git' does not appear to be a git repository",
-            ),
-            // Nothing secret where there is no login: an address without one,
-            // an email, and whom an ssh remote logs in as, which goes anyway.
-            (
-                "fatal: repository 'https://example.invalid/acme/billing.git/' not found",
-                "fatal: repository 'https://example.invalid/acme/billing.git/' not found",
-            ),
-            ("pushed by Fixture <fixture@example.invalid>", "pushed by Fixture <fixture@example.invalid>"),
-            ("git@github.com: Permission denied (publickey).", "github.com: Permission denied (publickey)."),
-            ("git fetch gave no answer in 60 seconds", "git fetch gave no answer in 60 seconds"),
-            ("", ""),
+            ("ssh://deploy:hunter2@host.example:2222/x.git: refused", "ssh://•••@host.example:2222/x.git: refused"),
+            ("could not reach https://ghp_token@host.example", "could not reach https://•••@host.example"),
         ] {
             assert_eq!(without_logins_in(said), shown, "{said}");
+            assert_eq!(without_logins_in(shown), shown, "and once is as good as twice");
+        }
+    }
+
+    /// Text that is nobody's login comes through whole, with a password
+    /// known and with none: no scheme, no address. Each of these used to be
+    /// taken for a login written as scp writes one, and lose its front.
+    #[test]
+    fn what_is_not_a_login_comes_through_whole() {
+        let urls = ["https://deploy:hunter2-SECRET@host.example/x.git".to_string()];
+        for said in [
+            "error: contact admin@x.invalid: the repository has moved",
+            "stash@{0}: WIP on main: 1234567 first",
+            "deploy@host.example: Permission denied (publickey).",
+            "git@github.com: Permission denied (publickey).",
+            "fatal: 'oauth2:glpat-ABCDEFGH@gitlab.com:group/repo.git' does not appear to be a git repository",
+            "pushed by Fixture <fixture@example.invalid>",
+            "fatal: repository 'https://example.invalid/acme/billing.git/' not found",
+            "git fetch gave no answer in 60 seconds",
+            "",
+        ] {
+            assert_eq!(without_logins_in(said), said);
+            assert_eq!(without_secrets(said, &urls), said);
+        }
+        // A user name with no password is no secret, and is not looked for.
+        let unsecret = ["git@host.example:acme/w.git".to_string(), "https://deploy@host.example/x".to_string()];
+        let said = "deploy: git said nothing to deploy";
+        assert_eq!(without_secrets(said, &unsecret), said);
+    }
+
+    /// The password of the repository's own remote, found and taken out
+    /// wherever git or curl put it, in the ways a review confirmed them
+    /// against git 2.56: whole, inside quotes, with a quote or a space in it;
+    /// and cut up, with curl naming its front for the host.
+    #[test]
+    fn a_known_password_is_taken_out_of_what_git_said_wherever_it_is() {
+        let rejected = "URL rejected: Port number was not a decimal number between 0 and 65535";
+        for (url, said, shown) in [
+            (
+                "https://user:it's/SECRET@example.invalid/x.git",
+                format!("fatal: unable to access 'https://user:it's/SECRET@example.invalid/x.git/': {rejected}"),
+                format!("fatal: unable to access 'https://•••@example.invalid/x.git/': {rejected}"),
+            ),
+            (
+                "https://user:pa ss/SECRET@example.invalid/x.git",
+                format!("fatal: unable to access 'https://user:pa ss/SECRET@example.invalid/x.git/': {rejected}"),
+                format!("fatal: unable to access 'https://•••@example.invalid/x.git/': {rejected}"),
+            ),
+            (
+                "https://me:p@SECR/ET@example.invalid/x.git",
+                "fatal: unable to access 'https://SECR/ET@example.invalid/x.git/': Could not resolve host: SECR"
+                    .to_string(),
+                "fatal: unable to access 'https://•••@example.invalid/x.git/': Could not resolve host: •••".to_string(),
+            ),
+            (
+                "https://me:p@SECR?ET@example.invalid/x.git",
+                "fatal: unable to access 'https://SECR?ET@example.invalid/x.git/': Could not resolve host: SECR"
+                    .to_string(),
+                "fatal: unable to access 'https://•••@example.invalid/x.git/': Could not resolve host: •••".to_string(),
+            ),
+            (
+                "oauth2:glpat-SECRET@gitlab.com:group/repo.git",
+                "fatal: 'oauth2:glpat-SECRET@gitlab.com:group/repo.git' does not appear to be a git repository"
+                    .to_string(),
+                "fatal: 'oauth2:•••@gitlab.com:group/repo.git' does not appear to be a git repository".to_string(),
+            ),
+            // A piece shorter than four is left, being too common to look for:
+            // here the review's own `p@SE/CRET`, whose `SE` curl names.
+            (
+                "https://me:p@SE/CRET@example.invalid/x.git",
+                "fatal: unable to access 'https://SE/CRET@example.invalid/x.git/': Could not resolve host: SE"
+                    .to_string(),
+                "fatal: unable to access 'https://•••@example.invalid/x.git/': Could not resolve host: SE".to_string(),
+            ),
+        ] {
+            let urls = [url.to_string()];
+            assert_eq!(without_secrets(&said, &urls), shown, "{url}");
+            assert_eq!(without_secrets(&shown, &urls), shown, "and once is as good as twice: {url}");
         }
     }
 }

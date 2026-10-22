@@ -285,7 +285,7 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
     // State, and not what the user wrote: the snapshot is taken without it,
     // and says that it was.
     let (failed, fetch_failures_unreadable) = match crate::config::try_load_fetch_errors() {
-        Ok(failed) => (failed, None),
+        Ok(failed) => (crate::refresh::shown_failures(failed), None),
         Err(why) => {
             let path = crate::config::fetch_errors_path();
             (Default::default(), Some(crate::config::why_unusable(&path, &why)))
@@ -543,7 +543,7 @@ mod tests {
         let base = scratch("json-token");
         // The remote; what the card calls it; its page; and what git said
         // when it was fetched, as git said it.
-        let remotes: [(&str, &str, &str, Option<&str>, Option<&str>); 7] = [
+        let remotes: [(&str, &str, &str, Option<&str>, Option<&str>); 8] = [
             (
                 "token",
                 "https://someone:SECRET-t0ken@git.example.invalid/acme/billing.git",
@@ -573,6 +573,18 @@ mod tests {
                      URL rejected: Port number was not a decimal number between 0 and 65535",
                 ),
             ),
+            // A quote beside the `/`: no word that looks like an address
+            // holds it, and the password goes by name.
+            (
+                "quote",
+                "https://user:it's/SECRET@example.invalid/x.git",
+                "example.invalid/x",
+                None,
+                Some(
+                    "fatal: unable to access 'https://user:it's/SECRET@example.invalid/x.git/': \
+                     URL rejected: Port number was not a decimal number between 0 and 65535",
+                ),
+            ),
             ("at-slash", "https://me:p@SE/CRET@example.invalid/x.git", "example.invalid/x", None, None),
             // A working remote with an `@` in its path keeps its name and page.
             (
@@ -599,7 +611,7 @@ mod tests {
 
         let fleet = take(vec![base.display().to_string()], None).expect("a snapshot");
         let text = encode(&fleet).unwrap();
-        for secret in ["SECRET", "CRET", "someone", "deploy", "oauth2", "other.invalid"] {
+        for secret in ["SECRET", "CRET", "it's", "someone", "deploy", "oauth2", "other.invalid"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
 
@@ -612,9 +624,10 @@ mod tests {
         }
         assert_eq!(
             repo(&printed, "slash")["fetch_failed"],
-            "fatal: unable to access 'https://example.invalid/x.git/': \
+            "fatal: unable to access 'https://•••@example.invalid/x.git/': \
              URL rejected: Port number was not a decimal number between 0 and 65535"
         );
+        assert_eq!(repo(&printed, "quote")["fetch_failed"], repo(&printed, "slash")["fetch_failed"]);
 
         start_afresh();
     }

@@ -431,7 +431,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         refresh_source: RefCell::new(None),
         refresh_armed: Cell::new(0),
         checked_overdue: Cell::new(false),
-        fetch_errors: RefCell::new(crate::config::load_fetch_errors()),
+        fetch_errors: RefCell::new(crate::refresh::shown_failures(crate::config::load_fetch_errors())),
         known: RefCell::new(crate::config::load_known_repos()),
         refresh_cancel: RefCell::new(None),
         refreshing: Cell::new(false),

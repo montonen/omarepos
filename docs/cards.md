@@ -96,8 +96,11 @@ comes between, a password with a `/` in it cannot be told from a path with an
 `@` in it: the login is taken to run to the last `@`, and that remote gets no
 page at all. A login with a `?`, `#`, `[` or `]` in it sends git to another
 host than the one that seems to follow the `@`, and the card calls that remote
-`•••`, with no page. The remote on the card, and the reason a fetch failed,
-leave the login out in the same way. The tooltip shows exactly what will be
+`•••`, with no page. The remote on the card leaves the login out in the same
+way. The reason a fetch failed is git's own words, which can hold a password
+git could not make sense of, whole or in pieces: the password of each of the
+repository's remotes is shown as `•••` wherever it is in them, and so is the
+login of any address. The tooltip shows exactly what will be
 opened, and the menu names the site: GitHub, GitLab, Bitbucket, Codeberg and
 Azure DevOps by name, anything else by its host.
 

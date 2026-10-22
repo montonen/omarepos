@@ -35,7 +35,7 @@
 //!   is not fixed here: fetching to somewhere else (`--prefetch`) would leave
 //!   the cards with nothing to read.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -428,13 +428,16 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         return report(Outcome::Skipped(skip));
     }
 
+    let urls = remote_urls(&repo);
     let fetch = {
         let gate = gate(&repo);
         let _alone_in_this_ref_store = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         options.pass.fetch(path, options.timeout)
     };
     if let Err(err) = fetch {
-        return report(Outcome::Failed(err));
+        // git prints an address it cannot make sense of whole, password and
+        // all, and curl a host cut out of the middle of one.
+        return report(Outcome::Failed(crate::remote_url::without_secrets(&err, &urls)));
     }
     fetched.set(true);
 
@@ -547,6 +550,43 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
 /// the second usually finds nothing left to do. The locks are per process and
 /// shared by every pass in it, so `f` on one worktree waits for a fleet pass
 /// that is fetching the other.
+/// Every address `repo`'s remotes are fetched from, as its configuration
+/// writes it and as `insteadOf` makes it: where the passwords are that git
+/// may print when a fetch fails.
+fn remote_urls(repo: &Repository) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Ok(names) = repo.remotes() {
+        for name in names.iter().filter_map(|name| name.ok().flatten()) {
+            if let Ok(remote) = repo.find_remote(name) {
+                urls.extend(remote.url().ok().map(str::to_string));
+            }
+        }
+    }
+    if let Ok(config) = repo.config().and_then(|mut config| config.snapshot()) {
+        if let Ok(mut entries) = config.entries(Some("^remote\\..*\\.url$")) {
+            while let Some(entry) = entries.next() {
+                let Ok(entry) = entry else { continue };
+                urls.extend(entry.value().ok().map(str::to_string));
+            }
+        }
+    }
+    urls
+}
+
+/// The record of failed fetches as it is to be shown, on a card or by
+/// `--json`: each with the passwords of its repository's remotes taken out of
+/// it, as they are at the fetch now. One written before that can hold one.
+pub fn shown_failures(record: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    record
+        .into_iter()
+        .map(|(path, said)| {
+            let urls = Repository::open(&path).map(|repo| remote_urls(&repo)).unwrap_or_default();
+            let shown = crate::remote_url::without_secrets(&said, &urls);
+            (path, shown)
+        })
+        .collect()
+}
+
 fn gate(repo: &Repository) -> Arc<Mutex<()>> {
     static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let common = repo.commondir();
@@ -1389,6 +1429,46 @@ mod tests {
             );
             assert!(!report.fetched, "{pass:?}");
         }
+    }
+
+    /// A password with a `/` in it, and a quote or a space beside that. git
+    /// cannot make sense of the address, prints it whole, password and all,
+    /// and the quote or the space breaks it in two for anything looking for
+    /// addresses. curl turns it away before any host is looked up, so this
+    /// asks nothing of the network. The password is known, and goes.
+    #[test]
+    fn a_password_git_prints_is_not_passed_on() {
+        let _guard = isolate();
+        for (name, url) in [
+            ("rf-password-quote", "https://user:it's/SECRET@example.invalid/x.git"),
+            ("rf-password-space", "https://user:pa ss/SECRET@example.invalid/x.git"),
+        ] {
+            let f = fleet(name);
+            git(&f.work, &["remote", "set-url", "origin", url]);
+            for pass in [Pass::One, Pass::Fleet] {
+                let report = fetch(&f.work, pass);
+                let Outcome::Failed(why) = &report.outcome else { panic!("{url} {pass:?}: {report:?}") };
+                for secret in ["SECRET", "it's", "pa ss"] {
+                    assert!(!why.contains(secret), "{url} {pass:?}: {why}");
+                }
+                assert!(why.contains("https://•••@example.invalid/x.git"), "{url} {pass:?}: {why}");
+            }
+        }
+    }
+
+    /// A record of failed fetches written before passwords were taken out
+    /// of it is shown with them taken out, by the remotes the repository has.
+    #[test]
+    fn a_failure_on_record_is_shown_without_the_password() {
+        let _guard = isolate();
+        let f = fleet("rf-password-on-record");
+        let url = "https://user:it's/SECRET@example.invalid/x.git";
+        git(&f.work, &["remote", "set-url", "origin", url]);
+        let key = f.work.display().to_string();
+        let record = BTreeMap::from([(key.clone(), format!("fatal: unable to access '{url}/': URL rejected"))]);
+
+        let shown = shown_failures(record);
+        assert_eq!(shown[&key], "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected");
     }
 
     // ---- what a fetch leaves alone ----------------------------------------

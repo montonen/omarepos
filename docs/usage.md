@@ -112,7 +112,7 @@ every key:
 | `unpushed` | Commits on HEAD that are on no remote at all, counted up to 1000, which then means that many or more |
 | `stray_branches` | Other local branches that hold commits on no remote |
 | `history_unreadable` | Why the commits between here and the remotes could not be read |
-| `fetch_failed` | What git said the last time a fetch of it failed, until one works |
+| `fetch_failed` | What git said the last time a fetch of it failed, until one works. The password of each of the repository's remotes is `•••` wherever git put it, and so is the login of any address in it |
 | `last_commit` | The commit HEAD is on: `short_id`, `summary`, `author`, and `when` it was committed, in seconds since 1970 |
 | `tags` | Its tags, as the window shows them |
 

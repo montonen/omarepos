@@ -1015,6 +1015,6 @@ mod tests {
         );
         stage_something(&dir);
         let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
-        assert_eq!(said, "fatal: unable to access 'https://example.invalid/x.git/': URL rejected");
+        assert_eq!(said, "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected");
     }
 }
