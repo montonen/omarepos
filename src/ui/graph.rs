@@ -100,7 +100,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     if let Some(page) = &web {
         let open = gtk::Button::builder()
             .icon_name("web-browser-symbolic")
-            .tooltip_text(format!("Open on {} (o)\n{page}", crate::git::web_site(page)))
+            .tooltip_text(format!("Open on {} (o)\n{page}", crate::remote_url::web_site(page)))
             .has_frame(false)
             .build();
         let on_web = Rc::clone(&on_web);

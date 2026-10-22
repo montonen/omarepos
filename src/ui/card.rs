@@ -268,7 +268,7 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
     let on_the_web = info
         .web
         .as_deref()
-        .map(|page| format!("Open on {}", crate::git::web_site(page)));
+        .map(|page| format!("Open on {}", crate::remote_url::web_site(page)));
     let mut items = vec![
         ("Commit graph", Action::CommitGraph),
         ("Contributions", Action::Contributions),

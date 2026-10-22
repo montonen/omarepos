@@ -291,9 +291,12 @@ pub fn load_fetch_errors() -> std::collections::BTreeMap<String, String> {
     // an update was refused for, written as a table. Those were never fetch
     // failures, and are left behind here; read as text, one of them would
     // have failed the whole file and lost the failures with it.
+    //
+    // One written before logins were taken out of what git said can still
+    // hold one, and it is not shown again, on a card or by `--json`.
     read.into_iter()
         .filter_map(|(path, said)| match said {
-            toml::Value::String(said) => Some((path, said)),
+            toml::Value::String(said) => Some((path, crate::remote_url::without_logins_in(&said))),
             _ => None,
         })
         .collect()

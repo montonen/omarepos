@@ -369,7 +369,10 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
     if status.success() {
         return Ok(stdout);
     }
-    Err(explain(&stderr, &stdout))
+    // What git said goes into a toast, onto a card and into the record of
+    // failed fetches, and git leaves a remote's login in an address it cannot
+    // make sense of.
+    Err(crate::remote_url::without_logins_in(&explain(&stderr, &stdout)))
 }
 
 type Reader = (Arc<Mutex<Vec<u8>>>, JoinHandle<()>);
@@ -995,5 +998,23 @@ mod tests {
         let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
         assert!(!said.contains('\0'), "{said:?}");
         assert!(said.contains("a.txt\u{2400}b.txt"), "{said:?}");
+    }
+
+    /// git leaves a remote's login out of most of what it prints, and not out
+    /// of an address it cannot make sense of, which a password with a `/` in
+    /// it makes of one. A hook says it here, where it needs no network.
+    #[test]
+    fn a_login_in_what_git_said_is_not_passed_on() {
+        let _guard = isolate();
+        let dir = repo("gitcmd-login");
+        hook(
+            &dir,
+            "pre-commit",
+            "echo \"fatal: unable to access 'https://deploy:abc/SECRET@example.invalid/x.git/': \
+             URL rejected\" >&2; exit 1",
+        );
+        stage_something(&dir);
+        let said = run(&dir, &["commit", "-m", "second"], PATIENT).unwrap_err();
+        assert_eq!(said, "fatal: unable to access 'https://example.invalid/x.git/': URL rejected");
     }
 }

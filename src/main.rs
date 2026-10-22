@@ -22,6 +22,7 @@ mod graph;
 mod lang;
 mod meta;
 mod refresh;
+mod remote_url;
 mod scan;
 mod search;
 mod snapshot;

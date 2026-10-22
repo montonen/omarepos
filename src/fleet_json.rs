@@ -16,9 +16,10 @@
 //!
 //! It prints what the grid could show and nothing more. What is never in it is
 //! the URL a remote is configured with, which can carry a user name and a
-//! token: the remote is given tidied, as the card gives it, and a URL in what
-//! a failed fetch said loses whoever it logs in as. And it stays a snapshot. A
-//! fetch from the command line is not what this grows into.
+//! token: the remote is given as the card names it, and what a failed fetch
+//! said as the card says it, both with the login taken out
+//! (`crate::remote_url`). And it stays a snapshot. A fetch from the command
+//! line is not what this grows into.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -118,7 +119,8 @@ struct Repo {
     /// Why `ahead`, `behind`, `unpushed` and `stray_branches` are `null`: the
     /// commits between here and the remotes could not be read.
     history_unreadable: Option<String>,
-    /// What git said the last time a fetch of it failed, until one works.
+    /// What git said the last time a fetch of it failed, until one works:
+    /// as the card says it, with no login in it.
     fetch_failed: Option<String>,
     last_commit: Option<LastCommit>,
     /// As the window shows them.
@@ -184,7 +186,7 @@ impl Repo {
             unpushed: walked.then_some(info.unpushed),
             stray_branches: walked.then_some(info.stray_branches),
             history_unreadable: info.history_unreadable.clone(),
-            fetch_failed: fetch_failed.map(without_credentials),
+            fetch_failed: fetch_failed.map(str::to_string),
             last_commit: info.last_commit.as_ref().map(LastCommit::of),
             tags,
         }
@@ -200,33 +202,6 @@ impl LastCommit {
             when: commit.when,
         }
     }
-}
-
-/// `said` with whoever a URL in it logs in as taken out, so that
-/// `https://me:token@host/x` is printed as `https://host/x`.
-///
-/// What a failed fetch said is git's own words, and git leaves the user name
-/// and the password out of the URLs it prints in nearly all of them. A
-/// snapshot is copied into logs and handed to other programs, and nearly all
-/// is not enough.
-fn without_credentials(said: &str) -> String {
-    let mut out = String::with_capacity(said.len());
-    let mut rest = said;
-    while let Some(at) = rest.find("://") {
-        let (before, after) = rest.split_at(at + "://".len());
-        out.push_str(before);
-        // Up to where the host ends. A URL in a sentence is often quoted.
-        let end = after
-            .find(|c: char| c == '/' || c.is_whitespace() || matches!(c, '\'' | '"' | '<' | '>'))
-            .unwrap_or(after.len());
-        let authority = &after[..end];
-        // The last `@`: a password with one in it has to be written `%40` to
-        // work, but one written as it is must not leave half of itself here.
-        out.push_str(authority.rsplit_once('@').map_or(authority, |(_, host)| host));
-        rest = &after[end..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// Print the snapshot on standard output: the fleet the configuration names,
@@ -482,57 +457,80 @@ mod tests {
     }
 
     /// The URL a remote is configured with can carry a token, and a snapshot
-    /// ends up in logs and in other programs. Neither the token nor the name
-    /// it logs in as is printed: not in the remote, not in its page, not in
-    /// what a failed fetch said.
+    /// ends up in logs and in other programs. No part of a login is printed:
+    /// not in the remote, not in its page, not in what a failed fetch said,
+    /// whether the login was written properly or not, and whether git left
+    /// it out of what it said or not.
     #[test]
     fn a_remote_is_printed_without_whoever_it_logs_in_as() {
         let _guard = isolate();
         start_afresh();
         let base = scratch("json-token");
-        git(&base, &["init", "-q", "-b", "main", "billing"]);
-        let billing = base.join("billing");
-        commit_file(&billing, "a.txt", "a\n", "one");
-        let url = "https://someone:s3cr3t-t0ken@git.example.invalid/acme/billing.git";
-        git(&billing, &["remote", "add", "origin", url]);
-        let said = format!("fatal: unable to access '{url}/': Could not resolve host: git.example.invalid");
-        write(&crate::config::fetch_errors_path(), &format!("{} = {}\n", quoted(&key(&billing)), quoted(&said)));
+        // The remote; what the card calls it; its page; and what git said
+        // when it was fetched, as git said it.
+        let remotes: [(&str, &str, &str, Option<&str>, Option<&str>); 4] = [
+            (
+                "token",
+                "https://someone:SECRET-t0ken@git.example.invalid/acme/billing.git",
+                "git.example.invalid/acme/billing",
+                Some("https://git.example.invalid/acme/billing"),
+                Some(
+                    "fatal: unable to access \
+                     'https://someone:SECRET-t0ken@git.example.invalid/acme/billing.git/': \
+                     Could not resolve host: git.example.invalid",
+                ),
+            ),
+            (
+                "at",
+                "https://jm:p@SECRET@github.com/acme/widgets.git",
+                "github.com/acme/widgets",
+                Some("https://github.com/acme/widgets"),
+                Some("fatal: unable to access 'https://SECRET@github.com/acme/widgets.git/': URL rejected: Bad hostname"),
+            ),
+            ("scp", "oauth2:glpat-SECRET@gitlab.com:group/repo.git", "gitlab.com/group/repo", None, None),
+            (
+                "slash",
+                "https://deploy:abc/SECRET@example.invalid/x.git",
+                "example.invalid/x",
+                None,
+                Some(
+                    "fatal: unable to access 'https://deploy:abc/SECRET@example.invalid/x.git/': \
+                     URL rejected: Port number was not a decimal number between 0 and 65535",
+                ),
+            ),
+        ];
+        let mut record = String::new();
+        for (name, url, _, _, said) in remotes {
+            git(&base, &["init", "-q", "-b", "main", name]);
+            let dir = base.join(name);
+            commit_file(&dir, "a.txt", "a\n", "one");
+            git(&dir, &["remote", "add", "origin", url]);
+            if let Some(said) = said {
+                record.push_str(&format!("{} = {}\n", quoted(&key(&dir)), quoted(said)));
+            }
+        }
+        write(&crate::config::fetch_errors_path(), &record);
 
         let fleet = take(vec![base.display().to_string()], None).expect("a snapshot");
         let text = encode(&fleet).unwrap();
-        assert!(!text.contains("s3cr3t-t0ken"), "{text}");
-        assert!(!text.contains("someone"), "{text}");
+        for secret in ["SECRET", "someone", "deploy", "oauth2"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
 
         let printed: Value = serde_json::from_str(&text).unwrap();
-        let billing = repo(&printed, "billing");
-        assert_eq!(billing["remote"], "git.example.invalid/acme/billing");
-        assert_eq!(billing["web"], "https://git.example.invalid/acme/billing");
+        for (name, _, named, page, said) in remotes {
+            let shown = repo(&printed, name);
+            assert_eq!(shown["remote"], named, "{name}");
+            assert_eq!(shown["web"], json!(page), "{name}");
+            assert_eq!(shown["fetch_failed"].is_string(), said.is_some(), "{name}");
+        }
         assert_eq!(
-            billing["fetch_failed"],
-            "fatal: unable to access 'https://git.example.invalid/acme/billing.git/': \
-             Could not resolve host: git.example.invalid"
+            repo(&printed, "slash")["fetch_failed"],
+            "fatal: unable to access 'https://example.invalid/x.git/': \
+             URL rejected: Port number was not a decimal number between 0 and 65535"
         );
 
         start_afresh();
-    }
-
-    #[test]
-    fn whoever_a_url_logs_in_as_is_taken_out_of_what_git_said() {
-        for (said, printed) in [
-            (
-                "fatal: unable to access 'https://me:tok@en@host.example/x.git/': error: 403",
-                "fatal: unable to access 'https://host.example/x.git/': error: 403",
-            ),
-            ("ssh://deploy:hunter2@host.example:2222/x.git: refused", "ssh://host.example:2222/x.git: refused"),
-            ("could not reach https://ghp_token@host.example", "could not reach https://host.example"),
-            // Nothing secret where there is no URL: whom an ssh remote logs in
-            // as, and an `@` in a path.
-            ("git@github.com: Permission denied (publickey).", "git@github.com: Permission denied (publickey)."),
-            ("https://host.example/team@2024/x.git not found", "https://host.example/team@2024/x.git not found"),
-            ("git fetch gave no answer in 60 seconds", "git fetch gave no answer in 60 seconds"),
-        ] {
-            assert_eq!(without_credentials(said), printed, "{said}");
-        }
     }
 
     /// Every file and directory under `dir`, with what it holds and when it

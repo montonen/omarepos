@@ -101,6 +101,7 @@ monospace instead. The walk types the code and checks the table.
 | `src/config.rs` | `config.toml`, path expansion, terminal/editor resolution |
 | `src/theme.rs` | Reads Omarchy's `colors.toml`, compiles the GTK stylesheet |
 | `src/git.rs` | Repository discovery and inspection |
+| `src/remote_url.rs` | A remote's URL made fit to show: the name on a card, the page `o` opens, and git's words, all with no login in them |
 | `src/gitcmd.rs` | The one way a git command is run, which is only ever a fetch: time limit, process group, what git said |
 | `src/commit.rs` | Reading a commit or the working tree: the changed files and their diffs |
 | `src/graph.rs` | Revwalk → lane assignment for the commit graph |
