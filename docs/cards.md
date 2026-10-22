@@ -70,7 +70,14 @@ gone, `no remote` for a repository that has nowhere to push — and `+2 branches
 when other local branches hold such commits. Those are the cases that used to
 read "clean". Each card's checkbox adds it to the contributions scope — once
 anything is ticked the rest of the grid dims, so the selection stays visible
-while you scroll. The `⋮` menu holds the terminal, editor, web page and clipboard actions. **Open in terminal**
+while you scroll.
+
+A card faded to half is the last run's: at launch the grid is put up at once
+from what the last scan read, and each card stays faded until the scan has
+read its repository again, a second or two later. The status bar says how
+many are still waiting and how old their reading is (`12 as read 3 hours
+ago`). Nothing is fetched until the scan is done, and a repository the scan
+no longer finds leaves the grid when it ends. The `⋮` menu holds the terminal, editor, web page and clipboard actions. **Open in terminal**
 starts lazygit in the repository when it is installed, and leaves you in a shell
 there when you quit it — so it is both, not one instead of the other. Change or
 disable that in settings.

@@ -223,6 +223,17 @@ pub fn refuse_to_replace(load_error: &Option<String>) -> std::io::Result<()> {
 /// leaves half a file — and for the settings and the tags there is no other
 /// copy. The version being replaced is kept beside it as `<name>.bak`.
 pub fn replace_file(path: &Path, body: &str) -> std::io::Result<()> {
+    write_whole(path, body, true)
+}
+
+/// As [`replace_file`], for state the application can work out again: whole
+/// or not at all, and no `.bak` beside it, since there is nothing in it to
+/// be saved from.
+pub fn write_state(path: &Path, body: &str) -> std::io::Result<()> {
+    write_whole(path, body, false)
+}
+
+fn write_whole(path: &Path, body: &str, keep_backup: bool) -> std::io::Result<()> {
     use std::io::Write;
 
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -238,7 +249,7 @@ pub fn replace_file(path: &Path, body: &str) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&fresh);
         return Err(err);
     }
-    if path.exists() {
+    if keep_backup && path.exists() {
         let _ = std::fs::copy(path, dir.join(format!("{name}.bak")));
     }
     std::fs::rename(&fresh, path).inspect_err(|_| {

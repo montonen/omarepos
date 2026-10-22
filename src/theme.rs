@@ -744,6 +744,14 @@ flowbox.om-flow.om-has-selection .om-card:not(.om-selected):hover {{
   opacity: 1;
 }}
 
+/* A card that still shows what the last run read, until the scan has read
+   its repository again: a second or two at launch, and it is not to be taken
+   for the present. Faded further than the cards a selection steps back,
+   which are current. */
+.om-card.om-earlier {{
+  opacity: 0.5;
+}}
+
 .om-card.om-selected checkbutton check {{
   background-color: @om_accent;
   border-color: @om_accent;

@@ -6,11 +6,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository, StatusOptions};
+use serde::{Deserialize, Serialize};
 
 use crate::config::Root;
 use crate::lang;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     pub summary: String,
     pub author: String,
@@ -56,7 +57,7 @@ pub const ACTIVITY_DAYS: usize = 28;
 /// It is counted over HEAD and the tip of its upstream together, each commit
 /// once. A checkout that is behind has not gone quiet, which is what
 /// [`RepoInfo::upstream_when`] is there to say as well.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Activity {
     /// Commits per day as `[mine, others]`, oldest first, the last 24 hours
     /// last. [`ACTIVITY_DAYS`] long, or empty when history could not be read:
@@ -97,13 +98,13 @@ pub struct Activity {
     pub recent: Vec<Commit>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LangShare {
     pub name: String,
     pub share: f32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkTree {
     pub staged: usize,
     pub unstaged: usize,
@@ -139,7 +140,7 @@ impl WorkTree {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub name: String,
     pub path: PathBuf,

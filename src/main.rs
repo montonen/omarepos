@@ -23,6 +23,7 @@ mod meta;
 mod refresh;
 mod scan;
 mod search;
+mod snapshot;
 mod stats;
 #[cfg(test)]
 mod testkit;

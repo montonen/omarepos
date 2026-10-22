@@ -238,18 +238,24 @@ impl Ui {
         *self.signatures.borrow_mut() = sigs;
 
         // What is not worth a build is set straight in place: the tick and
-        // its ring, and the mark on the one card Enter would open. The ticked
-        // flags are taken first — setting a checkbox answers back through
-        // `on_select`, which wants the selection for itself.
-        let ticked: Vec<bool> = {
+        // its ring, the mark on the one card Enter would open, and the one on
+        // a card that still shows the last run's reading. The flags are taken
+        // first — setting a checkbox answers back through `on_select`, which
+        // wants the selection for itself.
+        let marks: Vec<(bool, bool)> = {
             let selected = self.selected.borrow();
-            repos.iter().map(|repo| selected.contains(&repo.path)).collect()
+            let earlier = self.from_last_run.borrow();
+            repos
+                .iter()
+                .map(|repo| (selected.contains(&repo.path), earlier.contains(&repo.path)))
+                .collect()
         };
-        for (index, ticked) in ticked.into_iter().enumerate() {
+        for (index, (ticked, earlier)) in marks.into_iter().enumerate() {
             let Some(child) = self.flow.child_at_index(index as i32) else { break };
             if let Some(card) = child.child() {
                 set_class(&card, "om-selected", ticked);
                 set_class(&card, "om-top-hit", index == 0);
+                set_class(&card, "om-earlier", earlier);
             }
             if let Some(check) = find_check(child.upcast_ref()) {
                 if check.is_active() != ticked {

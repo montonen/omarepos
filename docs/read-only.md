@@ -39,7 +39,9 @@ opposite of the truth.
 What omarepos keeps for itself is in files of its own, never inside a
 repository: `config.toml` and `repos.toml` (your tags) under
 `~/.config/omarepos`, and under `~/.local/state/omarepos` the time of the last
-fetch, what a fetch could not do, and the list of repositories it has seen.
+fetch, what a fetch could not do, the list of repositories it has seen, and
+what the last scan read (`last-scan.toml`), so that a launch can show the grid
+before it has read it again.
 
 Discovery skips `node_modules`, `vendor`, `target` and dotted directories, and
 the language mix is computed from the git index, so untracked build output never
