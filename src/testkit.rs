@@ -132,6 +132,14 @@ pub fn commit_file(repo: &Path, file: &str, body: &str, message: &str) {
     git(repo, &["commit", "-q", "-m", message]);
 }
 
+/// Take a loose object away, the way a power cut in the middle of a commit
+/// does.
+pub fn lose_object(repo: &Path, rev: &str) {
+    let id = git(repo, &["rev-parse", rev]);
+    let file = repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    std::fs::remove_file(&file).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+}
+
 /// Like `git`, with both of a commit's clocks set to `when`, in seconds since
 /// 1970: for a fixture whose history has to have happened on chosen days.
 pub fn git_at(dir: &Path, when: i64, args: &[&str]) -> String {

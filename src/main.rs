@@ -15,6 +15,7 @@ macro_rules! note {
 
 mod commit;
 mod config;
+mod fleet_json;
 mod git;
 mod gitcmd;
 mod graph;
@@ -46,6 +47,7 @@ Usage: omarepos [options]
 Options:
   -r, --root <PATH>   Directory to scan (repeatable; overrides the config file)
   -d, --depth <N>     How deep below each root to look for repos
+      --json          Print the repos as JSON and exit, without a window
   -h, --help          Show this help
   -V, --version       Show the version
 
@@ -59,8 +61,9 @@ fn main() -> glib::ExitCode {
         // SAFETY: nothing else is running yet to read the environment.
         unsafe { std::env::remove_var(name) };
     }
-    let mut cfg = config::Config::load();
     let mut roots: Vec<String> = Vec::new();
+    let mut depth = None;
+    let mut json = false;
     // Lossily: `std::env::args` panics on an argument that is not Unicode,
     // and a path may be anything.
     let mut args = std::env::args_os().skip(1).map(|arg| arg.to_string_lossy().into_owned());
@@ -74,6 +77,7 @@ fn main() -> glib::ExitCode {
                 out(concat!("omarepos ", env!("CARGO_PKG_VERSION"), "\n"));
                 return glib::ExitCode::SUCCESS;
             }
+            "--json" => json = true,
             "-r" | "--root" => match args.next() {
                 Some(path) => roots.push(path),
                 None => {
@@ -82,7 +86,7 @@ fn main() -> glib::ExitCode {
                 }
             },
             "-d" | "--depth" => match args.next().and_then(|n| n.parse::<usize>().ok()) {
-                Some(depth) => cfg.depth_override = Some(depth.max(1)),
+                Some(n) => depth = Some(n),
                 None => {
                     note!("omarepos: --depth needs a number");
                     return glib::ExitCode::FAILURE;
@@ -95,9 +99,16 @@ fn main() -> glib::ExitCode {
             }
         }
     }
-    if !roots.is_empty() {
-        cfg.roots_override = Some(roots.into_iter().map(config::RootSpec::Simple).collect());
+    // Before anything of GTK's exists: a snapshot is wanted where there is no
+    // display, over ssh and from cron, and GTK will not start without one.
+    if json {
+        return if fleet_json::print(roots, depth) {
+            glib::ExitCode::SUCCESS
+        } else {
+            glib::ExitCode::FAILURE
+        };
     }
+    let cfg = config::Config::load().with_command_line(roots, depth);
     // An application with an id is single-instance: a second `omarepos` hands
     // a bare "activate" to the one already running and exits, and whatever was
     // on its command line goes with it. A run that was told where to look is

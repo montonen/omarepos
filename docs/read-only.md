@@ -43,6 +43,13 @@ fetch, what a fetch could not do, the list of repositories it has seen, and
 what the last scan read (`last-scan.toml`), so that a launch can show the grid
 before it has read it again.
 
+`omarepos --json` is the reading without the window
+([Usage](usage.md#the-fleet-as-json)). It reads the repositories as a scan
+does, and of omarepos's own files `config.toml`, `repos.toml` and the record of
+fetches that failed. It writes nothing at all: the tag a root would add is
+printed and left for the window's next scan to write, and the state directory
+is not touched, the last scan included.
+
 Discovery skips `node_modules`, `vendor`, `target` and dotted directories, and
 the language mix is computed from the git index, so untracked build output never
 counts.

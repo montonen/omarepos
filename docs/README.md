@@ -4,7 +4,7 @@ The [README](../README.md) is the short version. These pages are the long one.
 
 | Page | What is in it |
 | --- | --- |
-| [Usage](usage.md) | Command line, the keys, how the filter matches |
+| [Usage](usage.md) | Command line, the fleet as JSON, the keys, how the filter matches |
 | [Reading a card](cards.md) | Each row of a card, what the colours mean, the four weeks, opening a repository on the web |
 | [Repositories and tags](repositories.md) | Scan roots, workspace folders that hold nothing but clones, tags |
 | [Commit graph](commit-graph.md) | The graph, what is uncommitted, what a commit changed |

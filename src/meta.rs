@@ -155,26 +155,39 @@ fn spellings(dir: &Path) -> Vec<PathBuf> {
 impl Meta {
     pub fn load() -> Self {
         let path = path();
-        let unusable = |why: String| {
+        let (read, text) = Self::read_file(&path);
+        let meta = read.unwrap_or_else(|why| {
             note!("omarepos: ignoring {}: {why}", path.display());
-            Self {
-                repos: BTreeMap::new(),
-                load_error: Some(crate::config::why_unusable(&path, &why)),
-                ..Self::default()
-            }
-        };
-        let text = match std::fs::read_to_string(&path) {
+            Self { load_error: Some(crate::config::why_unusable(&path, &why)), ..Self::default() }
+        });
+        Self { on_disk: std::cell::RefCell::new(text), ..meta }
+    }
+
+    /// [`Meta::load`] for a run with no window to show a banner in: the
+    /// store, or why the file cannot be used in the parser's own words, and
+    /// nothing said on stderr. `--json` is one, and an empty store in place
+    /// of a file that did not parse would have it print every repository as
+    /// carrying no tags.
+    pub fn try_load() -> Result<Self, String> {
+        let (read, text) = Self::read_file(&path());
+        read.map(|meta| Self { on_disk: std::cell::RefCell::new(text), ..meta })
+    }
+
+    /// The file at `path`: the store it holds, or why it cannot be used; and
+    /// its text, when there was any to read.
+    fn read_file(path: &Path) -> (Result<Self, String>, Option<String>) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             // No file yet: nothing has been tagged.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(err) => return unusable(err.to_string()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return (Ok(Self::default()), None);
+            }
+            Err(err) => return (Err(err.to_string()), None),
         };
-        let mut meta = match toml::from_str::<File>(&text) {
-            Ok(file) => Self { repos: without_nuls(file.repos), ..Self::default() },
-            Err(err) => unusable(err.to_string()),
-        };
-        meta.on_disk = std::cell::RefCell::new(Some(text));
-        meta
+        let read = toml::from_str::<File>(&text)
+            .map(|file| Self { repos: without_nuls(file.repos), ..Self::default() })
+            .map_err(|err| err.to_string());
+        (read, Some(text))
     }
 
     /// Read the file again if it is not what was last read or written.
@@ -594,6 +607,9 @@ mod tests {
         let mut meta = Meta::load();
         let why = meta.load_error.clone().expect("the failure is remembered");
         assert!(why.contains("repos.toml"), "{why}");
+        // Where there is no banner, the failure, and no empty store.
+        let refused = Meta::try_load().expect_err("not an empty store");
+        assert!(refused.contains("TOML parse error"), "{refused}");
 
         // What a scan does when the root it found the repository under has a tag.
         meta.apply_root_tag(Path::new("/home/me/code/app"), "/home/me/code", Some("JM"));

@@ -3,6 +3,8 @@
 //! Discovery and `git status` are both blocking I/O, so they run on worker
 //! threads and stream results back to the GTK main loop over an async channel.
 //! Cards appear as they are inspected rather than after the whole fleet is done.
+//! Nothing here needs the main loop: `--json` reads the same channel with
+//! `recv_blocking`, so that a snapshot finds what the grid finds.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

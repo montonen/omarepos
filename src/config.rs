@@ -504,17 +504,45 @@ impl Config {
     /// `load_error`, shown in the window, and never saved over.
     pub fn load() -> Self {
         let path = Self::path();
-        let text = match std::fs::read_to_string(&path) {
+        let (read, text) = Self::read_file(&path);
+        let cfg = read.unwrap_or_else(|why| Self::unusable(&path, &why));
+        Self { on_disk: RefCell::new(text), ..cfg }
+    }
+
+    /// [`Config::load`] for a run with no window to show a banner in: the
+    /// file, or why it cannot be used in the parser's own words, and nothing
+    /// said on stderr. `--json` is one. The defaults in place of a file that
+    /// did not parse would have it print `~/Work` where the file names other
+    /// roots, as if that were the answer.
+    pub fn try_load() -> Result<Self, String> {
+        let (read, text) = Self::read_file(&Self::path());
+        read.map(|cfg| Self { on_disk: RefCell::new(text), ..cfg })
+    }
+
+    /// The file at `path`: what it says, or why it cannot be used; and its
+    /// text, when there was any to read.
+    fn read_file(path: &Path) -> (Result<Self, String>, Option<String>) {
+        let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(err) => return Self::unusable(&path, &err.to_string()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return (Ok(Self::default()), None);
+            }
+            Err(err) => return (Err(err.to_string()), None),
         };
-        let mut cfg = match toml::from_str::<Config>(&text) {
-            Ok(cfg) => cfg.as_read(),
-            Err(err) => Self::unusable(&path, &err.to_string()),
-        };
-        cfg.on_disk = RefCell::new(Some(text));
-        cfg
+        let read = toml::from_str::<Config>(&text).map(Self::as_read).map_err(|err| err.to_string());
+        (read, Some(text))
+    }
+
+    /// What the command line says, for this run only: `--root` in place of
+    /// the configured roots, and `--depth`. See `roots_override`.
+    pub fn with_command_line(mut self, roots: Vec<String>, depth: Option<usize>) -> Self {
+        if !roots.is_empty() {
+            self.roots_override = Some(roots.into_iter().map(RootSpec::Simple).collect());
+        }
+        if let Some(depth) = depth {
+            self.depth_override = Some(depth.max(1));
+        }
+        self
     }
 
     /// What a file that parsed means, where it leaves something unsaid.
@@ -814,6 +842,8 @@ mod tests {
         assert_eq!(cfg.load_error, None);
         assert_eq!(cfg.root_labels(), vec!["~/Work".to_string()]);
         assert!(!cfg.one_off());
+        let tried = Config::try_load().expect("no file is not a failure either");
+        assert_eq!(tried.root_labels(), vec!["~/Work".to_string()]);
     }
 
     /// One mistyped key, in a file the README invites editing by hand.
@@ -828,6 +858,10 @@ mod tests {
         assert!(why.contains("config.toml"), "{why}");
         assert!(why.contains("max_dpeth"), "it should say what the parser objected to: {why}");
         assert!(!why.contains('\n'), "one line, for a banner: {why:?}");
+        // Where there is no banner, the failure in the parser's words, and
+        // no defaults in its place.
+        let refused = Config::try_load().expect_err("not the defaults");
+        assert!(refused.contains("max_dpeth"), "{refused}");
 
         // Hiding the detail pane is all it used to take.
         cfg.commit_detail = false;
@@ -841,12 +875,11 @@ mod tests {
     fn what_the_command_line_says_is_used_for_the_run_and_never_written() {
         let _guard = isolate();
         write(&Config::path(), WRITTEN_BY_HAND);
-        let mut cfg = Config::load();
+        let cfg = Config::load();
         assert_eq!(cfg.load_error, None);
 
         // omarepos --root /tmp/one-off --depth 1
-        cfg.roots_override = Some(vec![RootSpec::Simple("/tmp/one-off".to_string())]);
-        cfg.depth_override = Some(1);
+        let mut cfg = cfg.with_command_line(vec!["/tmp/one-off".to_string()], Some(1));
         assert!(cfg.one_off());
         assert_eq!(cfg.root_labels(), vec!["/tmp/one-off".to_string()]);
         assert_eq!(cfg.depth(), 1);

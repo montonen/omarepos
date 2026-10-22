@@ -264,6 +264,10 @@ own: the path is not saved, no root tags are applied and no background refresh
 runs. [Repositories and tags](docs/repositories.md) covers scan roots, folders
 that hold nothing but other clones, and tagging.
 
+`omarepos --json` prints the same repositories as JSON and exits, for a script
+or an agent: no window, no display needed, and nothing written. The format has
+a version, and [Usage](docs/usage.md#the-fleet-as-json) says what is in it.
+
 ## Keyboard
 
 `F1`, or `?` on the grid and in a graph, lists the keys. The ones that carry
@@ -290,7 +294,7 @@ More of them are in [Usage](docs/usage.md).
 
 | Page | What is in it |
 | --- | --- |
-| [Usage](docs/usage.md) | Command line, the keys, how the filter matches |
+| [Usage](docs/usage.md) | Command line, the fleet as JSON, the keys, how the filter matches |
 | [Reading a card](docs/cards.md) | Each row of a card, what the colours mean, the four weeks |
 | [Repositories and tags](docs/repositories.md) | Scan roots, workspace folders, tags |
 | [Commit graph](docs/commit-graph.md) | The graph, what is uncommitted, what a commit changed |

@@ -21,7 +21,9 @@ Three ways, in order of convenience:
    cannot be parsed, omarepos says so in a banner, runs on the defaults, and
    saves nothing until it is fixed — it will not write its defaults over a file
    with a typo in it. The same goes for the tag file, `repos.toml`. Each save
-   keeps the version it replaced beside it as `config.toml.bak`.
+   keeps the version it replaced beside it as `config.toml.bak`. `--json` does
+   not run on the defaults: it prints nothing until the file is fixed
+   ([Usage](usage.md#the-fleet-as-json)).
 3. **`--root <PATH>`** on the command line, repeatable, for a one-off look at
    somewhere else. It overrides the configured roots for that run and is not
    saved. A one-off look opens its own window even when omarepos is already

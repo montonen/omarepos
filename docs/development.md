@@ -97,7 +97,7 @@ monospace instead. The walk types the code and checks the table.
 
 | Path | What's in it |
 | --- | --- |
-| `src/main.rs` | CLI parsing, app bootstrap, the shared `CssProvider` |
+| `src/main.rs` | CLI parsing, which hands `--json` over before anything of GTK's starts; app bootstrap, the shared `CssProvider` |
 | `src/config.rs` | `config.toml`, path expansion, terminal/editor resolution |
 | `src/theme.rs` | Reads Omarchy's `colors.toml`, compiles the GTK stylesheet |
 | `src/git.rs` | Repository discovery and inspection |
@@ -108,8 +108,9 @@ monospace instead. The walk types the code and checks the table.
 | `src/stats.rs` | Contribution aggregation over a day window |
 | `src/ui/arcade.rs` | The Contributions page's easter egg: see above |
 | `src/search.rs` | Commit search across many repositories |
-| `src/scan.rs` | Worker threads streaming results to the main loop |
+| `src/scan.rs` | Worker threads streaming results to the main loop, or to `--json` |
 | `src/snapshot.rs` | The last scan's readings, kept in the state directory so a launch can show the grid at once |
+| `src/fleet_json.rs` | `--json`: the fleet as JSON on standard output, read as the grid reads it, in a schema with a version of its own |
 | `src/refresh.rs` | Fetching: one repository, or a pass across the fleet with what may run on it fenced off |
 | `src/lang.rs` | Extension → language table |
 | `src/testkit.rs` | Test fixtures: scratch repositories with a bare remote, an isolated home |

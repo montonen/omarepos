@@ -242,6 +242,24 @@ impl RepoInfo {
             .iter()
             .any(|lang| lang.name.to_lowercase().starts_with(needle))
     }
+
+    /// Whether this is something to look at: what the window's warning
+    /// toggle keeps, and what `--json` calls `needs_attention`, so that the
+    /// two cannot come to disagree. `fetch_failed` is whether the last fetch
+    /// of it failed, which is on record apart from the reading.
+    ///
+    /// A repository the last fetch failed on is on this list too: it carries
+    /// the reddest pill on the grid, and the toggle used to hide it for being
+    /// clean.
+    pub fn needs_attention(&self, fetch_failed: bool) -> bool {
+        self.error.is_some()
+            || !self.tree.is_clean()
+            || self.ahead > 0
+            || self.unpushed > 0
+            || self.behind > 0
+            || self.history_unreadable.is_some()
+            || fetch_failed
+    }
 }
 
 fn is_git_dir(path: &Path) -> bool {
@@ -1826,14 +1844,6 @@ mod tests {
     }
 
     // ---- a read that fails is not a reading of zero ------------------------
-
-    /// Take a loose object away, the way a power cut in the middle of a commit
-    /// does.
-    fn lose_object(repo: &Path, rev: &str) {
-        let id = git(repo, &["rev-parse", rev]);
-        let file = repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
-        std::fs::remove_file(&file).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
-    }
 
     #[test]
     fn an_index_that_cannot_be_read_is_not_a_clean_repository() {

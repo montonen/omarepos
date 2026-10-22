@@ -41,20 +41,10 @@ impl Sort {
 }
 
 impl Ui {
-    /// What the warning toggle keeps. A repository the last fetch failed on
-    /// is on this list too: it carries the reddest pill on the grid, and the
-    /// toggle used to hide it for being clean.
+    /// What the warning toggle keeps: see [`RepoInfo::needs_attention`].
     fn needs_attention(&self, info: &RepoInfo) -> bool {
-        info.error.is_some()
-            || !info.tree.is_clean()
-            || info.ahead > 0
-            || info.unpushed > 0
-            || info.behind > 0
-            || info.history_unreadable.is_some()
-            || self
-                .fetch_errors
-                .borrow()
-                .contains_key(&info.path.display().to_string())
+        let failed = self.fetch_errors.borrow().contains_key(&info.path.display().to_string());
+        info.needs_attention(failed)
     }
 
     pub(super) fn visible(&self) -> Vec<RepoInfo> {

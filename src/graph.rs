@@ -504,14 +504,6 @@ mod tests {
         assert!(done.success(), "fixture commit of {file} failed");
     }
 
-    /// Take a loose object away, the way a power cut in the middle of a commit
-    /// does.
-    fn lose_object(repo: &Path, rev: &str) {
-        let id = git(repo, &["rev-parse", rev]);
-        let file = repo.join(".git/objects").join(&id[..2]).join(&id[2..]);
-        std::fs::remove_file(&file).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
-    }
-
     fn summaries(graph: &Graph) -> Vec<&str> {
         graph.rows.iter().map(|row| row.summary.as_str()).collect()
     }

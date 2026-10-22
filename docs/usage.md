@@ -5,9 +5,12 @@ omarepos [options]
 
   -r, --root <PATH>   Directory to scan (repeatable; overrides the config file)
   -d, --depth <N>     How deep below each root to look for repos
+      --json          Print the repos as JSON and exit, without a window
   -h, --help          Show help
   -V, --version       Show the version
 ```
+
+`--json` is for scripts: see [The fleet as JSON](#the-fleet-as-json) below.
 
 The filter has the keyboard when the window opens, so a repository is its
 name and `Enter` away: type, and the grid narrows; `Enter` opens the top hit.
@@ -56,6 +59,79 @@ be found, in any order, so `acme billing` finds the billing repository under
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
 unreadable, holding commits that are on no remote, or that the last fetch
 failed on.
+
+## The fleet as JSON
+
+`omarepos --json` prints what the grid would show as JSON on standard output,
+and exits. It opens no window and needs no display, so it can be run over ssh,
+from cron or by an agent. The repositories are found and read by the same scan
+as the grid's, under the same roots and depth, and `--root` and `--depth` make
+it a one-off look as they do for the window. It reads and does nothing else: it
+runs no `git`, fetches nothing and writes no file ([What it changes](read-only.md)).
+
+```bash
+omarepos --json | jq -r '.repos[] | select(.needs_attention) | .path'
+```
+
+What is printed is one object, with `schema_version`, `roots` and `repos` in
+it. `schema_version` is 1. It goes up when a key is taken away, renamed or
+comes to hold something else, and not when one is added, so a script should
+pass over keys it does not know.
+
+Each of `roots` is a root in force, in the order it is given: its `path`, how
+many repositories it `found`, and `problem`, which is what the status bar says
+of it (`"does not exist"`, `"no repositories found"`) or `null`. A disk that is
+not mounted shows up here, and not only as repositories missing from the list.
+
+Each of `repos` is a repository, in the order of their paths, and every one has
+every key:
+
+| Key | What it holds |
+| --- | --- |
+| `name`, `path` | The folder's name, and its absolute path |
+| `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote, or the last fetch failed on it |
+| `error` | Why the repository could not be read at all |
+| `remote` | The remote as a card shows it, `host/owner/repository`: `origin`, or the first remote there is |
+| `web` | The remote's page on the web, where its URL says where one is |
+| `head` | The branch, or a short commit id when HEAD is detached |
+| `detached`, `unborn`, `bare` | HEAD is detached; there are no commits yet, and `head` is the branch the first will be on; there is no working tree |
+| `upstream` | The branch it tracks, as `origin/main` |
+| `working_tree` | `staged`, `unstaged`, `untracked` and `conflicted`: files, each counted once. One in conflict is `conflicted`, and one staged and edited again since is `staged` |
+| `working_tree_unreadable` | Why the index could not be read |
+| `stashes` | How many stashes it holds |
+| `ahead`, `behind` | Commits the upstream does not have, and commits on it that are not here yet, as of the last fetch. `0` with no upstream |
+| `unpushed` | Commits on HEAD that are on no remote at all, counted up to 1000, which then means that many or more |
+| `stray_branches` | Other local branches that hold commits on no remote |
+| `history_unreadable` | Why the commits between here and the remotes could not be read |
+| `fetch_failed` | What git said the last time a fetch of it failed, until one works |
+| `last_commit` | The commit HEAD is on: `short_id`, `summary`, `author`, and `when` it was committed, in seconds since 1970 |
+| `tags` | Its tags, as the window shows them |
+
+A reading that could not be taken is `null`, never `0`, so that "could not
+count" is never read as "nothing to do". Where a card says "unreadable",
+everything read from the repository is `null` and `error` says why; its tags
+and a failed fetch are omarepos's own, and still there. Where it says "status
+unreadable", `working_tree` is `null`, and where it says "history unreadable",
+`ahead`, `behind`, `unpushed` and `stray_branches` are. A bare repository has
+no `working_tree`, and in it and in a repository with no commits yet,
+`unpushed` and `stray_branches` are not counted.
+
+The tags are the ones the window would show: those in `repos.toml`, and a
+root's own tag on what it finds, which the window's next scan writes there.
+`--json` works that out and writes nothing. A one-off look applies no root's
+tag, as in the window.
+
+What is never printed is the URL a remote is configured with, which can carry
+a user name and a token. The remote is given tidied, as the card gives it, and
+a URL in what a failed fetch said loses whoever it logs in as.
+
+It exits with 0 when it has printed the snapshot, whatever the snapshot says.
+If `config.toml` or `repos.toml` is there and cannot be read, it prints nothing
+on standard output, says why on standard error and exits with 1. The window
+carries on with the defaults under a banner, but a script has no banner to
+read, and a snapshot of `~/Work` in place of the roots the file names, or of
+every repository without its tags, would be wrong without saying so. Standard
+output that cannot be written to is 1 as well.
 
 ---
 
