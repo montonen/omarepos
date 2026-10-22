@@ -94,14 +94,18 @@ jobs:
         run: install -d -m 700 "$XDG_RUNTIME_DIR"
       # In a directory of its own: each script starts by deleting the one it
       # walks in, and what the frames check left is wanted if the walk fails.
+      # Each time limit is a few times what its step takes, a minute for the
+      # frames and six or twelve for the walk, and together they leave ten of
+      # the job's 45: a step that hangs is stopped with time left to build
+      # first and keep the logs after.
       - name: Frames
-        timeout-minutes: 10
+        timeout-minutes: 5
         run: OMAREPOS_WALK_DIR="$PWD/target/frames" dbus-run-session -- scripts/walk/frames.sh
       # Whatever the frames check said, as long as there is something to walk:
       # the two fail for different reasons.
       - name: Walk (${{ env.WALK }})
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        timeout-minutes: 35
+        timeout-minutes: 30
         run: dbus-run-session -- scripts/walk/walk.sh $WALK
       # What the window and its display said, and what was on screen last,
       # for a failure seen only here.

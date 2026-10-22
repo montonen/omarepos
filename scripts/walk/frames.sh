@@ -23,6 +23,9 @@ command -v gtk4-broadwayd >/dev/null || { echo "needs gtk4-broadwayd"; exit 2; }
 
 ( cd "$REPO" && cargo build --offline 2>&1 | tail -1 ) || exit 2
 "$HERE/fixtures.sh" || exit 2
+# Whatever ends this, a Ctrl+C or a CI runner's time running out, takes the
+# window and the display's daemon with it.
+trap 'python3 "$HERE/drive.py" stop' EXIT
 printf 'roots = [\n    { path = "%s/fleet", tag = "JM" },\n]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"
 
 X() { python3 "$HERE/drive.py" "$@" 2>&1 | grep -v "^$"; }

@@ -141,9 +141,13 @@ def start_offscreen(size=None):
         http = http_socket()
         with contextlib.suppress(FileNotFoundError):
             os.remove(http)
+        # Added to, not started afresh: a daemon that died said why in here,
+        # and the one started after it would have wiped that.
+        log = open(os.path.join(W, 'broadway.log'), 'a')
+        log.write(f'-- gtk4-broadwayd {DISPLAY}, {time.strftime("%H:%M:%S")}\n')
+        log.flush()
         server = subprocess.Popen(['gtk4-broadwayd', '--unixsocket', http, DISPLAY],
-                                  stdout=open(os.path.join(W, 'broadway.log'), 'w'),
-                                  stderr=subprocess.STDOUT, start_new_session=True)
+                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         open(DAEMON_PID, 'w').write(str(server.pid))
         time.sleep(0.6)
     # Drawn with cairo. GTK's own renderer for this display sends the daemon each

@@ -118,21 +118,26 @@ sockets, so CI gives the scripts one of each. The same by hand, outside a
 desktop session:
 
 ```bash
-export XDG_RUNTIME_DIR=$(mktemp -d) ADW_DISABLE_PORTAL=1
-dbus-run-session -- scripts/walk/frames.sh
-dbus-run-session -- scripts/walk/walk.sh quick offscreen
+(
+  export XDG_RUNTIME_DIR=$(mktemp -d) ADW_DISABLE_PORTAL=1
+  dbus-run-session -- scripts/walk/frames.sh
+  dbus-run-session -- scripts/walk/walk.sh quick offscreen
+  rm -r -- "$XDG_RUNTIME_DIR"
+)
 ```
 
-`ADW_DISABLE_PORTAL` keeps libadwaita from asking the settings portal whether
-the desktop is light or dark, when there is no desktop: the bus would start
-the portal, and the portal would say at length why it cannot run. In a
-desktop session all of it is there already, and the scripts are run as they
-are. When either fails in CI, what the window and its display wrote
-(`app.log`, each earlier part's as `app-N.log`, `broadway.log`, a log for
-each time the program stopped, the last `dump`, and the fixtures as they were
-found and as they were left) is kept with the run as `walk-logs`. The walk on
-Hyprland is still the one to run by hand: it is the window as a person has
-it, on Wayland, which no runner has.
+In a subshell, so that the shell it is typed into keeps its own runtime
+directory. `ADW_DISABLE_PORTAL` keeps libadwaita from asking the settings
+portal whether the desktop is light or dark, when there is no desktop: the
+bus would start the portal, and the portal would say at length why it cannot
+run. In a desktop session all of it is there already, and the scripts are run
+as they are. When either fails in CI, what the windows and their display
+wrote is kept with the run as `walk-logs`: the last window's `app.log`, each
+earlier part's as `app-N.log`, one for each time the program stopped,
+everything every display daemon said in `broadway.log`, the last `dump`, and
+the fixtures as they were found and as they were left. The walk on Hyprland
+is still the one to run by hand: it is the window as a person has it, on
+Wayland, which no runner has.
 
 ## The arcade
 

@@ -43,15 +43,20 @@ done
 
 ( cd "$REPO" && cargo build --offline 2>&1 | tail -1 ) || exit 2
 "$HERE/fixtures.sh" || exit 2
+# Whatever ends the walk, a Ctrl+C or a CI runner's time running out, takes
+# the window with it, and offscreen the display's daemon.
+trap 'python3 "$HERE/drive.py" stop' EXIT
 
 X() { python3 "$HERE/drive.py" "$@" 2>&1 | grep -v "^$"; }
 STEPS=0; DEATHS=0; WRONG=0
 config() { printf 'roots = [\n    { path = "%s/fleet", tag = "JM" },\n]\nmax_depth = 3\nterminal = "/nonexistent/no-such-terminal"\n' "$W" > "$W/config/omarepos/config.toml"; }
 # A window that will not start, at first or again after the program stopped,
 # ends the walk: every step after it would say the program had stopped, each
-# after a start's wait of ten seconds, for an hour and a half.
-boot() { config; X $START
-  python3 "$HERE/drive.py" alive 2>/dev/null | grep -q "^alive" || { echo "the window did not start"; X stop; exit 2; }; }
+# after a start's wait of ten seconds, for an hour and a half. So does one
+# that started but not as asked, at another size: every check of the header
+# after it would be wrong, and none would say why.
+boot() { config
+  python3 "$HERE/drive.py" $START || { echo "the window did not start"; exit 2; }; }
 # What the window came to, said as it is let go of. Past 2 GB one window has
 # been given too much of the walk: a CI runner has 7, and the kernel stops a
 # window that takes them without a word to say so.
