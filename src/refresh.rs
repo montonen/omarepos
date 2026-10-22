@@ -1247,7 +1247,11 @@ mod tests {
     /// to by default up to git 2.55; 2.56 goes about it another way unless
     /// told, one that two loose objects do not set off, and a fetch there
     /// read no index and ran nothing, which left this with nothing to test.
+    ///
+    /// And housekeeping is let run at all, here: the test kit turns it off
+    /// everywhere else (see `testkit::isolate`).
     fn due_for_housekeeping(repo: &Path) {
+        git(repo, &["config", "maintenance.auto", "true"]);
         git(repo, &["config", "gc.auto", "1"]);
         git(repo, &["config", "gc.autoDetach", "false"]);
         git(repo, &["config", "maintenance.gc.enabled", "true"]);

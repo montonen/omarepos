@@ -37,10 +37,17 @@ pub fn isolate() -> MutexGuard<'static, ()> {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::create_dir_all(home.join(".local/state")).unwrap();
+        // No housekeeping. A commit or a fetch starts git's maintenance
+        // after it, in the background since git 2.47, and that takes a lock
+        // in `.git/objects` and lets it go: a test that compares a
+        // repository before and after a read saw it written to, now and
+        // then, by git tidying up after the fixture.
         let gitconfig = "[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n\
                          [init]\n\tdefaultBranch = main\n\
                          [protocol \"file\"]\n\tallow = always\n\
-                         [commit]\n\tgpgsign = false\n";
+                         [commit]\n\tgpgsign = false\n\
+                         [maintenance]\n\tauto = false\n\
+                         [gc]\n\tauto = 0\n";
         std::fs::write(home.join("gitconfig"), gitconfig).unwrap();
         std::fs::write(home.join(".gitconfig"), gitconfig).unwrap();
         // SAFETY: set once, before any test has spawned a thread that reads

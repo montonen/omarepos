@@ -68,10 +68,13 @@ impl Home {
     }
 }
 
-/// Run git to build a fixture, with nobody's configuration.
+/// Run git to build a fixture, with nobody's configuration, and none of the
+/// housekeeping git starts in the background after a commit: it takes a
+/// lock in `.git/objects`, and a run that was to write nothing was seen to.
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(dir)
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
