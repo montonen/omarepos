@@ -134,18 +134,25 @@ What is never printed is the URL a remote is configured with, which can carry
 a user name and a token. The remote is given tidied, as the card gives it, and
 a URL in what a failed fetch said loses whoever it logs in as.
 
-It exits with 0 when it has printed the snapshot, whatever the snapshot says.
-Otherwise it exits with 1, has printed nothing on standard output, and says
-why on standard error:
+It exits with 0 when it has printed the snapshot, whatever the snapshot says,
+and otherwise with 1, saying why on standard error:
 
-- `config.toml` or `repos.toml` is there and cannot be read. The window
-  carries on with the defaults under a banner, but a script has no banner to
-  read, and a snapshot of `~/Work` in place of the roots the file names, or of
-  every repository without its tags, would be wrong without saying so.
+- `config.toml` or `repos.toml` is there and cannot be read. Nothing is
+  printed. The window carries on with the defaults under a banner, but a
+  script has no banner to read, and a snapshot of `~/Work` in place of the
+  roots the file names, or of every repository without its tags, would be
+  wrong without saying so.
 - The scan read fewer repositories than it found, which only a crash in the
-  middle of reading one does. A snapshot one short is not the fleet.
-- Standard output is closed (`>&-`), or cannot be written to. A reader that
-  stops reading early (`| head`) is the one case that is told nothing.
+  middle of reading one does. Nothing is printed: a snapshot one short is not
+  the fleet.
+- Standard output cannot be written to, as `/dev/full` cannot. A reader that
+  stops reading early (`| head`) is 1 as well, and the one failure that is
+  told nothing.
+
+A standard output that was closed when omarepos started is not a failure.
+Rust's runtime opens `/dev/null` in its place before omarepos begins, so
+`omarepos --json >&-` behaves like `omarepos --json >/dev/null` and exits
+with 0.
 
 ---
 

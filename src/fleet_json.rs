@@ -22,7 +22,6 @@
 //! line is not what this grows into.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
@@ -226,11 +225,16 @@ impl LastCommit {
 /// one-off look, as the window takes them. Whether it was printed whole.
 /// Whatever stopped it is said on standard error, but for a reader that went
 /// away (`omarepos --json | head`), who is not waiting to be told.
+///
+/// A standard output that was closed when the program started does not stop
+/// it. Rust's runtime opens `/dev/null` in its place before `main`, so
+/// `omarepos --json >&-` is `omarepos --json >/dev/null`, and is 0. Only
+/// how `/dev/null` was opened would tell the two apart, and a script that
+/// throws the output away on purpose opens it the same way: Python's
+/// `subprocess.DEVNULL` and Node's `'ignore'` both do. Looking before the
+/// runtime does would take code that runs ahead of `main` at every launch,
+/// the window's included, for a script that closes its own standard output.
 pub fn print(roots: Vec<String>, depth: Option<usize>) -> bool {
-    if !STDOUT_WAS_OPEN.load(Ordering::Relaxed) {
-        note!("omarepos: standard output is closed, so there is nowhere to print the snapshot");
-        return false;
-    }
     match write_to(&mut std::io::stdout().lock(), roots, depth) {
         Ok(()) => true,
         Err(Unprinted::ReaderGone) => false,
@@ -239,29 +243,6 @@ pub fn print(roots: Vec<String>, depth: Option<usize>) -> bool {
             false
         }
     }
-}
-
-/// Whether standard output was open when the program was started.
-///
-/// A run with it closed (`omarepos --json >&-`) printed nothing and exited
-/// with 0. Rust's runtime opens `/dev/null` in the place of a closed one
-/// before `main`, so by then every write to it is done, and a closed one
-/// looks like one sent to `/dev/null` on purpose. Only how it was opened
-/// could tell them apart, and a script's own "throw this away" opens it
-/// the same way: Python's `subprocess.DEVNULL` and Node's `'ignore'` both
-/// do. So this looks before the runtime does: an entry in `.init_array`
-/// runs as the program is loaded, ahead of the runtime's start.
-static STDOUT_WAS_OPEN: AtomicBool = AtomicBool::new(true);
-
-#[used]
-#[unsafe(link_section = ".init_array")]
-static LOOK_AT_STDOUT: extern "C" fn() = look_at_stdout;
-
-extern "C" fn look_at_stdout() {
-    // SAFETY: fcntl(2) with F_GETFD asks about a descriptor and changes
-    // nothing. Neither it nor the store needs the runtime, which is not up.
-    let open = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFD) } != -1;
-    STDOUT_WAS_OPEN.store(open, Ordering::Relaxed);
 }
 
 /// Why the snapshot was not printed, or not all of it.

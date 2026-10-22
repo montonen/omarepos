@@ -6,8 +6,10 @@
 //! The unit tests in src/fleet_json.rs say what a snapshot holds. These say
 //! what reaches whoever ran it. A snapshot is JSON, and 0. A failure leaves
 //! standard output empty, says why on standard error, and is 1, and so is a
-//! standard output closed before the run (`>&-`), which Rust's own does not
-//! report. A run writes nothing in the home it is given.
+//! standard output that cannot be written to. A reader that went away is 1
+//! and is told nothing. A standard output closed before the run is
+//! `/dev/null` by the time omarepos starts, and the run is 0. A run writes
+//! nothing in the home it is given.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -140,8 +142,13 @@ fn a_configuration_that_cannot_be_read_leaves_standard_output_empty() {
     assert!(said(&out).contains("config.toml") && said(&out).contains("max_dpeth"), "{}", said(&out));
 }
 
+/// Rust's runtime opens `/dev/null` in the place of a standard output that
+/// is closed before the program starts (`>&-`). The run is then the same as
+/// one sent to `/dev/null`, which is 0 and says nothing, as docs/usage.md
+/// says. So is `/dev/null` opened as a script's "throw this away" opens it,
+/// for reading and writing (Python's `subprocess.DEVNULL`).
 #[test]
-fn a_closed_standard_output_is_a_failure() {
+fn a_closed_standard_output_is_dev_null() {
     use std::os::unix::process::CommandExt;
     let home = Home::new("json-cli-closed");
     let mut command = home.omarepos(&["--json"]);
@@ -154,17 +161,25 @@ fn a_closed_standard_output_is_a_failure() {
         });
     }
     let out = command.output().expect("omarepos runs");
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert_eq!(said(&out), "");
 
-    assert_eq!(out.status.code(), Some(1));
-    assert!(said(&out).contains("standard output is closed"), "{}", said(&out));
-
-    // Thrown away on purpose is not closed, even opened as a script's
-    // "discard" opens it, for reading and writing (Python's
-    // `subprocess.DEVNULL`), which is how the runtime opens one in place of a
-    // closed one.
     let null = std::fs::OpenOptions::new().read(true).write(true).open("/dev/null").unwrap();
     let out = home.omarepos(&["--json"]).stdout(null).output().expect("omarepos runs");
     assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert_eq!(said(&out), "");
+}
+
+/// A standard output that refuses what is written to it, as a full disk
+/// does, is a failure, and says so.
+#[test]
+fn a_standard_output_that_cannot_be_written_to_is_a_failure() {
+    let home = Home::new("json-cli-full");
+    let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let out = home.omarepos(&["--json"]).stdout(full).output().expect("omarepos runs");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(said(&out).contains("the snapshot could not be written"), "{}", said(&out));
 }
 
 #[test]
