@@ -161,6 +161,15 @@ repository, and not on a pass across the fleet. On such a pass askpass is off
 as well (`GIT_ASKPASS`, `SSH_ASKPASS`, `core.askPass`), so the timer cannot
 open a password dialog on a desktop nobody is at; `f` can.
 
+What git says is asked for in English (`LANGUAGE=en`), whatever language it
+speaks to you otherwise, and a card or a toast quotes it in English. omarepos
+reads those words as well as showing them: they are how a remote that turned a
+login away is told from one that could not be reached, and in another language
+a refused password was taken for a network that was down and offered again on
+every pass. Only the language of messages changes; dates, sorting and how files
+are read stay as your locale has them, for git and for the hooks and filters it
+runs.
+
 `timeout_seconds` is how long a fetch may go without anything arriving, not how
 long it may take: a large fetch over a slow link finishes, where it used to be
 cut off at the limit on every pass and leave a partial pack behind each time.

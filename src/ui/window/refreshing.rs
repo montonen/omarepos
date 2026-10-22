@@ -620,6 +620,10 @@ mod tests {
     use crate::gitcmd::transfer_fenced;
     use crate::testkit::*;
 
+    /// Long enough for any fetch here, none of which goes further than this
+    /// machine.
+    const PATIENT: Duration = Duration::from_secs(8);
+
     #[test]
     fn a_remote_that_refused_is_told_from_one_that_was_not_reached() {
         for refused in [
@@ -659,7 +663,6 @@ mod tests {
         git(&dir, &["init", "-q", "-b", "main"]);
         git(&dir, &["remote", "add", "origin", "git@example.invalid:acme/billing.git"]);
         let ssh = dir.join("bin").join("ssh");
-        let patient = Duration::from_secs(8);
         for (said, refused) in [
             ("git@example.invalid: Permission denied (publickey).", true),
             ("ssh: connect to host example.invalid port 22: Connection timed out", false),
@@ -669,12 +672,62 @@ mod tests {
             std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
             // SAFETY: under the isolation lock, and taken out again below.
             unsafe { std::env::set_var("GIT_SSH_COMMAND", &ssh) };
-            let got = transfer_fenced(&dir, &["fetch", "--progress"], patient, patient);
+            let got = transfer_fenced(&dir, &["fetch", "--progress"], PATIENT, PATIENT);
             unsafe { std::env::remove_var("GIT_SSH_COMMAND") };
 
             let err = got.expect_err(said);
             assert_eq!(err, said, "the card says what ssh said");
             assert_eq!(refused_by_remote(&err), refused, "{err}");
         }
+    }
+
+    /// What git says is read in English, whatever language git speaks. In
+    /// Swedish a refused password is "Autentisering misslyckades", which was
+    /// taken for a host not reached: the password in the remote's address was
+    /// offered again on every pass. A server here turns every request away,
+    /// as a host does a wrong password.
+    ///
+    /// Where git has no Swedish (CI's container keeps no translations, and a
+    /// C locale does not read `LANGUAGE`) this holds without the fix as well.
+    /// On a machine where git speaks Swedish, it is the fix that holds it.
+    #[test]
+    fn a_refused_login_is_told_whatever_language_git_speaks() {
+        let _guard = isolate();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in server.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"acme\"\r\n\
+                      Content-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let dir = scratch("refreshing-refused-in-swedish");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        let url = format!("http://deploy:wrong@127.0.0.1:{port}/acme/billing.git");
+        git(&dir, &["remote", "add", "origin", &url]);
+
+        let theirs = std::env::var_os("LANGUAGE");
+        // SAFETY: under the isolation lock, and put back as it was below.
+        unsafe { std::env::set_var("LANGUAGE", "sv") };
+        let got = transfer_fenced(&dir, &["fetch", "--progress"], PATIENT, PATIENT);
+        unsafe {
+            match &theirs {
+                Some(theirs) => std::env::set_var("LANGUAGE", theirs),
+                None => std::env::remove_var("LANGUAGE"),
+            }
+        }
+
+        let err = got.expect_err("every request is turned away");
+        assert_eq!(
+            err,
+            format!("fatal: Authentication failed for 'http://127.0.0.1:{port}/acme/billing.git/'")
+        );
+        assert!(refused_by_remote(&err), "{err}");
     }
 }

@@ -21,6 +21,13 @@
 //! watching ([`transfer_fenced`]) it is a dialog per repository, every interval,
 //! on the screen of somebody who asked for nothing, so there the askpass
 //! programs are switched off as well.
+//!
+//! One thing more is added, and not for a prompt: git is asked for its
+//! messages in English, whatever language it speaks to the user. They are
+//! read as well as shown, by words that are English: which line complains,
+//! and whether a remote turned a login away. In Swedish a refused password
+//! ("Autentisering misslyckades") was taken for a network that was down, and
+//! offered again on every pass.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -325,6 +332,13 @@ fn exec(dir: &Path, args: &[&str], limit: Limit, attended: bool) -> Result<Strin
         // Without this a repository needing credentials parks on a prompt that
         // nobody can answer, and the worker thread is gone for good.
         .env("GIT_TERMINAL_PROMPT", "0")
+        // git's words are read, and read in English: see the module's note.
+        // `LANGUAGE` decides the language of messages and nothing else, and
+        // outranks `LC_ALL` and `LANG` there. `LC_ALL=C` would also have
+        // changed how the user's hooks and filters read their files. git has
+        // no English catalogue to load, so it keeps the words it is written
+        // in. A C locale does not read the variable, and is English already.
+        .env("LANGUAGE", "en")
         .env("GIT_OPTIONAL_LOCKS", "0");
     for name in REPOSITORY_ENV {
         command.env_remove(name);
