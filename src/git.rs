@@ -250,14 +250,23 @@ impl RepoInfo {
     /// two cannot come to disagree. `fetch_failed` is whether the last fetch
     /// of it failed, which is on record apart from the reading.
     ///
+    /// It is whatever a card marks: an edge for work that is uncommitted or
+    /// exists only here, a flag for trouble, an arrow for what is waiting.
     /// A repository the last fetch failed on is on this list too: it carries
     /// the reddest pill on the grid, and the toggle used to hide it for being
-    /// clean.
+    /// clean. So is one whose other branches hold work on no remote, which
+    /// the card's edge counted and the toggle hid. Stashes are not, as no
+    /// card marks them.
+    ///
+    /// This is also `needs_attention` in what `--json` prints, under
+    /// `schema_version` 1. A change in what it means is a change of that
+    /// schema, and raises the version.
     pub fn needs_attention(&self, fetch_failed: bool) -> bool {
         self.error.is_some()
             || !self.tree.is_clean()
             || self.ahead > 0
             || self.unpushed > 0
+            || self.stray_branches > 0
             || self.behind > 0
             || self.history_unreadable.is_some()
             || fetch_failed
@@ -1302,6 +1311,47 @@ fn short(oid: &git2::Oid) -> String {
 mod tests {
     use super::*;
     use crate::testkit::*;
+
+    /// What the warning toggle keeps, and `--json` calls `needs_attention`,
+    /// one state at a time: everything a card marks, and nothing it does not.
+    #[test]
+    fn what_needs_attention_is_what_a_card_marks() {
+        let _guard = isolate();
+        let level = inspect(&fleet("git-attention").work);
+        assert!(!level.needs_attention(false), "clean and level with its remote: {level:?}");
+        assert!(level.needs_attention(true), "the last fetch of it failed");
+
+        let marked: [(&str, fn(&mut RepoInfo)); 11] = [
+            ("unreadable", |r| r.error = Some("cannot be opened".into())),
+            ("staged", |r| r.tree.staged = 1),
+            ("modified", |r| r.tree.unstaged = 1),
+            ("untracked", |r| r.tree.untracked = 1),
+            ("in conflict", |r| r.tree.conflicted = 1),
+            ("status unreadable", |r| r.tree.unreadable = Some("bad index".into())),
+            ("ahead", |r| r.ahead = 1),
+            ("behind", |r| r.behind = 1),
+            ("on no remote", |r| r.unpushed = 1),
+            ("another branch on no remote", |r| r.stray_branches = 1),
+            ("history unreadable", |r| r.history_unreadable = Some("lost".into())),
+        ];
+        let unmarked: [(&str, fn(&mut RepoInfo)); 5] = [
+            ("stashes", |r| r.stashes = 2),
+            ("detached", |r| r.detached = true),
+            ("no commits yet", |r| r.unborn = true),
+            ("no upstream", |r| r.upstream = None),
+            ("no remote", |r| (r.remote, r.web) = (None, None)),
+        ];
+        for (state, change) in marked {
+            let mut info = level.clone();
+            change(&mut info);
+            assert!(info.needs_attention(false), "{state}");
+        }
+        for (state, change) in unmarked {
+            let mut info = level.clone();
+            change(&mut info);
+            assert!(!info.needs_attention(false), "{state}");
+        }
+    }
 
     #[test]
     fn a_repository_knows_the_page_of_the_remote_its_card_names() {

@@ -57,8 +57,8 @@ The filter matches repo name, path, branch and remote. Every word typed has to
 be found, in any order, so `acme billing` finds the billing repository under
 `acme`. `tag:work` and `lang:rust` narrow by tag and by language. The warning
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
-unreadable, holding commits that are on no remote, or that the last fetch
-failed on.
+unreadable, holding commits that are on no remote (on the branch checked out
+or on another), or that the last fetch failed on. Stashes do not count.
 
 ## The fleet as JSON
 
@@ -89,7 +89,7 @@ every key:
 | Key | What it holds |
 | --- | --- |
 | `name`, `path` | The folder's name, and its absolute path |
-| `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote, or the last fetch failed on it |
+| `needs_attention` | Whether the warning toggle keeps it: dirty, ahead, behind, unreadable, holding commits that are on no remote on any of its branches, or the last fetch failed on it |
 | `error` | Why the repository could not be read at all |
 | `remote` | The remote as a card shows it, `host/owner/repository`: `origin`, or the first remote there is |
 | `web` | The remote's page on the web, where its URL says where one is |
