@@ -433,7 +433,8 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// How much of a hook's output is kept when it is all there is to show.
+/// How much of a hook's output is kept when it is all there is to show, and
+/// of what ssh said when it gave up.
 const SAID_LINES: usize = 40;
 
 /// Pick what is worth showing out of git's output.
@@ -446,6 +447,15 @@ const SAID_LINES: usize = 40;
 /// refused, in its own words, which is the thing the caller most needs to
 /// see. All of it is returned, not its first line. A linter's first line is
 /// the name of the script it ran, and its findings come after.
+///
+/// One of git's own complaints says no more than `From <url>` does. "Could
+/// not read from remote repository" is what git says whenever ssh gives up
+/// before the remote has answered, and ssh has said why on the lines above
+/// it: a key turned away, or a host that never answered. Keeping git's line made the two read the
+/// same, on the card and to the timer, which took a refused key for a
+/// network that was down and offered it again every interval. What ssh said
+/// is returned in its place, all of it, as for a hook. Only an ssh that said
+/// nothing leaves git's line.
 fn explain(stderr: &str, stdout: &str) -> String {
     // A hook's standard output arrives on git's; put it ahead of what git
     // adds on the way out.
@@ -473,9 +483,11 @@ fn explain(stderr: &str, stdout: &str) -> String {
         if lines.is_empty() {
             return "git failed".to_string();
         }
-        let from = lines.len().saturating_sub(SAID_LINES);
-        return lines[from..].iter().map(|line| line.trim_end()).collect::<Vec<_>>().join("\n");
+        return quote(&lines);
     };
+    if at > 0 && says_nothing_came_back(lines[at]) {
+        return quote(&lines[..at]);
+    }
     let mut said = lines[at].trim().trim_start_matches("! ").trim().to_string();
 
     // "The following untracked working tree files would be overwritten by
@@ -499,6 +511,20 @@ fn explain(stderr: &str, stdout: &str) -> String {
         return format!("{NOT_FOUND}\ngit said: {said}");
     }
     said
+}
+
+/// Somebody other than git, in their own words: the last of what they said,
+/// as many lines as are kept, each as they wrote it.
+fn quote(lines: &[&str]) -> String {
+    let from = lines.len().saturating_sub(SAID_LINES);
+    lines[from..].iter().map(|line| line.trim_end()).collect::<Vec<_>>().join("\n")
+}
+
+/// Whether this is git saying that nothing came back from the remote: its
+/// sentence for when the program it runs to reach one, ssh most often, exits
+/// before the remote has said anything.
+fn says_nothing_came_back(said: &str) -> bool {
+    said.trim().eq_ignore_ascii_case("fatal: Could not read from remote repository.")
 }
 
 /// What goes in front of git's "repository not found".
@@ -883,6 +909,29 @@ mod tests {
             ),
             "fatal: early EOF"
         );
+    }
+
+    /// Over ssh, git's own complaint is one sentence whatever happened, and
+    /// ssh says what did on the lines above it.
+    #[test]
+    fn over_ssh_the_complaint_is_what_ssh_said() {
+        let git_says = "fatal: Could not read from remote repository.\n\n\
+                        Please make sure you have the correct access rights\n\
+                        and the repository exists.\n";
+        // All of it, as it was said, as for a hook.
+        assert_eq!(
+            explain(
+                &format!(
+                    "Warning: Permanently added 'example.invalid' (ED25519) to the list of known hosts.\n\
+                     git@example.invalid: Permission denied (publickey).\n{git_says}"
+                ),
+                ""
+            ),
+            "Warning: Permanently added 'example.invalid' (ED25519) to the list of known hosts.\n\
+             git@example.invalid: Permission denied (publickey)."
+        );
+        // An ssh told to say nothing leaves git's sentence as all there is.
+        assert_eq!(explain(git_says, ""), "fatal: Could not read from remote repository.");
     }
 
     /// A host that has private repositories answers one the account may not

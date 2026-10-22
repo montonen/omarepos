@@ -613,7 +613,12 @@ fn now_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
     use super::*;
+    use crate::gitcmd::transfer_fenced;
+    use crate::testkit::*;
 
     #[test]
     fn a_remote_that_refused_is_told_from_one_that_was_not_reached() {
@@ -639,6 +644,37 @@ mod tests {
             "fatal: unable to access 'https://example.invalid/x.git/': The requested URL returned error: 503",
         ] {
             assert!(!refused_by_remote(unreachable), "{unreachable}");
+        }
+    }
+
+    /// The same, from what git and ssh print, as the timer's fetch keeps it.
+    /// Over ssh, git's own complaint is one sentence whatever happened, and
+    /// that was what was kept: a key turned away read as a host not reached,
+    /// and was offered again on every pass. A stand-in for ssh says each
+    /// here, so nothing goes near a network.
+    #[test]
+    fn over_ssh_a_refused_login_is_told_from_a_host_not_reached() {
+        let _guard = isolate();
+        let dir = scratch("refreshing-ssh-refused");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        git(&dir, &["remote", "add", "origin", "git@example.invalid:acme/billing.git"]);
+        let ssh = dir.join("bin").join("ssh");
+        let patient = Duration::from_secs(8);
+        for (said, refused) in [
+            ("git@example.invalid: Permission denied (publickey).", true),
+            ("ssh: connect to host example.invalid port 22: Connection timed out", false),
+        ] {
+            // As ssh does it: its own words on stderr, and 255.
+            write(&ssh, &format!("#!/bin/sh\necho '{said}' >&2\nexit 255\n"));
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // SAFETY: under the isolation lock, and taken out again below.
+            unsafe { std::env::set_var("GIT_SSH_COMMAND", &ssh) };
+            let got = transfer_fenced(&dir, &["fetch", "--progress"], patient, patient);
+            unsafe { std::env::remove_var("GIT_SSH_COMMAND") };
+
+            let err = got.expect_err(said);
+            assert_eq!(err, said, "the card says what ssh said");
+            assert_eq!(refused_by_remote(&err), refused, "{err}");
         }
     }
 }
