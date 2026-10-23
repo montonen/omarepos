@@ -4,9 +4,10 @@
 scope it; with nothing ticked it covers whatever the grid is currently showing, so
 the filter box doubles as the repo picker.
 
-Default window is the last 7 days; the drop-down in the header has 14, 30 and
-90 days, this year (from the first of January) and the last 12 months. Days are
-local calendar days, bucketed at local midnight. Over 90 days the overview and
+Default window is the last 7 days; the drop-down in the header has the last 24
+and 48 hours, 14, 30 and 90 days, this year (from the first of January) and the
+last 12 months. The hours count back from this moment, a column to each 24 of
+them; days are local calendar days, bucketed at local midnight. Over 90 days the overview and
 each author's strip draw a week to a column, and over this year or the last 12
 months a month, so that a year is a dozen columns and not 365.
 

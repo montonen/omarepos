@@ -415,21 +415,53 @@ pub fn absolute_time(when: i64) -> String {
 
 /// Build the day buckets for a contributions window, in the local timezone.
 /// Index 0 is the oldest day; the last entry is today.
+/// How far back a period reaches: whole days back to a local midnight, or
+/// hours back from this moment. "Last 24 hours" is not "today": at nine in
+/// the morning today is nine hours long, and last night's work is in
+/// yesterday.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    Days(usize),
+    /// A whole number of days' worth: the window is cut into 24-hour columns.
+    Hours(usize),
+}
+
+impl Span {
+    /// How many columns of a day the window has.
+    pub fn days(self) -> usize {
+        match self {
+            Span::Days(days) => days,
+            Span::Hours(hours) => hours.div_ceil(24),
+        }
+    }
+
+    pub fn window(self) -> crate::stats::Window {
+        match self {
+            Span::Days(days) => day_window(days),
+            Span::Hours(hours) => hour_window(hours),
+        }
+    }
+}
+
 /// The periods Contributions and its race are read over, as their
-/// drop-downs say them, and how many days each goes back from today. The same
-/// six on both, since both read the same history. This year runs from the
-/// first of January.
-pub fn periods() -> [(&'static str, usize); 6] {
+/// drop-downs say them. The same eight on both, since both read the same
+/// history. This year runs from the first of January.
+pub fn periods() -> [(&'static str, Span); 8] {
     let this_year = gtk::glib::DateTime::now_local().map_or(365, |now| now.day_of_year().max(1) as usize);
     [
-        ("Last 7 days", 7),
-        ("Last 14 days", 14),
-        ("Last 30 days", 30),
-        ("Last 90 days", 90),
-        ("This year", this_year),
-        ("Last 12 months", 365),
+        ("Last 24 hours", Span::Hours(24)),
+        ("Last 48 hours", Span::Hours(48)),
+        ("Last 7 days", Span::Days(7)),
+        ("Last 14 days", Span::Days(14)),
+        ("Last 30 days", Span::Days(30)),
+        ("Last 90 days", Span::Days(90)),
+        ("This year", Span::Days(this_year)),
+        ("Last 12 months", Span::Days(365)),
     ]
 }
+
+/// Which of [`periods`] a page opens on: the last 7 days, as it always has.
+pub const DEFAULT_PERIOD: u32 = 2;
 
 /// Days drawn as one: a column of the overview, a step of a sparkline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +520,35 @@ pub fn buckets(window: &crate::stats::Window) -> Vec<Bucket> {
         start = day;
     }
     buckets
+}
+
+/// The last `hours` back from now, as columns of 24 hours, the newest last.
+/// Each is labelled by how long ago it ends, since a column of "Wed" would
+/// say a calendar day it is not.
+fn hour_window(hours: usize) -> crate::stats::Window {
+    const DAY: i64 = 86_400;
+    let columns = hours.div_ceil(24).max(1) as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut window = crate::stats::Window { day_starts: Vec::new(), day_labels: Vec::new(), day_titles: Vec::new() };
+    for back in (1..=columns).rev() {
+        let start = now - back * DAY;
+        window.day_starts.push(start);
+        window.day_labels.push(if back == 1 {
+            "Last 24 h".to_string()
+        } else {
+            format!("{}–{} h ago", (back - 1) * 24, back * 24)
+        });
+        let since = gtk::glib::DateTime::from_unix_local(start)
+            .ok()
+            .and_then(|at| at.format("%a %-d %b %H:%M").ok())
+            .map(|at| at.to_string())
+            .unwrap_or_default();
+        window.day_titles.push(format!("24 hours from {since}"));
+    }
+    window
 }
 
 pub fn day_window(days: usize) -> crate::stats::Window {
@@ -615,11 +676,29 @@ mod tests {
     }
 
     #[test]
-    fn the_six_periods_end_with_this_year_and_the_last_twelve_months() {
+    fn the_periods_run_from_a_day_to_twelve_months() {
         let periods = periods();
-        let days: Vec<usize> = periods.iter().map(|(_, days)| *days).collect();
+        let spans: Vec<Span> = periods.iter().map(|(_, span)| *span).collect();
+        assert_eq!(spans[..2], [Span::Hours(24), Span::Hours(48)]);
+        let days: Vec<usize> = spans[2..].iter().map(|span| span.days()).collect();
         assert_eq!(days[..4], [7, 14, 30, 90]);
         assert!((1..=366).contains(&days[4]), "this year is {} days", days[4]);
         assert_eq!(days[5], 365);
+        assert_eq!(periods[DEFAULT_PERIOD as usize].0, "Last 7 days");
+    }
+
+    /// The hours are counted back from now, a column of 24 to each day's
+    /// worth, and nothing written in the last moment is left out.
+    #[test]
+    fn the_last_hours_are_columns_of_twenty_four_ending_now() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let window = Span::Hours(48).window();
+        assert_eq!(window.days(), 2);
+        let starts = &window.day_starts;
+        assert!((now - 48 * 3600 - starts[0]).abs() <= 2, "{starts:?}");
+        assert_eq!(starts[1] - starts[0], 24 * 3600);
+        assert_eq!(window.day_labels, ["24–48 h ago", "Last 24 h"]);
+        assert_eq!(buckets(&window).len(), 2);
+        assert_eq!(Span::Hours(24).window().days(), 1);
     }
 }

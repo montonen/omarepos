@@ -715,7 +715,7 @@ impl Arcade {
         let days = result.window.days();
         let period = crate::ui::periods()
             .iter()
-            .find(|(_, of)| *of == days)
+            .find(|(_, of)| of.days() == days)
             .map_or_else(|| format!("LAST {days} DAYS"), |(name, _)| name.to_uppercase());
         self.range.set_label(&format!("◀ {period} ▶"));
         self.foot.set_label(match state.screen {

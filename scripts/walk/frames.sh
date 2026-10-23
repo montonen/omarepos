@@ -133,7 +133,7 @@ keyboard GtkText "leaving the empty page did not put the keyboard in the filter"
 # saw no day go by, and it said the race did not run, every time. Waited
 # for now, up to fifteen seconds.
 X keys ctrl+g; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not open"
-X choose 'Time window=3'; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not read 90 days"
+X choose 'Time window=5'; until_says "commits  ·  .*om-statusbar" || wrong "Contributions did not read 90 days"
 X keys r; until_says "om-race-date" || wrong "r on Contributions did not open the race"
 X dump WindowTitle | grep -q "last 90 days" || wrong "the race did not open on 90 days ($(X dump WindowTitle))"
 X keys Home; started=$(X dump om-race-date)

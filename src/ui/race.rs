@@ -22,7 +22,7 @@ use gtk::{gdk, glib, pango};
 
 use crate::stats::{self, Branches, Contributions, Lines};
 use crate::ui::stats::{plural, thousands};
-use crate::ui::{day_window, key_color, periods};
+use crate::ui::{key_color, periods};
 
 /// How many bars are in the race at once.
 const TOP: usize = 10;
@@ -672,14 +672,17 @@ pub fn page(field: Field) -> adw::NavigationPage {
         let title = title.clone();
         Rc::new(move || {
             let periods = periods();
-            let (label, days) = periods.get(period.selected() as usize).copied().unwrap_or(periods[0]);
+            let (label, span) = periods
+                .get(period.selected() as usize)
+                .copied()
+                .unwrap_or(periods[crate::ui::DEFAULT_PERIOD as usize]);
             let counted = if branches == Branches::All { " · all branches" } else { "" };
             title.set_subtitle(&format!("{scope} · {}{counted}", label.to_lowercase()));
             generation.set(generation.get() + 1);
             let mine = generation.get();
             stack.set_visible_child_name("loading");
             status.set_label("Reading history…");
-            let rx = stats::spawn_with((*repos).clone(), day_window(days), branches, Lines::Skipped);
+            let rx = stats::spawn_with((*repos).clone(), span.window(), branches, Lines::Skipped);
             let (generation, reading) = (Rc::clone(&generation), reading.clone());
             let (latest, show) = (Rc::clone(&latest), Rc::clone(&show));
             glib::spawn_future_local(async move {

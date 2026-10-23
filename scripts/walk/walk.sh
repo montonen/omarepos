@@ -201,8 +201,8 @@ for repo in $REPOS; do
   X dump "Search commits" | grep -q "Search commits" || { WRONG=$((WRONG+1)); echo "WRONG: $repo: the commit search key did nothing in a commit graph"; }
   step "$repo: back from the search" "X keys Escape; sleep 0.4"
   step "$repo: its contributions" 'X press "Contributions in this repository"; sleep 1.3'
-  step "$repo: 14 days" "X choose 'Time window=1'; sleep 1"
-  step "$repo: 30 days" "X choose 'Time window=2'; sleep 1"
+  step "$repo: 14 days" "X choose 'Time window=3'; sleep 1"
+  step "$repo: 30 days" "X choose 'Time window=4'; sleep 1"
   step "$repo: every branch" "X choose 'Which branches=1'; sleep 1.2"
   step "$repo: an author's commits" 'X press "Fixture"; sleep 0.4'
   step "$repo: open a commit from there" "X pick 0:0!; sleep 1.2"
@@ -237,12 +237,14 @@ step "back to the grid" "X keys Escape Escape Escape"
 # ---- contributions across the fleet
 part "contributions"
 step "contributions" "X keys ctrl+g; sleep 1.6"
-step "14 days" "X choose 'Time window=1'; sleep 1.3"
-step "30 days" "X choose 'Time window=2'; sleep 1.5"
+step "24 hours" "X choose 'Time window=0'; sleep 1.2"
+step "48 hours" "X choose 'Time window=1'; sleep 1.2"
+step "14 days" "X choose 'Time window=3'; sleep 1.3"
+step "30 days" "X choose 'Time window=4'; sleep 1.5"
 # Longer, the days are drawn a week and then a month at a time.
-step "90 days, by the week" "X choose 'Time window=3'; sleep 1.5"
-step "12 months, by the month" "X choose 'Time window=5'; sleep 2"
-step "30 days again" "X choose 'Time window=2'; sleep 1.5"
+step "90 days, by the week" "X choose 'Time window=5'; sleep 1.5"
+step "12 months, by the month" "X choose 'Time window=7'; sleep 2"
+step "30 days again" "X choose 'Time window=4'; sleep 1.5"
 # The other view: every branch, which on these fixtures is more commits than
 # the branches that are checked out have, the merges fixture's two unmerged
 # branches among them. And back.
@@ -258,7 +260,7 @@ X dump "all branches" | grep -q "all branches" || { WRONG=$((WRONG+1)); echo "WR
 [ "$(figures)" != "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: every branch counted the same as the checked-out ones ($before)"; }
 step "checked-out branches again" "X choose 'Which branches=0'; sleep 1.5"
 [ "$(figures)" = "$before" ] || { WRONG=$((WRONG+1)); echo "WRONG: back on the checked-out branches the figures are not what they were ($(figures); before: $before)"; }
-step "7 days" "X choose 'Time window=0'; sleep 1.2"
+step "7 days" "X choose 'Time window=2'; sleep 1.2"
 # The arcade, behind the Konami code: the same figures as a high-score table,
 # the lots fixture's co-author among the players, and Escape back to the page.
 step "the arcade" "X keys Up Up Down Down Left Right Left Right b a; sleep 2.2"
@@ -267,8 +269,8 @@ for shown in "HIGH SCORES" "1UP" "CO-OP"; do
 done
 step "arcade: stages" "X keys Tab"
 step "arcade: badges, the second player's" "X keys shift+Tab shift+Tab Down Tab Tab"
-step "arcade: the last 12 months, round from the first" "X keys Left; sleep 2"
-X dump "LAST 12 MONTHS" | grep -q "LAST 12 MONTHS" || { WRONG=$((WRONG+1)); echo "WRONG: left in the arcade did not change the period"; }
+step "arcade: the last 48 hours, one back" "X keys Left; sleep 2"
+X dump "LAST 48 HOURS" | grep -q "LAST 48 HOURS" || { WRONG=$((WRONG+1)); echo "WRONG: left in the arcade did not change the period"; }
 step "arcade: 7 days" "X keys Right; sleep 1.6"
 step "game over" "X keys Escape; sleep 1.8"
 X dump "HIGH SCORES" | grep -q "HIGH SCORES" && { WRONG=$((WRONG+1)); echo "WRONG: Escape did not end the game"; }

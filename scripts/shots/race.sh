@@ -65,7 +65,7 @@ X resize "$SIZE"; still
 
 # Contributions over the last 12 months, and its race.
 X keys ctrl+g; until_says "commits  ·  .*om-statusbar" || { echo "Contributions did not open"; exit 1; }
-X choose 'Time window=5'; sleep 4
+X choose 'Time window=7'; sleep 4
 X keys r; until_says "om-race-date" || { echo "the race did not open"; exit 1; }
 until_says "om-race-total" || { echo "the race has nobody in it"; exit 1; }
 still

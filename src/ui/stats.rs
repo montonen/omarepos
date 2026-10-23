@@ -12,7 +12,7 @@ use gtk::pango;
 
 use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
 use crate::ui::arcade::{self, Arcade};
-use crate::ui::{day_window, key_color, relative_time};
+use crate::ui::{key_color, relative_time};
 
 /// The two views, the one there has always been first.
 const VIEWS: [(&str, Branches); 2] =
@@ -53,6 +53,7 @@ pub fn page(
     header.set_title_widget(Some(&title));
 
     let range = gtk::DropDown::from_strings(&crate::ui::periods().map(|(label, _)| label));
+    range.set_selected(crate::ui::DEFAULT_PERIOD);
     range.add_css_class("om-sort");
     range.set_tooltip_text(Some("Time window"));
     header.pack_end(&range);
@@ -156,7 +157,9 @@ pub fn page(
         let rows = Rc::clone(&rows);
         let on_open = Rc::clone(&on_open);
         Rc::new(move || {
-            let days = crate::ui::periods().get(range.selected() as usize).map_or(7, |(_, days)| *days);
+            let span = crate::ui::periods()
+                .get(range.selected() as usize)
+                .map_or(crate::ui::Span::Days(7), |(_, span)| *span);
             let branches = VIEWS
                 .get(view.selected() as usize)
                 .map_or(Branches::CheckedOut, |(_, branches)| *branches);
@@ -176,7 +179,7 @@ pub fn page(
             // A new period or view starts with every row closed, as it did.
             rows.expanded.borrow_mut().clear();
 
-            let rx = stats::spawn((*repos).clone(), day_window(days), branches);
+            let rx = stats::spawn((*repos).clone(), span.window(), branches);
             let generation = Rc::clone(&generation);
             let stack = stack.clone();
             let content = content.clone();
