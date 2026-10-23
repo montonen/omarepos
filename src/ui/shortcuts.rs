@@ -31,6 +31,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+F  or  /", "Filter — try tag:work or lang:rust. It has the keyboard at launch"),
             ("Enter in the filter", "Open the top hit"),
             ("↓ in the filter", "Into the repositories"),
+            ("Ctrl+1 … Ctrl+9", "Open a saved view — the ★ menu saves and lists them"),
         ],
     ),
     (

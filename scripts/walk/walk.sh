@@ -171,6 +171,16 @@ asks $N 1 "the card's menu did not ask for the page"
 WAIT=2 step "f on a card" "X keys ctrl+l f"
 step "p on a clean card that is behind" "X keys ctrl+f; X type beta; sleep 0.4; X keys Down p; sleep 2.5; X keys Escape Escape"
 step "p on a card with commits of its own" "X keys ctrl+f; X type alpha; sleep 0.4; X keys Down p; sleep 2.5; X keys Escape Escape"
+
+# ---- saved views (ADR-0012): the grid kept under a name, written to
+# config.toml, and opened again by its number, which is what Ctrl+1 does.
+step "keep a filter as a view" "X keys ctrl+f; X type beta; sleep 0.4; X act save-view 'behind beta'; sleep 0.3"
+grep -q 'name = "behind beta"' "$W/config/omarepos/config.toml" || { WRONG=$((WRONG+1)); echo "WRONG: the view was not written to config.toml"; }
+step "everything again" "X keys Escape Escape; sleep 0.4"
+step "open the view by its number" "X act view 1; sleep 0.6"
+X dump | grep -q 'SearchEntry "beta"' || { WRONG=$((WRONG+1)); echo "WRONG: opening the view did not put its filter back"; }
+step "a view that is not there" "X act view 9; sleep 0.3"
+step "everything once more" "X keys Escape Escape; sleep 0.3"
 WAIT=4 step "refresh the fleet" "X keys ctrl+shift+r"
 step "rescan" "X keys ctrl+r; sleep 1"
 step "card menu: contributions" 'X press "!Contributions"; sleep 1.2'

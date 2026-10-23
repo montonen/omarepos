@@ -135,6 +135,51 @@ pub struct Root {
 }
 
 
+/// A saved view: the filter, the tags, the warning toggle and the sort the
+/// grid was showing, under a name (ADR-0012). It is a saved question and
+/// nothing more: it says nothing new about any repository. The sort is kept
+/// by its label rather than its place in the list, so that a sort added or
+/// moved later cannot turn a view into another.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct View {
+    pub name: String,
+    /// What was typed in the filter, `tag:` and `lang:` terms included.
+    pub filter: String,
+    /// The tags ticked in the header, any of which a repository may carry.
+    pub tags: Vec<String>,
+    /// "Untagged only".
+    pub untagged: bool,
+    /// The warning toggle: only the repositories that need something.
+    pub attention: bool,
+    /// The sort, by its label; none leaves the sort as it is.
+    pub sort: Option<String>,
+}
+
+impl View {
+    fn to_toml(&self) -> String {
+        let mut out = String::from("\n[[views]]\n");
+        out.push_str(&format!("name = {}\n", quote(&self.name)));
+        if !self.filter.is_empty() {
+            out.push_str(&format!("filter = {}\n", quote(&self.filter)));
+        }
+        if !self.tags.is_empty() {
+            let tags: Vec<String> = self.tags.iter().map(|tag| quote(tag)).collect();
+            out.push_str(&format!("tags = [{}]\n", tags.join(", ")));
+        }
+        if self.untagged {
+            out.push_str("untagged = true\n");
+        }
+        if self.attention {
+            out.push_str("attention = true\n");
+        }
+        if let Some(sort) = &self.sort {
+            out.push_str(&format!("sort = {}\n", quote(sort)));
+        }
+        out
+    }
+}
+
 /// Background refresh. Off unless `every_minutes` is set, and even then it
 /// only re-reads local state until `fetch` is turned on as well.
 #[derive(Debug, Clone, Deserialize)]
@@ -457,6 +502,8 @@ pub struct Config {
     pub commit_detail: bool,
     /// Background refresh settings.
     pub refresh: Refresh,
+    /// Saved views, in the order they are listed and numbered: see [`View`].
+    pub views: Vec<View>,
     /// Roots given on the command line, for this run only. Used in place of
     /// `roots` and never written: `omarepos -r <dir>` is a look at somewhere
     /// else, not a change of configuration. They used to be assigned straight
@@ -497,6 +544,7 @@ impl Default for Config {
             follow_omarchy_theme: true,
             commit_detail: true,
             refresh: Refresh::default(),
+            views: Vec::new(),
             roots_override: None,
             depth_override: None,
             load_error: None,
@@ -582,6 +630,16 @@ impl Config {
         }
         self.extra_repos.iter_mut().for_each(clean);
         self.refresh.only_tags.iter_mut().for_each(clean);
+        for view in &mut self.views {
+            clean(&mut view.name);
+            clean(&mut view.filter);
+            view.tags.iter_mut().for_each(clean);
+            if let Some(sort) = &mut view.sort {
+                clean(sort);
+            }
+        }
+        // A view with no name cannot be listed, or told from another.
+        self.views.retain(|view| !view.name.trim().is_empty());
         for root in &mut self.roots {
             match root {
                 RootSpec::Simple(path) => clean(path),
@@ -784,6 +842,14 @@ impl Config {
         out.push_str(&format!("max_parallel = {}\n", refresh.max_parallel));
         out.push_str(&format!("timeout_seconds = {}\n", refresh.timeout_seconds));
 
+        // Tables of their own, after [refresh] for the same reason.
+        if !self.views.is_empty() {
+            out.push_str("\n# Saved views. Ctrl+1 to Ctrl+9 open the first nine, in this order.\n");
+            for view in &self.views {
+                out.push_str(&view.to_toml());
+            }
+        }
+
         replace_file(&path, &out)?;
         *self.on_disk.borrow_mut() = Some(out);
         Ok(())
@@ -950,6 +1016,14 @@ mod tests {
             cfg.editor = Some(text.to_string());
             cfg.terminal_runs = Some(text.to_string());
             cfg.refresh.only_tags = vec![text.to_string()];
+            cfg.views = vec![View {
+                name: text.to_string(),
+                filter: format!("tag:{text} lang:rust {text}"),
+                tags: vec![text.to_string(), "work".to_string()],
+                untagged: true,
+                attention: true,
+                sort: Some(text.to_string()),
+            }];
             cfg.save().unwrap();
 
             let back = Config::load();
@@ -963,8 +1037,37 @@ mod tests {
             assert_eq!(back.editor.as_deref(), Some(text));
             assert_eq!(back.terminal_runs.as_deref(), Some(text));
             assert_eq!(back.refresh.only_tags, vec![text.to_string()]);
+            assert_eq!(back.views, cfg.views, "{text:?}");
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// Views come back in their order, a view with nothing set but its name
+    /// is written as just that, one with no name is not a view, and a key a
+    /// view does not have makes the file one that cannot be used, as any
+    /// other mistyped key does: never saved over.
+    #[test]
+    fn saved_views_are_read_back_in_their_order() {
+        let _guard = isolate();
+        let path = Config::path();
+        let mut cfg = Config::default();
+        cfg.views = vec![
+            View { name: "behind".into(), attention: true, sort: Some("Unpushed first".into()), ..View::default() },
+            View { name: "bare".into(), ..View::default() },
+        ];
+        cfg.save().unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("[[views]]\nname = \"bare\"\n"), "{written}");
+        assert_eq!(Config::load().views, cfg.views);
+
+        std::fs::write(&path, format!("{written}\n[[views]]\nname = \"  \"\n")).unwrap();
+        assert_eq!(Config::load().views, cfg.views, "a view with no name is dropped");
+
+        std::fs::write(&path, format!("{written}\n[[views]]\nname = \"x\"\nfilters = \"oops\"\n")).unwrap();
+        let broken = Config::load();
+        assert!(broken.load_error.is_some());
+        assert!(broken.save().is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod query;
 mod refreshing;
 mod scanning;
 mod tags;
+mod views;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -31,15 +32,17 @@ use crate::ui::{self, Action};
 /// What the header needs with everything showing and no tag buttons in it,
 /// and what the label of its Tags button takes of that. With tag buttons
 /// there is no label: they say what it would.
-const HEADER_FULL: f64 = 1010.0;
+const HEADER_FULL: f64 = 1050.0;
 const TAGS_LABEL: f64 = 40.0;
 /// What it needs without its labels, tag buttons not counted. Without those
 /// and the sort order as well it needs 584.
-const HEADER_BARE: f64 = 780.0;
+const HEADER_BARE: f64 = 820.0;
 /// Room to spare over each of those before the header gives something up.
 /// All of it was measured with the debug dump under the built-in theme at
 /// the default font size; a larger font needs more, which is what this is
 /// for. The tag buttons are not in it: they are measured as they stand.
+/// Both had 40 added for the saved views button (ADR-0012), which is one
+/// icon wide like the commit search beside it.
 const SPARE: f64 = 40.0;
 /// The least the window claims to be usable at. A window with breakpoints has
 /// no minimum of its own: libadwaita drops the one its content would give it
@@ -247,6 +250,13 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .build();
     header.pack_start(&commit_search);
 
+    let views_button = gtk::MenuButton::builder()
+        .icon_name("starred-symbolic")
+        .tooltip_text("Saved views (Ctrl+1 … Ctrl+9)")
+        .has_frame(false)
+        .build();
+    header.pack_start(&views_button);
+
     let tags_content = adw::ButtonContent::builder()
         .icon_name("view-list-symbolic")
         .label("Tags")
@@ -441,6 +451,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     });
 
     // --- wiring ---------------------------------------------------------
+    ui.wire_views(&views_button);
     {
         let ui = Rc::clone(&ui);
         refresh.connect_clicked(move |_| ui.start_scan());
@@ -716,6 +727,30 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     }
     window.add_action(&act_select_all);
 
+    // Saved views: `view` opens one by its number as the list shows it,
+    // `save-view` keeps the grid as it is under a name. Actions, so that a
+    // key opens one and the walk can save one without the dialog.
+    let act_view = gio::SimpleAction::new("view", Some(glib::VariantTy::STRING));
+    {
+        let ui = Rc::clone(&ui);
+        act_view.connect_activate(move |_, number| {
+            if let Some(number) = number.and_then(|n| n.str()).and_then(|n| n.parse().ok()) {
+                ui.open_view(number);
+            }
+        });
+    }
+    window.add_action(&act_view);
+    let act_save_view = gio::SimpleAction::new("save-view", Some(glib::VariantTy::STRING));
+    {
+        let ui = Rc::clone(&ui);
+        act_save_view.connect_activate(move |_, name| {
+            if let Some(name) = name.and_then(|n| n.str()) {
+                ui.save_view(name);
+            }
+        });
+    }
+    window.add_action(&act_save_view);
+
     let act_search_commits = gio::SimpleAction::new("search-commits", None);
     {
         let ui = Rc::clone(&ui);
@@ -809,6 +844,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
             act_clear.clone(),
             act_focus_grid.clone(),
             act_contrib.clone(),
+            act_view.clone(),
+            act_save_view.clone(),
         ];
         let anywhere = [
             act_search_commits.clone(),
@@ -884,6 +921,9 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     // into the filter box, since accelerators run ahead of the focused widget.
     app.set_accels_for_action("win.keyboard", &["F1"]);
     app.set_accels_for_action("win.clear-selection", &["<Ctrl><Shift>a"]);
+    for number in 1..=views::KEYED {
+        app.set_accels_for_action(&format!("win.view::{number}"), &[&format!("<Ctrl>{number}")]);
+    }
 
     // At narrow widths the two labelled header buttons crowd out the title,
     // so below this width they fall back to their icons and the filter box

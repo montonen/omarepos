@@ -283,6 +283,7 @@ most of the work:
 | `Space` on a card | Tick it, to scope the search and contributions |
 | `Ctrl+Shift+F` | Search commits across the repositories; on Contributions its own, in a commit graph that one |
 | `Ctrl+G` | Contributions |
+| `Ctrl+1` … `Ctrl+9` | Open a saved view; the ★ menu saves them |
 | `Ctrl+R` · `Ctrl+Shift+R` | Rescan, local only · fetch the whole grid |
 | `Tab` in a graph | Into the changed files |
 | `Ctrl+,` | Settings |

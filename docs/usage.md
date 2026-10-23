@@ -32,6 +32,7 @@ moves from the filter into the cards.
 | `Esc` | Back out: a dialog or menu, the filter you are typing in, then the page, then the selection, then the filter |
 | `Ctrl+G` | Contributions for the selected repos, or all of them |
 | `Ctrl+Shift+A` | Clear the selection |
+| `Ctrl+1` … `Ctrl+9` | Open a saved view (see below) |
 | `lang:rust` in the filter | Narrow by language |
 | `Ctrl+,` | Settings |
 | `Alt+←` | Back to the grid |
@@ -59,6 +60,20 @@ be found, in any order, so `acme billing` finds the billing repository under
 toggle in the header narrows the grid to repos that are dirty, ahead, behind,
 unreadable, holding commits that are on no remote (on the branch checked out
 or on another), or that the last fetch failed on. Stashes do not count.
+
+## Saved views
+
+The ★ button in the header keeps what the grid is showing under a name: the
+filter text, `tag:` and `lang:` terms included, the tags picked in the header,
+"untagged only", the warning toggle and the sort. **Save this view…** asks for
+the name; a view of the same name is replaced. The menu lists the views in
+order, numbered, and `Ctrl+1` to `Ctrl+9` open the first nine. The bin beside
+one forgets it, and the ones after it move up a key.
+
+A view is a saved question and nothing more: it writes nothing about any
+repository, and opening one sets the same controls you would. Views are kept in
+`config.toml`, as `[[views]]` tables, and can be edited there like everything
+else in it ([Configuration](configuration.md)).
 
 ## The fleet as JSON
 

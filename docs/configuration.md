@@ -51,7 +51,20 @@ editor = "nvim"
 
 # Follow the active Omarchy theme and restyle live when it changes.
 follow_omarchy_theme = true
+
+# Saved views, in the order the ★ menu lists them; Ctrl+1 to Ctrl+9 open the
+# first nine. Every key but `name` may be left out. `sort` is one of the sort
+# drop-down's labels; left out, a view keeps the sort as it is.
+[[views]]
+name = "Behind at acme"
+filter = "lang:rust"
+tags = ["acme"]
+attention = true
+sort = "Unpushed first"
 ```
+
+`[[views]]` tables go after every bare key, as any table does; the app writes
+them last.
 
 ## Theme
 
