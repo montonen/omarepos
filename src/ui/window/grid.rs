@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gtk::glib;
 use adw::prelude::*;
+use gtk::glib;
 
 use crate::git::RepoInfo;
 use crate::ui::{Action, card};
@@ -63,11 +63,8 @@ pub(super) fn reconcile(old: &[(PathBuf, String)], new: &[(PathBuf, String)]) ->
 
     let mut steps = Vec::new();
     // What still stands once the removals are done, in the order it stands.
-    let mut order: Vec<&PathBuf> = old
-        .iter()
-        .filter(|(path, sig)| keep(path, sig))
-        .map(|(path, _)| path)
-        .collect();
+    let mut order: Vec<&PathBuf> =
+        old.iter().filter(|(path, sig)| keep(path, sig)).map(|(path, _)| path).collect();
     for (at, (path, sig)) in old.iter().enumerate().rev() {
         if !keep(path, sig) {
             steps.push(Step::Remove { at });
@@ -140,11 +137,8 @@ impl Ui {
         // Not while the first scan is still bringing cards in, when a tag's
         // repositories may simply not have arrived yet.
         if !self.scanning.get() {
-            let live: BTreeSet<String> = self
-                .grid_tags()
-                .into_iter()
-                .map(|(tag, _)| tag.to_lowercase())
-                .collect();
+            let live: BTreeSet<String> =
+                self.grid_tags().into_iter().map(|(tag, _)| tag.to_lowercase()).collect();
             self.tag_filter.borrow_mut().retain(|tag| live.contains(tag));
         }
 
@@ -163,9 +157,7 @@ impl Ui {
                 let tags = meta.tags_for(&info.path).to_vec();
                 let failed = errors.get(&info.path.display().to_string()).cloned();
                 let unseen = !self.is_known(&info.path);
-                sigs.push(format!(
-                    "{epoch}\u{1f}{info:?}\u{1f}{tags:?}\u{1f}{failed:?}\u{1f}{unseen}"
-                ));
+                sigs.push(format!("{epoch}\u{1f}{info:?}\u{1f}{tags:?}\u{1f}{failed:?}\u{1f}{unseen}"));
                 tags_by_card.push(tags);
                 failed_by_card.push(failed);
                 unseen_by_card.push(unseen);
@@ -179,11 +171,8 @@ impl Ui {
             .map(|repo| repo.path.clone())
             .zip(self.signatures.borrow().iter().cloned())
             .collect();
-        let new: Vec<(PathBuf, String)> = repos
-            .iter()
-            .map(|repo| repo.path.clone())
-            .zip(sigs.iter().cloned())
-            .collect();
+        let new: Vec<(PathBuf, String)> =
+            repos.iter().map(|repo| repo.path.clone()).zip(sigs.iter().cloned()).collect();
 
         let ui = Rc::clone(self);
         let on_action: Rc<dyn Fn(Action, &RepoInfo)> =
@@ -245,10 +234,7 @@ impl Ui {
         let marks: Vec<(bool, bool)> = {
             let selected = self.selected.borrow();
             let earlier = self.from_last_run.borrow();
-            repos
-                .iter()
-                .map(|repo| (selected.contains(&repo.path), earlier.contains(&repo.path)))
-                .collect()
+            repos.iter().map(|repo| (selected.contains(&repo.path), earlier.contains(&repo.path))).collect()
         };
         for (index, (ticked, earlier)) in marks.into_iter().enumerate() {
             let Some(child) = self.flow.child_at_index(index as i32) else { break };
@@ -258,9 +244,10 @@ impl Ui {
                 set_class(&card, "om-earlier", earlier);
             }
             if let Some(check) = find_check(child.upcast_ref())
-                && check.is_active() != ticked {
-                    check.set_active(ticked);
-                }
+                && check.is_active() != ticked
+            {
+                check.set_active(ticked);
+            }
         }
 
         self.update_selection_label();
@@ -315,20 +302,21 @@ impl Ui {
         // to that, the keyboard went to the box and not to the card.
         if touched
             && let Some(path) = focused
-                && let Some(index) = repos.iter().position(|repo| repo.path == path)
-                    && let Some(child) = self.flow.child_at_index(index as i32) {
-                        // Through the flow box's own focus path, not `grab_focus`.
-                        // The box keeps a cursor of its own, which is where the
-                        // arrow keys start from, and `grab_focus` on a card moves
-                        // the window's focus without moving that. The cursor went
-                        // on naming a card this rebuild had just removed, and the
-                        // next arrow key started from it: from the wrong place at
-                        // best, from freed memory at worst. Let go of first, as in
-                        // `focus_grid`: GTK leaves alone a card that already
-                        // holds the focus, and a moved card does.
-                        gtk::prelude::GtkWindowExt::set_focus(&self.window, gtk::Widget::NONE);
-                        child.child_focus(gtk::DirectionType::Down);
-                    }
+            && let Some(index) = repos.iter().position(|repo| repo.path == path)
+            && let Some(child) = self.flow.child_at_index(index as i32)
+        {
+            // Through the flow box's own focus path, not `grab_focus`.
+            // The box keeps a cursor of its own, which is where the
+            // arrow keys start from, and `grab_focus` on a card moves
+            // the window's focus without moving that. The cursor went
+            // on naming a card this rebuild had just removed, and the
+            // next arrow key started from it: from the wrong place at
+            // best, from freed memory at worst. Let go of first, as in
+            // `focus_grid`: GTK leaves alone a card that already
+            // holds the focus, and a moved card does.
+            gtk::prelude::GtkWindowExt::set_focus(&self.window, gtk::Widget::NONE);
+            child.child_focus(gtk::DirectionType::Down);
+        }
 
         if offset > 0.0 {
             let adjustment = self.scroller.vadjustment();
@@ -344,10 +332,7 @@ mod tests {
     use super::*;
 
     fn grid(cards: &[(&str, &str)]) -> Vec<(PathBuf, String)> {
-        cards
-            .iter()
-            .map(|(path, sig)| (PathBuf::from(path), sig.to_string()))
-            .collect()
+        cards.iter().map(|(path, sig)| (PathBuf::from(path), sig.to_string())).collect()
     }
 
     /// Carry the steps out on a plain list, the way `rebuild` carries them

@@ -291,8 +291,8 @@ pub fn web_url(remote: &str) -> Option<String> {
 
     let Some(scheme) = scheme else {
         let host = host.split_once(':').map_or(host.as_str(), |(host, _port)| host);
-        let named = host.contains('.')
-            && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        let named =
+            host.contains('.') && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
         if !named {
             return None;
         }
@@ -301,16 +301,13 @@ pub fn web_url(remote: &str) -> Option<String> {
         if host == "ssh.dev.azure.com" || host == "vs-ssh.visualstudio.com" {
             let parts: Vec<&str> = path.split('/').collect();
             return match parts.as_slice() {
-                ["v3", organisation, project, repository] => Some(format!(
-                    "https://dev.azure.com/{organisation}/{project}/_git/{repository}"
-                )),
+                ["v3", organisation, project, repository] => {
+                    Some(format!("https://dev.azure.com/{organisation}/{project}/_git/{repository}"))
+                }
                 _ => None,
             };
         }
-        let host = SSH_ONLY_HOSTS
-            .iter()
-            .find(|(ssh, _)| *ssh == host)
-            .map_or(host, |(_, web)| web);
+        let host = SSH_ONLY_HOSTS.iter().find(|(ssh, _)| *ssh == host).map_or(host, |(_, web)| web);
         return Some(format!("https://{host}/{path}"));
     };
     Some(format!("{scheme}://{host}/{path}"))
@@ -365,7 +362,11 @@ mod tests {
             Some("https://git.example.org/acme/widgets"),
         ),
         // An `@` in the password.
-        ("https://jm:p@SECRET@github.com/acme/widgets.git", "github.com/acme/widgets", Some("https://github.com/acme/widgets")),
+        (
+            "https://jm:p@SECRET@github.com/acme/widgets.git",
+            "github.com/acme/widgets",
+            Some("https://github.com/acme/widgets"),
+        ),
         // A token in front of a remote written as scp writes one, which git
         // reads as a host called `oauth2`.
         ("oauth2:glpat-SECRET@gitlab.com:group/repo.git", "gitlab.com/group/repo", None),
@@ -395,8 +396,16 @@ mod tests {
     #[test]
     fn a_remote_with_an_at_in_its_path_keeps_its_name_and_its_page() {
         shown(&[
-            ("git@host.example:acme/w@v2.git", "host.example/acme/w@v2", Some("https://host.example/acme/w@v2")),
-            ("ssh://git@host.example/acme/w@v2.git", "host.example/acme/w@v2", Some("https://host.example/acme/w@v2")),
+            (
+                "git@host.example:acme/w@v2.git",
+                "host.example/acme/w@v2",
+                Some("https://host.example/acme/w@v2"),
+            ),
+            (
+                "ssh://git@host.example/acme/w@v2.git",
+                "host.example/acme/w@v2",
+                Some("https://host.example/acme/w@v2"),
+            ),
             (
                 "https://jm:ghp_SECRET@host.example/acme/w@v2.git",
                 "host.example/acme/w@v2",
@@ -454,10 +463,7 @@ mod tests {
             // An ssh port is ssh's, and no web server is listening on it. An
             // http remote's port is the web server's own, and so is its
             // choice of http.
-            (
-                "ssh://git@git.example.org:2222/acme/widgets.git",
-                Some("https://git.example.org/acme/widgets"),
-            ),
+            ("ssh://git@git.example.org:2222/acme/widgets.git", Some("https://git.example.org/acme/widgets")),
             (
                 "http://git.example.org:3000/acme/widgets.git",
                 Some("http://git.example.org:3000/acme/widgets"),
@@ -469,19 +475,13 @@ mod tests {
                 "https://jm:ghp_0123456789abcdef@github.com/acme/widgets.git",
                 Some("https://github.com/acme/widgets"),
             ),
-            (
-                "https://jm:p@ss@github.com/acme/widgets.git",
-                Some("https://github.com/acme/widgets"),
-            ),
+            ("https://jm:p@ss@github.com/acme/widgets.git", Some("https://github.com/acme/widgets")),
             (
                 "https://acme@dev.azure.com/acme/Shop/_git/widgets",
                 Some("https://dev.azure.com/acme/Shop/_git/widgets"),
             ),
             // Subgroups, a namespace with a tilde, a path from the root.
-            (
-                "git@gitlab.com:acme/platform/widgets.git",
-                Some("https://gitlab.com/acme/platform/widgets"),
-            ),
+            ("git@gitlab.com:acme/platform/widgets.git", Some("https://gitlab.com/acme/platform/widgets")),
             ("git@git.sr.ht:~jm/widgets", Some("https://git.sr.ht/~jm/widgets")),
             ("git@git.example.org:/acme/widgets.git", Some("https://git.example.org/acme/widgets")),
             // Hosts that take ssh under one name and serve pages under another.
@@ -494,14 +494,8 @@ mod tests {
                 Some("https://dev.azure.com/acme/Shop/_git/widgets"),
             ),
             ("git@ssh.dev.azure.com:acme/widgets", None),
-            (
-                "ssh://git@ssh.github.com:443/acme/widgets.git",
-                Some("https://github.com/acme/widgets"),
-            ),
-            (
-                "ssh://git@altssh.gitlab.com:443/acme/widgets.git",
-                Some("https://gitlab.com/acme/widgets"),
-            ),
+            ("ssh://git@ssh.github.com:443/acme/widgets.git", Some("https://github.com/acme/widgets")),
+            ("ssh://git@altssh.gitlab.com:443/acme/widgets.git", Some("https://gitlab.com/acme/widgets")),
             // A directory is not on the web, whatever it is called.
             ("/srv/git/widgets.git", None),
             ("../widgets", None),
@@ -571,7 +565,10 @@ mod tests {
                 "fatal: unable to access 'https://me:tok@en@host.example/x.git/': error: 403",
                 "fatal: unable to access 'https://•••@host.example/x.git/': error: 403",
             ),
-            ("ssh://deploy:hunter2@host.example:2222/x.git: refused", "ssh://•••@host.example:2222/x.git: refused"),
+            (
+                "ssh://deploy:hunter2@host.example:2222/x.git: refused",
+                "ssh://•••@host.example:2222/x.git: refused",
+            ),
             ("could not reach https://ghp_token@host.example", "could not reach https://•••@host.example"),
         ] {
             assert_eq!(without_logins_in(said), shown, "{said}");
@@ -600,7 +597,8 @@ mod tests {
             assert_eq!(without_secrets(said, &urls), said);
         }
         // A user name with no password is no secret, and is not looked for.
-        let unsecret = ["git@host.example:acme/w.git".to_string(), "https://deploy@host.example/x".to_string()];
+        let unsecret =
+            ["git@host.example:acme/w.git".to_string(), "https://deploy@host.example/x".to_string()];
         let said = "deploy: git said nothing to deploy";
         assert_eq!(without_secrets(said, &unsecret), said);
     }

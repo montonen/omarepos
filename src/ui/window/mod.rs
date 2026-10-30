@@ -17,15 +17,15 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
-use adw::prelude::*;
 
 use crate::config::Config;
+use crate::git::RepoInfo;
 use crate::meta::Meta;
 use crate::refresh;
-use crate::git::RepoInfo;
 use crate::theme::Palette;
 use crate::ui::{self, Action};
 
@@ -212,10 +212,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let title = gtk::Label::new(Some("OMAREPOS"));
     title.add_css_class("om-title");
-    let subtitle = gtk::Label::builder()
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .max_width_chars(44)
-        .build();
+    let subtitle =
+        gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).max_width_chars(44).build();
     subtitle.add_css_class("om-subtitle");
     title_box.append(&title);
     title_box.append(&subtitle);
@@ -232,10 +230,8 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     spinner.set_visible(false);
     header.pack_start(&spinner);
 
-    let contrib_content = adw::ButtonContent::builder()
-        .icon_name("system-users-symbolic")
-        .label("Contributions")
-        .build();
+    let contrib_content =
+        adw::ButtonContent::builder().icon_name("system-users-symbolic").label("Contributions").build();
     let contributions = gtk::Button::builder()
         .child(&contrib_content)
         .tooltip_text("Contributions across the selected repos, or all of them")
@@ -257,10 +253,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
         .build();
     header.pack_start(&views_button);
 
-    let tags_content = adw::ButtonContent::builder()
-        .icon_name("view-list-symbolic")
-        .label("Tags")
-        .build();
+    let tags_content = adw::ButtonContent::builder().icon_name("view-list-symbolic").label("Tags").build();
     let tags_button = gtk::MenuButton::builder()
         .child(&tags_content)
         .tooltip_text("Filter by tag, or tag the selected repos")
@@ -272,10 +265,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     tag_quick.set_visible(false);
     header.pack_start(&tag_quick);
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter repos…")
-        .width_request(240)
-        .build();
+    let search = gtk::SearchEntry::builder().placeholder_text("Filter repos…").width_request(240).build();
     search.add_css_class("om-search");
 
     let sort = gtk::DropDown::from_strings(query::SORT_LABELS);
@@ -348,10 +338,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
 
     // A label's minimum width is its whole text unless it may ellipsize, and
     // this one gets long enough to force the window wider than the screen.
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .build();
+    let status = gtk::Label::builder().xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build();
     status.add_css_class("om-statusbar");
 
     // Shown only when a file the app keeps could not be read at launch. It
@@ -369,10 +356,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     view.add_top_bar(&header);
     view.set_content(Some(&body));
 
-    let grid_page = adw::NavigationPage::builder()
-        .title("omarepos")
-        .child(&view)
-        .build();
+    let grid_page = adw::NavigationPage::builder().title("omarepos").child(&view).build();
     let nav = adw::NavigationView::new();
     nav.add(&grid_page);
     // One overlay, around every page. It used to sit inside the grid's page,
@@ -598,8 +582,7 @@ pub fn build(app: &adw::Application, cfg: Rc<RefCell<Config>>, provider: gtk::Cs
     {
         // And so does turning the wheel, which moves the cards under it.
         // Seen here and passed on: the scrolling is not this one's to do.
-        let wheel =
-            gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         let nav = Rc::clone(&ui);
         wheel.connect_scroll(move |_, _, _| {
             nav.pointer_chooses();
@@ -1121,18 +1104,15 @@ impl Ui {
     /// until the theme next changed.
     fn sync_subtitle(&self) {
         let roots = self.cfg.borrow().root_labels().join("  ");
-        self.subtitle
-            .set_label(&format!("{}  ·  {}", roots, self.theme_name.borrow()));
+        self.subtitle.set_label(&format!("{}  ·  {}", roots, self.theme_name.borrow()));
     }
 
     /// Restyle whenever Omarchy's current-theme directory changes.
     fn watch_theme(self: &Rc<Self>) {
         let dir = crate::theme::state_dir();
         let file = gio::File::for_path(&dir);
-        let Ok(monitor) = file.monitor_directory(
-            gio::FileMonitorFlags::WATCH_MOVES,
-            gio::Cancellable::NONE,
-        ) else {
+        let Ok(monitor) = file.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        else {
             return;
         };
         let ui = Rc::clone(self);
@@ -1151,13 +1131,11 @@ impl Ui {
     /// not save over it, and a toast that came and went would leave that to be
     /// found out later.
     fn sync_trouble(&self) {
-        let unusable: Vec<String> = [
-            self.cfg.borrow().load_error.clone(),
-            self.meta.borrow().load_error.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let unusable: Vec<String> =
+            [self.cfg.borrow().load_error.clone(), self.meta.borrow().load_error.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
         if !unusable.is_empty() {
             self.trouble.set_title(&format!(
                 "Could not read {}. Nothing will be saved over it. Fix the file, then \
@@ -1240,10 +1218,8 @@ impl Ui {
             // Of the repositories on the grid: the record can hold one the
             // grid has since lost.
             let errors = self.fetch_errors.borrow();
-            let failed = repos
-                .iter()
-                .filter(|repo| errors.contains_key(&repo.path.display().to_string()))
-                .count();
+            let failed =
+                repos.iter().filter(|repo| errors.contains_key(&repo.path.display().to_string())).count();
             if failed > 0 {
                 parts.push(format!("{failed} not fetched"));
             }
@@ -1258,12 +1234,8 @@ impl Ui {
         }
         let cfg = self.cfg.borrow();
         let settings = &cfg.refresh;
-        let only: Vec<&str> = settings
-            .only_tags
-            .iter()
-            .map(|tag| tag.trim())
-            .filter(|tag| !tag.is_empty())
-            .collect();
+        let only: Vec<&str> =
+            settings.only_tags.iter().map(|tag| tag.trim()).filter(|tag| !tag.is_empty()).collect();
         if let Some(when) = self.last_refresh.get() {
             // The stamp is the last pass, and a pass narrowed to some tags
             // says nothing about the rest of the grid.
@@ -1293,10 +1265,7 @@ impl Ui {
         }
         let tag_filter = self.tag_filter.borrow();
         if !tag_filter.is_empty() {
-            parts.push(format!(
-                "tagged {}",
-                tag_filter.iter().cloned().collect::<Vec<_>>().join(", ")
-            ));
+            parts.push(format!("tagged {}", tag_filter.iter().cloned().collect::<Vec<_>>().join(", ")));
         } else if self.untagged_only.get() {
             parts.push("untagged only".to_string());
         }
@@ -1335,9 +1304,8 @@ impl Ui {
             return;
         }
         if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
-            if let Some(popover) = focused
-                .ancestor(gtk::Popover::static_type())
-                .and_downcast::<gtk::Popover>()
+            if let Some(popover) =
+                focused.ancestor(gtk::Popover::static_type()).and_downcast::<gtk::Popover>()
             {
                 popover.popdown();
                 return;
@@ -1348,10 +1316,11 @@ impl Ui {
                 return;
             }
             if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>()
-                && !editable.text().is_empty() {
-                    editable.set_text("");
-                    return;
-                }
+                && !editable.text().is_empty()
+            {
+                editable.set_text("");
+                return;
+            }
         }
 
         if !self.on_grid() {
@@ -1379,20 +1348,16 @@ impl Ui {
     /// somewhere typable it keeps its usual meaning.
     fn select_all_shown(self: &Rc<Self>) {
         if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window)
-            && let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
-                editable.select_region(0, -1);
-                return;
-            }
+            && let Ok(editable) = focused.dynamic_cast::<gtk::Editable>()
+        {
+            editable.select_region(0, -1);
+            return;
+        }
         if !self.on_grid() {
             return;
         }
 
-        let shown: Vec<PathBuf> = self
-            .shown
-            .borrow()
-            .iter()
-            .map(|repo| repo.path.clone())
-            .collect();
+        let shown: Vec<PathBuf> = self.shown.borrow().iter().map(|repo| repo.path.clone()).collect();
         if shown.is_empty() {
             return;
         }
@@ -1530,18 +1495,12 @@ impl Ui {
 
     fn open_graph(self: &Rc<Self>, info: &RepoInfo) {
         if let Some(err) = &info.error {
-            self.toasts
-                .add_toast(ui::toast(&format!("{}: {err}", info.name)));
+            self.toasts.add_toast(ui::toast(&format!("{}: {err}", info.name)));
             return;
         }
         self.accept(&info.path);
         *self.opened.borrow_mut() = Some(info.path.clone());
-        self.nav.push(&ui::graph::page(
-            &info.path,
-            &info.name,
-            None,
-            self.graph_host(&info.path),
-        ));
+        self.nav.push(&ui::graph::page(&info.path, &info.name, None, self.graph_host(&info.path)));
     }
 
     /// Search commits across the ticked repositories, or everything shown.
@@ -1564,8 +1523,7 @@ impl Ui {
 
     fn search_commits(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
-            self.toasts
-                .add_toast(ui::toast("No repositories to search"));
+            self.toasts.add_toast(ui::toast("No repositories to search"));
             return;
         }
         let (page, query) = ui::search::page(repos, scope, self.commit_opener());
@@ -1580,8 +1538,7 @@ impl Ui {
         let ui = Rc::clone(self);
         Rc::new(move |path: PathBuf, name: String, commit: Option<String>| {
             ui.accept(&path);
-            ui.nav
-                .push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
+            ui.nav.push(&ui::graph::page(&path, &name, commit, ui.graph_host(&path)));
         })
     }
 
@@ -1594,7 +1551,13 @@ impl Ui {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
-            ui.nav.push(&ui::stats::page(vec![path], name, ui.commit_opener(), ui.commit_searcher(), ui.race_runner()));
+            ui.nav.push(&ui::stats::page(
+                vec![path],
+                name,
+                ui.commit_opener(),
+                ui.commit_searcher(),
+                ui.race_runner(),
+            ));
         });
         let on_search: Rc<dyn Fn()> = {
             let ui = Rc::clone(self);
@@ -1675,10 +1638,9 @@ impl Ui {
         };
         match (&info.web, &info.remote) {
             (Some(page), _) => Ok(page.clone()),
-            (None, Some(remote)) => Err(format!(
-                "{}: no web page can be worked out from its remote, {remote}",
-                info.name
-            )),
+            (None, Some(remote)) => {
+                Err(format!("{}: no web page can be worked out from its remote, {remote}", info.name))
+            }
             (None, None) => Err(format!("{} has no remote, and so no page to open", info.name)),
         }
     }
@@ -1700,20 +1662,22 @@ impl Ui {
 
     fn open_contributions(self: &Rc<Self>, repos: Vec<PathBuf>, scope: String) {
         if repos.is_empty() {
-            self.toasts
-                .add_toast(ui::toast("No repositories to report on"));
+            self.toasts.add_toast(ui::toast("No repositories to report on"));
             return;
         }
-        self.nav
-            .push(&ui::stats::page(repos, scope, self.commit_opener(), self.commit_searcher(), self.race_runner()));
+        self.nav.push(&ui::stats::page(
+            repos,
+            scope,
+            self.commit_opener(),
+            self.commit_searcher(),
+            self.race_runner(),
+        ));
     }
 
     fn run_action(self: &Rc<Self>, action: Action, info: &RepoInfo) {
         match action {
             Action::CommitGraph => self.open_graph(info),
-            Action::Contributions => {
-                self.open_contributions(vec![info.path.clone()], info.name.clone())
-            }
+            Action::Contributions => self.open_contributions(vec![info.path.clone()], info.name.clone()),
             Action::EditTags => self.edit_tags(vec![info.path.clone()]),
             Action::OpenTerminal => self.terminal_opener(&info.path)(),
             Action::OpenEditor => self.editor_opener(&info.path)(),
@@ -1722,8 +1686,7 @@ impl Ui {
             Action::CopyPath => {
                 let path = info.path.display().to_string();
                 self.window.clipboard().set_text(&path);
-                self.toasts
-                    .add_toast(ui::toast(&format!("Copied {path}")));
+                self.toasts.add_toast(ui::toast(&format!("Copied {path}")));
             }
         }
     }

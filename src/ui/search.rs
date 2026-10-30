@@ -115,10 +115,7 @@ impl Tally {
             ));
         }
         if self.unreadable > 0 {
-            said.push_str(&format!(
-                " {} could not be read at all.",
-                self.unreadable
-            ));
+            said.push_str(&format!(" {} could not be read at all.", self.unreadable));
         }
         said
     }
@@ -158,10 +155,8 @@ pub fn page(
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
 
-    let entry = gtk::SearchEntry::builder()
-        .placeholder_text("Message, author or sha…")
-        .width_request(320)
-        .build();
+    let entry =
+        gtk::SearchEntry::builder().placeholder_text("Message, author or sha…").width_request(320).build();
     entry.add_css_class("om-search");
     header.pack_end(&entry);
 
@@ -170,10 +165,8 @@ pub fn page(
         .title("Search commits")
         .description("Matches subjects, full messages, authors and sha prefixes.")
         .build();
-    let empty = adw::StatusPage::builder()
-        .icon_name("system-search-symbolic")
-        .title("No matching commits")
-        .build();
+    let empty =
+        adw::StatusPage::builder().icon_name("system-search-symbolic").title("No matching commits").build();
 
     // A list box rather than a plain box: it makes every row focusable, gives
     // arrow navigation between them, and turns Enter into an activation.
@@ -197,10 +190,7 @@ pub fn page(
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let status = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     status.add_css_class("om-statusbar");
     say(&status, &format!("{} · nothing searched yet", scope));
 
@@ -215,10 +205,7 @@ pub fn page(
     view.add_top_bar(&header);
     view.set_content(Some(&toasts));
 
-    let page = adw::NavigationPage::builder()
-        .title("Search commits")
-        .child(&view)
-        .build();
+    let page = adw::NavigationPage::builder().title("Search commits").child(&view).build();
 
     // One generation per keystroke: a result from an abandoned query must not
     // land in the list of the one the user is waiting for.
@@ -343,13 +330,7 @@ pub fn page(
                     match event {
                         search::Event::Progress(done, of) => {
                             tally.repos = of;
-                            say(
-                                &status,
-                                &format!(
-                                    "{scope} · searching {done}/{of} · {} so far",
-                                    hits.len()
-                                ),
-                            );
+                            say(&status, &format!("{scope} · searching {done}/{of} · {} so far", hits.len()));
                         }
                         search::Event::Hits(found) => hits.extend(found),
                         search::Event::Stopped(Stopped::Matches) => tally.at_matches += 1,
@@ -382,9 +363,7 @@ pub fn page(
                 if tally.found == 0 {
                     // A status page's description is markup, with no switch
                     // to say otherwise, and this is what was typed.
-                    empty.set_description(Some(&glib::markup_escape_text(
-                        &tally.nothing(&query),
-                    )));
+                    empty.set_description(Some(&glib::markup_escape_text(&tally.nothing(&query))));
                     stack.set_visible_child_name("empty");
                 } else {
                     stack.set_visible_child_name("results");
@@ -429,11 +408,7 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
     repo.append(&repo_label);
     line.append(&repo);
 
-    let sha = gtk::Label::builder()
-        .label(&hit.short_id)
-        .xalign(0.0)
-        .width_chars(7)
-        .build();
+    let sha = gtk::Label::builder().label(&hit.short_id).xalign(0.0).width_chars(7).build();
     sha.add_css_class("om-sha");
     line.append(&sha);
 
@@ -460,11 +435,7 @@ fn row(hit: &Hit, toasts: &adw::ToastOverlay) -> gtk::ListBoxRow {
     author.add_css_class("om-meta");
     line.append(&author);
 
-    let when = gtk::Label::builder()
-        .label(relative_time(hit.when))
-        .xalign(1.0)
-        .width_chars(13)
-        .build();
+    let when = gtk::Label::builder().label(relative_time(hit.when)).xalign(1.0).width_chars(13).build();
     when.add_css_class("om-meta");
     line.append(&when);
 
@@ -528,7 +499,8 @@ mod tests {
     /// a count, over rows that were not the newest.
     #[test]
     fn a_repository_that_stopped_at_its_matches_turns_the_count_into_a_floor() {
-        let tally = Tally { found: 1037, repos_hit: 12, repos: 44, at_matches: 2, at_depth: 0, unreadable: 0 };
+        let tally =
+            Tally { found: 1037, repos_hit: 12, repos: 44, at_matches: 2, at_depth: 0, unreadable: 0 };
         assert_eq!(
             plain(tally.status()),
             "at least 1,037 commits  ·  in 12 of 44 repos  ·  \
@@ -569,10 +541,7 @@ mod tests {
     #[test]
     fn a_repository_that_could_not_be_read_is_said_in_both_places() {
         let tally = Tally { found: 3, repos_hit: 1, repos: 4, unreadable: 1, ..Tally::default() };
-        assert_eq!(
-            tally.status(),
-            "at least 3 commits  ·  in 1 of 4 repos  ·  1 repo could not be read"
-        );
+        assert_eq!(tally.status(), "at least 3 commits  ·  in 1 of 4 repos  ·  1 repo could not be read");
         let nothing = Tally { repos: 4, unreadable: 2, ..Tally::default() };
         assert_eq!(
             nothing.nothing("fix"),

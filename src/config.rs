@@ -35,7 +35,6 @@ pub fn tildify(path: &Path) -> String {
     }
 }
 
-
 /// A configured scan root. Written either as a bare path, or as a table when
 /// it needs options:
 ///
@@ -84,12 +83,9 @@ impl RootSpec {
 
     fn to_entry(&self) -> RootEntry {
         match self {
-            RootSpec::Simple(path) => RootEntry {
-                path: path.clone(),
-                nested: false,
-                tag: None,
-                include_self: None,
-            },
+            RootSpec::Simple(path) => {
+                RootEntry { path: path.clone(), nested: false, tag: None, include_self: None }
+            }
             RootSpec::Detailed(entry) => entry.clone(),
         }
     }
@@ -133,7 +129,6 @@ pub struct Root {
     pub tag: Option<String>,
     pub include_self: bool,
 }
-
 
 /// A saved view: the filter, the tags, the warning toggle and the sort the
 /// grid was showing, under a name (ADR-0012). It is a saved question and
@@ -313,9 +308,7 @@ pub fn last_refresh_path() -> PathBuf {
 }
 
 pub fn last_refresh() -> Option<i64> {
-    std::fs::read_to_string(last_refresh_path())
-        .ok()
-        .and_then(|text| text.trim().parse().ok())
+    std::fs::read_to_string(last_refresh_path()).ok().and_then(|text| text.trim().parse().ok())
 }
 
 /// Repositories the last fetch failed in, and what git said. Kept with the
@@ -396,13 +389,7 @@ pub fn known_repos_path() -> PathBuf {
 /// been fetching all along, and all of them are taken as seen.
 pub fn load_known_repos() -> Option<std::collections::BTreeSet<String>> {
     let text = std::fs::read_to_string(known_repos_path()).ok()?;
-    Some(
-        text.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect(),
-    )
+    Some(text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect())
 }
 
 pub fn save_known_repos(known: &std::collections::BTreeSet<String>) {
@@ -445,10 +432,8 @@ pub fn only_known(
 ) -> (Vec<PathBuf>, usize) {
     let Some(known) = known else { return (scope, 0) };
     let total = scope.len();
-    let seen: Vec<PathBuf> = scope
-        .into_iter()
-        .filter(|path| known.contains(&path.display().to_string()))
-        .collect();
+    let seen: Vec<PathBuf> =
+        scope.into_iter().filter(|path| known.contains(&path.display().to_string())).collect();
     let unseen = total - seen.len();
     (seen, unseen)
 }
@@ -555,9 +540,8 @@ impl Default for Config {
 
 impl Config {
     pub fn path() -> PathBuf {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config"));
+        let base =
+            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
         base.join("omarepos/config.toml")
     }
 
@@ -750,14 +734,11 @@ impl Config {
             let mut entry = spec.to_entry();
             mutate(&mut entry);
             if let Some(tag) = &entry.tag
-                && tag.trim().is_empty() {
-                    entry.tag = None;
-                }
-            *spec = if entry.is_plain() {
-                RootSpec::Simple(entry.path)
-            } else {
-                RootSpec::Detailed(entry)
-            };
+                && tag.trim().is_empty()
+            {
+                entry.tag = None;
+            }
+            *spec = if entry.is_plain() { RootSpec::Simple(entry.path) } else { RootSpec::Detailed(entry) };
             return;
         }
     }
@@ -789,13 +770,8 @@ impl Config {
                 tildify(&path)
             )));
         }
-        let list = |values: &[String]| -> String {
-            values
-                .iter()
-                .map(|v| quote(v))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let list =
+            |values: &[String]| -> String { values.iter().map(|v| quote(v)).collect::<Vec<_>>().join(", ") };
         let mut out = String::from("# omarepos configuration — written by the app.\n\n");
         out.push_str("# Directories scanned for repositories. A root can be a bare path, or a\n");
         out.push_str("# table: { path = \"...\", nested = true, tag = \"...\", include_self = false }.\n");
@@ -819,14 +795,11 @@ impl Config {
         }
         match &self.terminal_runs {
             Some(cmd) => out.push_str(&format!("terminal_runs = {}\n", quote(cmd))),
-            None => out.push_str(
-                "# terminal_runs = \"lazygit\"  # run in the terminal; \"\" for a plain shell\n",
-            ),
+            None => {
+                out.push_str("# terminal_runs = \"lazygit\"  # run in the terminal; \"\" for a plain shell\n")
+            }
         }
-        out.push_str(&format!(
-            "\nfollow_omarchy_theme = {}\n",
-            self.follow_omarchy_theme
-        ));
+        out.push_str(&format!("\nfollow_omarchy_theme = {}\n", self.follow_omarchy_theme));
         out.push_str(&format!("commit_detail = {}\n", self.commit_detail));
 
         // A table has to come after every bare key, so this stays last.
@@ -858,19 +831,13 @@ impl Config {
             return term.clone();
         }
         if let Ok(term) = std::env::var("TERMINAL")
-            && !term.trim().is_empty() {
-                return term;
-            }
-        for candidate in [
-            "alacritty",
-            "ghostty",
-            "kitty",
-            "foot",
-            "wezterm",
-            "gnome-terminal",
-            "ptyxis",
-            "konsole",
-        ] {
+            && !term.trim().is_empty()
+        {
+            return term;
+        }
+        for candidate in
+            ["alacritty", "ghostty", "kitty", "foot", "wezterm", "gnome-terminal", "ptyxis", "konsole"]
+        {
             if which(candidate) {
                 return candidate.to_string();
             }
@@ -911,7 +878,8 @@ mod tests {
     use super::*;
     use crate::testkit::*;
 
-    const WRITTEN_BY_HAND: &str = "roots = [\"~/src\", { path = \"~/Work/client\", nested = true, tag = \"client\" }]\nmax_depth = 4\n";
+    const WRITTEN_BY_HAND: &str =
+        "roots = [\"~/src\", { path = \"~/Work/client\", nested = true, tag = \"client\" }]\nmax_depth = 4\n";
 
     #[test]
     fn no_file_is_the_first_run_and_means_the_defaults() {
@@ -1050,7 +1018,12 @@ mod tests {
         let path = Config::path();
         let mut cfg = Config::default();
         cfg.views = vec![
-            View { name: "behind".into(), attention: true, sort: Some("Unpushed first".into()), ..View::default() },
+            View {
+                name: "behind".into(),
+                attention: true,
+                sort: Some("Unpushed first".into()),
+                ..View::default()
+            },
             View { name: "bare".into(), ..View::default() },
         ];
         cfg.save().unwrap();
@@ -1199,10 +1172,8 @@ mod tests {
     fn fetch_failures_survive_being_written_and_read_back() {
         let _guard = isolate();
         let mut failures = BTreeMap::new();
-        failures.insert(
-            "/b/unreachable".to_string(),
-            "fatal: could not read from remote repository".to_string(),
-        );
+        failures
+            .insert("/b/unreachable".to_string(), "fatal: could not read from remote repository".to_string());
         save_fetch_errors(&failures);
         assert_eq!(load_fetch_errors(), failures, "{}", read(&fetch_errors_path()));
 

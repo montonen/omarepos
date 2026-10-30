@@ -158,12 +158,7 @@ pub fn run_fenced(dir: &Path, args: &[&str], timeout: Duration) -> Result<String
 /// next pass, and left what it had received in `.git/objects/pack` each time,
 /// where git keeps it for two weeks. Silence is the sign of a dead link. Time
 /// taken is not.
-pub fn transfer(
-    dir: &Path,
-    args: &[&str],
-    quiet: Duration,
-    ceiling: Duration,
-) -> Result<String, String> {
+pub fn transfer(dir: &Path, args: &[&str], quiet: Duration, ceiling: Duration) -> Result<String, String> {
     exec(dir, args, Limit::WhileTalking { quiet, ceiling }, true)
 }
 
@@ -479,11 +474,8 @@ fn explain(stderr: &str, stdout: &str) -> String {
     // progress line: read as one line it does not start with "fatal:", and
     // what was shown was forty lines of percentages.
     let ends = ['\n', '\r'];
-    let lines: Vec<&str> = stdout
-        .split(ends)
-        .chain(stderr.split(ends))
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    let lines: Vec<&str> =
+        stdout.split(ends).chain(stderr.split(ends)).filter(|line| !line.trim().is_empty()).collect();
 
     let complaint = lines.iter().position(|line| {
         let lower = line.trim().to_lowercase();
@@ -691,8 +683,7 @@ mod tests {
     // ---- given up on for silence, not for taking long ----------------------
 
     /// Something that takes two seconds and says so five times a second.
-    const BUSY: &str =
-        "i=0; while [ $i -lt 10 ]; do echo 'still going' >&2; sleep 0.2; i=$((i+1)); done";
+    const BUSY: &str = "i=0; while [ $i -lt 10 ]; do echo 'still going' >&2; sleep 0.2; i=$((i+1)); done";
 
     #[test]
     fn a_command_that_keeps_talking_outlasts_the_limit_on_silence() {

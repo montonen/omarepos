@@ -101,11 +101,7 @@ const CONTEXT_AFTER: usize = 150;
 /// at a commit that was not there became "No commits. This repository has no
 /// history yet", and a checked-out branch whose tip was gone became a graph of
 /// the remote's branches with nothing to say that one was missing.
-pub fn build(
-    path: &std::path::Path,
-    limit: usize,
-    target: Option<&str>,
-) -> Result<Graph, String> {
+pub fn build(path: &std::path::Path, limit: usize, target: Option<&str>) -> Result<Graph, String> {
     let said = |err: git2::Error| err.message().to_string();
     let repo = Repository::open(path).map_err(said)?;
     // History is read from the object store wherever the work tree is said to
@@ -128,9 +124,7 @@ pub fn build(
         head.peel_to_commit()
             .map_err(|err| format!("Its newest commit cannot be read: {}", err.message()))?;
     }
-    let head = head_ref
-        .as_ref()
-        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
+    let head = head_ref.as_ref().and_then(|h| h.shorthand().ok().map(|s| s.to_string()));
 
     let mut walk = repo.revwalk().map_err(said)?;
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(said)?;
@@ -152,9 +146,7 @@ pub fn build(
             // the branch it pointed at was deleted. Ordinary, and nothing is
             // missing from the graph for it.
             Err(_) if reference.kind() == Some(git2::ReferenceType::Symbolic) => {}
-            Err(_) => unreadable_refs.push(
-                reference.shorthand().map(str::to_string).unwrap_or(name),
-            ),
+            Err(_) => unreadable_refs.push(reference.shorthand().map(str::to_string).unwrap_or(name)),
         }
     }
     let (working_changes, working_unreadable) = working_tree(&repo, here.is_ok());
@@ -227,20 +219,8 @@ pub fn build(
         rows.push(Row {
             id: oid,
             short_id: oid.to_string().chars().take(7).collect(),
-            summary: commit
-                .summary()
-                .ok()
-                .flatten()
-                .unwrap_or("(no message)")
-                .trim()
-                .to_string(),
-            body: commit
-                .message()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(600)
-                .collect(),
+            summary: commit.summary().ok().flatten().unwrap_or("(no message)").trim().to_string(),
+            body: commit.message().unwrap_or("").trim().chars().take(600).collect(),
             author: author.name().unwrap_or("unknown").to_string(),
             email: author.email().unwrap_or("").to_lowercase(),
             when: commit.time().seconds(),
@@ -253,16 +233,15 @@ pub fn build(
         });
 
         if let Some(wanted) = target
-            && found_at.is_none() && oid.to_string().starts_with(wanted) {
-                found_at = Some(rows.len() - 1);
-            }
+            && found_at.is_none()
+            && oid.to_string().starts_with(wanted)
+        {
+            found_at = Some(rows.len() - 1);
+        }
     }
 
-    let lanes = rows
-        .iter()
-        .map(|r| r.incoming.len().max(r.outgoing.len()).max(r.lane + 1))
-        .max()
-        .unwrap_or(0);
+    let lanes =
+        rows.iter().map(|r| r.incoming.len().max(r.outgoing.len()).max(r.lane + 1)).max().unwrap_or(0);
 
     let (_, tip) = head_of(&repo);
 
@@ -318,10 +297,7 @@ pub fn spawn_glance(path: std::path::PathBuf) -> async_channel::Receiver<Glance>
 /// What HEAD is called, and the commit it is at.
 fn head_of(repo: &Repository) -> (Option<String>, Option<String>) {
     let Ok(head) = repo.head() else { return (None, None) };
-    (
-        head.shorthand().ok().map(str::to_string),
-        head.target().map(|oid| oid.to_string()),
-    )
+    (head.shorthand().ok().map(str::to_string), head.target().map(|oid| oid.to_string()))
 }
 
 /// Entries in the working tree, untracked included but never ignored, and why
@@ -453,21 +429,17 @@ fn ref_labels(repo: &Repository) -> HashMap<Oid, Vec<RefLabel>> {
         }
         let Ok(commit) = reference.peel_to_commit() else { continue };
         let is_current = kind == RefKind::LocalBranch && current.as_deref() == Some(name.as_str());
-        map.entry(commit.id()).or_default().push(RefLabel {
-            name,
-            kind,
-            current: is_current,
-        });
+        map.entry(commit.id()).or_default().push(RefLabel { name, kind, current: is_current });
     }
 
     // A detached HEAD gets its own marker, since no branch names it.
     if repo.head_detached().unwrap_or(false)
-        && let Ok(commit) = repo.head().and_then(|h| h.peel_to_commit()) {
-            map.entry(commit.id()).or_default().insert(
-                0,
-                RefLabel { name: "HEAD".into(), kind: RefKind::Head, current: true },
-            );
-        }
+        && let Ok(commit) = repo.head().and_then(|h| h.peel_to_commit())
+    {
+        map.entry(commit.id())
+            .or_default()
+            .insert(0, RefLabel { name: "HEAD".into(), kind: RefKind::Head, current: true });
+    }
 
     for labels in map.values_mut() {
         labels.sort_by_key(|l| match l.kind {
@@ -697,14 +669,8 @@ mod tests {
     fn a_merged_branch_meets_the_trunk_in_the_trunks_lane() {
         // 1 merges 20 into main; the branch is 20 and 21, cut from 3. Its
         // first commit is walked before main's 2, so it asks for 3 first.
-        let commits = [
-            (1, vec![2, 20]),
-            (20, vec![21]),
-            (21, vec![3]),
-            (2, vec![3]),
-            (3, vec![4]),
-            (4, vec![]),
-        ];
+        let commits =
+            [(1, vec![2, 20]), (20, vec![21]), (21, vec![3]), (2, vec![3]), (3, vec![4]), (4, vec![])];
         let (lanes, widest) = lay_out(&commits);
         assert_eq!(lanes, [0, 1, 1, 0, 0, 0]);
         assert_eq!(widest, 2);

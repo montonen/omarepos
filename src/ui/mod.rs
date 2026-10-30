@@ -58,12 +58,7 @@ pub fn say(overlay: &adw::ToastOverlay, text: &str) {
         let whole = text.to_string();
         toast.connect_button_clicked(move |_| {
             let dialog = adw::AlertDialog::new(Some("What git said"), None);
-            let body = gtk::Label::builder()
-                .label(&whole)
-                .selectable(true)
-                .wrap(true)
-                .xalign(0.0)
-                .build();
+            let body = gtk::Label::builder().label(&whole).selectable(true).wrap(true).xalign(0.0).build();
             body.add_css_class("monospace");
             let scroller = gtk::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk::PolicyType::Never)
@@ -141,10 +136,8 @@ impl OncePerPress {
     /// Every press moves the mark, taken or not, so a key held for a minute is
     /// still one press at the end of it.
     fn first_at(&self, key: gtk::gdk::Key, now: std::time::Instant) -> bool {
-        let held = self
-            .last
-            .get()
-            .is_some_and(|(last, when)| last == key && now.duration_since(when) < SAME_PRESS);
+        let held =
+            self.last.get().is_some_and(|(last, when)| last == key && now.duration_since(when) < SAME_PRESS);
         self.last.set(Some((key, now)));
         !held
     }
@@ -179,11 +172,7 @@ pub fn relative_time(when: i64) -> String {
         d if d < YEAR => (d / MONTH, "month"),
         d => (d / YEAR, "year"),
     };
-    if n == 1 {
-        format!("1 {unit} ago")
-    } else {
-        format!("{n} {unit}s ago")
-    }
+    if n == 1 { format!("1 {unit} ago") } else { format!("{n} {unit}s ago") }
 }
 
 /// Open a terminal in `dir`, running whatever the config wants started there
@@ -218,10 +207,8 @@ pub fn open_editor(cfg: &Config, dir: &Path) -> Result<(), String> {
 /// buffer, so those are started bare, in the repository.
 fn editor_script(editor: &str) -> String {
     let program = editor.split_whitespace().next().unwrap_or_default();
-    let name = Path::new(program)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let name =
+        Path::new(program).file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
     if matches!(name.as_str(), "nano" | "pico" | "micro" | "ed") {
         editor.to_string()
     } else {
@@ -265,10 +252,7 @@ fn run_in_terminal(term: &str, dir: &Path, script: &str) -> Result<(), String> {
 
 pub fn open_folder(dir: &Path) {
     let uri = format!("file://{}", dir.display());
-    if let Err(err) = gtk::gio::AppInfo::launch_default_for_uri(
-        &uri,
-        None::<&gtk::gio::AppLaunchContext>,
-    ) {
+    if let Err(err) = gtk::gio::AppInfo::launch_default_for_uri(&uri, None::<&gtk::gio::AppLaunchContext>) {
         note!("omarepos: could not open {uri}: {err}");
     }
 }
@@ -300,12 +284,8 @@ pub fn open_web(page: &str) -> Result<(), String> {
 /// as a zombie from the moment it is closed until omarepos is.
 fn spawn(cmd: &mut Command, what: &str) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    let result = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn();
+    let result =
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn();
     match result {
         Ok(mut child) => {
             std::thread::spawn(move || {
@@ -313,20 +293,15 @@ fn spawn(cmd: &mut Command, what: &str) -> Result<(), String> {
             });
             Ok(())
         }
-        Err(err) => Err(format!(
-            "Could not start {what}: {err}. Set a terminal in Settings (Ctrl+,)."
-        )),
+        Err(err) => Err(format!("Could not start {what}: {err}. Set a terminal in Settings (Ctrl+,).")),
     }
 }
 
 /// A small filled circle in an arbitrary colour. GTK4 has no inline styles, so
 /// per-language colours are drawn rather than set through CSS.
 pub fn color_dot(color: &str) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_width(8)
-        .content_height(8)
-        .valign(gtk::Align::Center)
-        .build();
+    let area =
+        gtk::DrawingArea::builder().content_width(8).content_height(8).valign(gtk::Align::Center).build();
     let (r, g, b) = crate::theme::Palette::rgb(color);
     area.set_draw_func(move |_, cr, width, height| {
         let radius = (width.min(height) as f64) / 2.0;
@@ -336,7 +311,6 @@ pub fn color_dot(color: &str) -> gtk::DrawingArea {
     });
     area
 }
-
 
 /// Is this an unmodified keypress?
 ///
@@ -355,17 +329,15 @@ pub fn unmodified(state: gtk::gdk::ModifierType) -> bool {
 /// A fixed accent ramp for graph lanes and author colours. Deliberately not
 /// taken from the Omarchy palette: these have to stay distinguishable from each
 /// other in every theme, which a theme's own handful of hues cannot promise.
-const ACCENTS: [&str; 8] = [
-    "#7e9cd8", "#98bb6c", "#dca561", "#e46876", "#957fb8", "#7aa89f", "#d27e99", "#c0a36e",
-];
+const ACCENTS: [&str; 8] =
+    ["#7e9cd8", "#98bb6c", "#dca561", "#e46876", "#957fb8", "#7aa89f", "#d27e99", "#c0a36e"];
 
 /// The same ramp for a light background. The one above is pastel, tuned for
 /// dark themes, and was used on light ones unchanged: six or seven of its
 /// eight colours sat under 3:1 against the page, as lines 1.6 px wide. These
 /// measure 4.49:1 or better on the five stock light backgrounds.
-const ACCENTS_ON_LIGHT: [&str; 8] = [
-    "#3b5fb0", "#4f7a1f", "#9a5b00", "#b3263a", "#6b46a8", "#1f7a6d", "#a8386a", "#5c6470",
-];
+const ACCENTS_ON_LIGHT: [&str; 8] =
+    ["#3b5fb0", "#4f7a1f", "#9a5b00", "#b3263a", "#6b46a8", "#1f7a6d", "#a8386a", "#5c6470"];
 
 /// Which of the two ramps is in use. Set when the theme is applied, and read
 /// where a colour is drawn: asking the palette there would read two files per
@@ -378,11 +350,7 @@ pub fn accents_for(dark: bool) {
 }
 
 fn accents() -> &'static [&'static str; 8] {
-    if ON_LIGHT.load(std::sync::atomic::Ordering::Relaxed) {
-        &ACCENTS_ON_LIGHT
-    } else {
-        &ACCENTS
-    }
+    if ON_LIGHT.load(std::sync::atomic::Ordering::Relaxed) { &ACCENTS_ON_LIGHT } else { &ACCENTS }
 }
 
 /// The first colour of the ramp, for a mark that is not one of several.
@@ -532,7 +500,8 @@ fn hour_window(hours: usize) -> crate::stats::Window {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let mut window = crate::stats::Window { day_starts: Vec::new(), day_labels: Vec::new(), day_titles: Vec::new() };
+    let mut window =
+        crate::stats::Window { day_starts: Vec::new(), day_labels: Vec::new(), day_titles: Vec::new() };
     for back in (1..=columns).rev() {
         let start = now - back * DAY;
         window.day_starts.push(start);
@@ -558,29 +527,16 @@ pub fn day_window(days: usize) -> crate::stats::Window {
     let mut day_titles = Vec::with_capacity(days);
 
     if let Ok(now) = gtk::glib::DateTime::now_local()
-        && let Ok(midnight) = gtk::glib::DateTime::from_local(
-            now.year(),
-            now.month(),
-            now.day_of_month(),
-            0,
-            0,
-            0.0,
-        ) {
-            for back in (0..days as i32).rev() {
-                let Ok(day) = midnight.add_days(-back) else { continue };
-                day_starts.push(day.to_unix());
-                day_labels.push(
-                    day.format("%a")
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                );
-                day_titles.push(
-                    day.format("%a %-d %b")
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                );
-            }
+        && let Ok(midnight) =
+            gtk::glib::DateTime::from_local(now.year(), now.month(), now.day_of_month(), 0, 0, 0.0)
+    {
+        for back in (0..days as i32).rev() {
+            let Ok(day) = midnight.add_days(-back) else { continue };
+            day_starts.push(day.to_unix());
+            day_labels.push(day.format("%a").map(|s| s.to_string()).unwrap_or_default());
+            day_titles.push(day.format("%a %-d %b").map(|s| s.to_string()).unwrap_or_default());
         }
+    }
 
     if day_starts.is_empty() {
         // No local timezone to be had; fall back to rolling 24-hour buckets.
@@ -660,12 +616,18 @@ mod tests {
     /// up to a month, a week up to three months, and a month beyond.
     #[test]
     fn a_period_is_drawn_by_the_day_the_week_or_the_month() {
-        for (days, most, fewest, longest) in [(7, 7, 7, 1), (30, 30, 30, 1), (90, 15, 13, 7), (365, 13, 12, 31)] {
+        for (days, most, fewest, longest) in
+            [(7, 7, 7, 1), (30, 30, 30, 1), (90, 15, 13, 7), (365, 13, 12, 31)]
+        {
             let buckets = buckets(&day_window(days));
             let mut next = 0;
             for bucket in &buckets {
                 assert_eq!(bucket.days.start, next, "{days} days: a gap or an overlap at {next}");
-                assert!(!bucket.days.is_empty() && bucket.days.len() <= longest, "{days} days: {:?}", bucket.days);
+                assert!(
+                    !bucket.days.is_empty() && bucket.days.len() <= longest,
+                    "{days} days: {:?}",
+                    bucket.days
+                );
                 assert!(!bucket.label.is_empty() && !bucket.title.is_empty());
                 next = bucket.days.end;
             }
@@ -690,7 +652,8 @@ mod tests {
     /// worth, and nothing written in the last moment is left out.
     #[test]
     fn the_last_hours_are_columns_of_twenty_four_ending_now() {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let window = Span::Hours(48).window();
         assert_eq!(window.days(), 2);
         let starts = &window.day_starts;

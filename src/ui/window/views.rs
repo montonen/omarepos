@@ -46,7 +46,9 @@ impl Ui {
         };
         // A sort the list no longer has leaves the sort as it is, rather
         // than putting the grid in some other order and calling it the view.
-        if let Some(at) = view.sort.as_deref().and_then(|sort| SORT_LABELS.iter().position(|label| *label == sort)) {
+        if let Some(at) =
+            view.sort.as_deref().and_then(|sort| SORT_LABELS.iter().position(|label| *label == sort))
+        {
             self.sort.set_selected(at as u32);
         }
         *self.tag_filter.borrow_mut() = view.tags.iter().map(|tag| tag.to_lowercase()).collect();
@@ -189,7 +191,9 @@ impl Ui {
     fn ask_view_name(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
             Some("Save this view"),
-            Some("The filter, the tags, the warning toggle and the sort, under a name. A view of the same name is replaced."),
+            Some(
+                "The filter, the tags, the warning toggle and the sort, under a name. A view of the same name is replaced.",
+            ),
         );
         let entry = gtk::Entry::builder().placeholder_text("Name").activates_default(true).build();
         dialog.set_extra_child(Some(&entry));

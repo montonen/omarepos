@@ -123,11 +123,8 @@ fn main() -> glib::ExitCode {
     let alone = cfg.one_off();
     #[cfg(debug_assertions)]
     let alone = alone || ui::debug::driven();
-    let flags = if alone {
-        gtk::gio::ApplicationFlags::NON_UNIQUE
-    } else {
-        gtk::gio::ApplicationFlags::empty()
-    };
+    let flags =
+        if alone { gtk::gio::ApplicationFlags::NON_UNIQUE } else { gtk::gio::ApplicationFlags::empty() };
     let cfg = Rc::new(RefCell::new(cfg));
 
     let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
@@ -203,6 +200,5 @@ fn out(text: &str) {
 /// Whether the file this process was started from has since been replaced,
 /// which is what installing a new build does. The kernel marks the link.
 fn replaced_on_disk() -> bool {
-    std::fs::read_link("/proc/self/exe")
-        .is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)"))
+    std::fs::read_link("/proc/self/exe").is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)"))
 }

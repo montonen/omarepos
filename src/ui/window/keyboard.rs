@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gtk::glib;
 use adw::prelude::*;
+use gtk::glib;
 
 use super::Ui;
 
@@ -41,9 +41,7 @@ impl Ui {
 
     /// Whether a key went to the grid within the last moment.
     fn key_just_pressed(&self) -> bool {
-        self.last_key
-            .get()
-            .is_some_and(|when| when.elapsed() < std::time::Duration::from_millis(300))
+        self.last_key.get().is_some_and(|when| when.elapsed() < std::time::Duration::from_millis(300))
     }
 
     /// The pointer has been moved, or the wheel turned: it is what chooses a
@@ -90,19 +88,14 @@ impl Ui {
                 // slot it kept for it and leaves the card pointing there, so
                 // the answer is read out of freed memory. That crashed the
                 // app twice in an afternoon.
-                let in_grid = child
-                    .parent()
-                    .is_some_and(|parent| &parent == self.flow.upcast_ref::<gtk::Widget>());
+                let in_grid =
+                    child.parent().is_some_and(|parent| &parent == self.flow.upcast_ref::<gtk::Widget>());
                 if !in_grid {
                     return None;
                 }
                 let index = child.index();
                 if index >= 0 {
-                    return self
-                        .shown
-                        .borrow()
-                        .get(index as usize)
-                        .map(|repo| repo.path.clone());
+                    return self.shown.borrow().get(index as usize).map(|repo| repo.path.clone());
                 }
             }
             widget = current.parent();
@@ -126,9 +119,11 @@ impl Ui {
         if in_grid || typing {
             return;
         }
-        let index = self.opened.borrow().as_ref().and_then(|opened| {
-            self.shown.borrow().iter().position(|repo| &repo.path == opened)
-        });
+        let index = self
+            .opened
+            .borrow()
+            .as_ref()
+            .and_then(|opened| self.shown.borrow().iter().position(|repo| &repo.path == opened));
         match index.and_then(|index| self.flow.child_at_index(index as i32)) {
             // Through the box, as in `rebuild`, so its cursor comes too.
             Some(child) => {
@@ -244,9 +239,7 @@ impl Ui {
         }
         let free = match self.keyboard() {
             None => true,
-            Some(had) => {
-                !had.is_mapped() || (had.is_ancestor(&self.search) && self.search.text().is_empty())
-            }
+            Some(had) => !had.is_mapped() || (had.is_ancestor(&self.search) && self.search.text().is_empty()),
         };
         if free {
             self.empty_action.grab_focus();

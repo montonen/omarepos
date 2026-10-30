@@ -220,7 +220,10 @@ fn no_login_is_printed() {
     let repo = &printed["repos"][0];
     assert_eq!(repo["remote"], "example.invalid/x");
     assert!(repo["web"].is_null(), "{repo:#}");
-    assert_eq!(repo["fetch_failed"], "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected");
+    assert_eq!(
+        repo["fetch_failed"],
+        "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected"
+    );
 }
 
 #[test]

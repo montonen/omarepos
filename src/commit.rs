@@ -233,9 +233,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     // does, and the commit's own header goes on naming them.
     let boundary = commit.parent_count() == 0
         && repo.is_shallow()
-        && commit
-            .raw_header()
-            .is_ok_and(|header| header.lines().any(|line| line.starts_with("parent ")));
+        && commit.raw_header().is_ok_and(|header| header.lines().any(|line| line.starts_with("parent ")));
 
     let mut opts = DiffOptions::new();
     opts.include_typechange(true).context_lines(0);
@@ -267,18 +265,14 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         if files.len() >= MAX_FILES {
             continue;
         }
-        let path_of = |f: git2::DiffFile<'_>| {
-            f.path()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
+        let path_of =
+            |f: git2::DiffFile<'_>| f.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
         let new_path = path_of(delta.new_file());
         let old_path = path_of(delta.old_file());
         let change = Change::from(delta.status());
         files.push(FileChange {
             path: if new_path.is_empty() { old_path.clone() } else { new_path },
-            from: (matches!(change, Change::Renamed | Change::Copied) && old_path != *"")
-                .then_some(old_path),
+            from: (matches!(change, Change::Renamed | Change::Copied) && old_path != *"").then_some(old_path),
             change,
             insertions: adds,
             deletions: dels,
@@ -291,29 +285,21 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
     Ok(Detail {
         short_id: oid.to_string().chars().take(8).collect(),
         id: oid.to_string(),
-        summary: commit
-            .summary()
-            .ok()
-            .flatten()
-            .unwrap_or("(no message)")
-            .trim()
-            .to_string(),
+        summary: commit.summary().ok().flatten().unwrap_or("(no message)").trim().to_string(),
         body: commit
             .message()
             .unwrap_or("")
-            .trim().split_once('\n').map(|x| x.1)
+            .trim()
+            .split_once('\n')
+            .map(|x| x.1)
             .unwrap_or("")
             .trim()
             .to_string(),
         email: author.email().unwrap_or("").to_string(),
         author: author_name.clone(),
         when: commit.time().seconds(),
-        committer: (!committer_name.is_empty() && committer_name != author_name)
-            .then_some(committer_name),
-        parents: commit
-            .parent_ids()
-            .map(|p| p.to_string().chars().take(8).collect())
-            .collect(),
+        committer: (!committer_name.is_empty() && committer_name != author_name).then_some(committer_name),
+        parents: commit.parent_ids().map(|p| p.to_string().chars().take(8).collect()).collect(),
         merge: commit.parent_count() > 1,
         files,
         total_files,
@@ -339,11 +325,7 @@ fn parent_tree<'repo>(
     if commit.parent_count() == 0 {
         return Ok(None);
     }
-    commit
-        .parent(0)
-        .and_then(|parent| parent.tree())
-        .map(Some)
-        .map_err(|err| read_error(repo, &err))
+    commit.parent(0).and_then(|parent| parent.tree()).map(Some).map_err(|err| read_error(repo, &err))
 }
 
 /// The tree HEAD stands for, or nothing when nothing has been committed yet:
@@ -503,9 +485,8 @@ fn load_working(path: &Path, cancel: &Cancel) -> Result<Detail, String> {
         // repository's files, and is not listed as one.
         .ignore_submodules(true)
         .context_lines(0);
-    let diff = repo
-        .diff_index_to_workdir(Some(&index), Some(&mut work_opts))
-        .map_err(|e| read_error(&repo, &e))?;
+    let diff =
+        repo.diff_index_to_workdir(Some(&index), Some(&mut work_opts)).map_err(|e| read_error(&repo, &e))?;
     collect(&diff, Group::Unstaged, cancel, &mut files, &mut insertions, &mut deletions);
 
     let total_files = files.len();
@@ -571,8 +552,7 @@ fn caveats(repo: &Repository, index: &git2::Index, files: &[FileChange]) -> Vec<
     let outside = unstaged(Change::Deleted)
         .filter(|file| {
             index.get_path(Path::new(&file.path), 0).is_some_and(|entry| {
-                git2::IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended)
-                    .is_skip_worktree()
+                git2::IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended).is_skip_worktree()
             })
         })
         .count();
@@ -709,11 +689,8 @@ fn collect(
         *insertions += adds;
         *deletions += dels;
 
-        let path_of = |f: git2::DiffFile<'_>| {
-            f.path()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        };
+        let path_of =
+            |f: git2::DiffFile<'_>| f.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
         let new_path = path_of(delta.new_file());
         let old_path = path_of(delta.old_file());
         let change = Change::from(delta.status());
@@ -794,11 +771,7 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
 
     let head_tree = head_tree(&repo)?;
     let mut staged_opts = DiffOptions::new();
-    staged_opts
-        .context_lines(3)
-        .include_typechange(true)
-        .pathspec(file)
-        .disable_pathspec_match(true);
+    staged_opts.context_lines(3).include_typechange(true).pathspec(file).disable_pathspec_match(true);
     if staged {
         let diff = repo
             .diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut staged_opts))
@@ -806,9 +779,8 @@ fn patch_working(path: &Path, file: &str, side: Option<Group>) -> Result<FileDif
         append_patch(&repo, &diff, None, &mut out)?;
     }
     if unstaged {
-        let diff = repo
-            .diff_index_to_workdir(Some(&index), Some(&mut opts))
-            .map_err(|e| read_error(&repo, &e))?;
+        let diff =
+            repo.diff_index_to_workdir(Some(&index), Some(&mut opts)).map_err(|e| read_error(&repo, &e))?;
         append_patch(&repo, &diff, None, &mut out)?;
     }
     Ok(out)
@@ -894,11 +866,7 @@ pub enum Node {
     Dir { name: String, depth: usize },
     /// `file.path` stays the full path, since that is what a diff needs;
     /// `display` is the part worth putting on screen under its directory.
-    File {
-        file: FileChange,
-        display: String,
-        depth: usize,
-    },
+    File { file: FileChange, display: String, depth: usize },
 }
 
 /// Arrange changed files into an indented tree, flattened for rendering.
@@ -928,19 +896,11 @@ pub fn tree(files: &[FileChange]) -> Vec<Node> {
         for (name, child) in &dir.dirs {
             // Collapse a chain of directories that each hold only one thing.
             if child.files.is_empty() && child.dirs.len() == 1 {
-                let joined = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}/{name}")
-                };
+                let joined = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
                 walk(child, joined, depth, out);
                 continue;
             }
-            let label = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
+            let label = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
             out.push(Node::Dir { name: label, depth });
             walk(child, String::new(), depth + 1, out);
         }
@@ -1191,7 +1151,10 @@ mod tests {
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-q", "-m", "a logo"]);
         let head = git(&dir, &["rev-parse", "HEAD"]);
-        assert!(git(&dir, &["show", "--numstat", "--format="]).contains("-\t-\tlogo.png"), "git calls it binary");
+        assert!(
+            git(&dir, &["show", "--numstat", "--format="]).contains("-\t-\tlogo.png"),
+            "git calls it binary"
+        );
 
         let listed = load(&dir, &head, &Cancel::default()).unwrap();
         let rows: Vec<(&str, bool)> = listed.files.iter().map(|f| (f.path.as_str(), f.binary)).collect();
@@ -1379,7 +1342,8 @@ mod tests {
         git(&dir, &["init", "-q", "-b", "main"]);
         commit_file(&dir, "secret.txt", "one\n", "first");
         write(&dir.join("secret.txt"), "one\ntwo, and longer\n");
-        let locked = |mode| std::fs::set_permissions(dir.join("secret.txt"), std::fs::Permissions::from_mode(mode));
+        let locked =
+            |mode| std::fs::set_permissions(dir.join("secret.txt"), std::fs::Permissions::from_mode(mode));
         locked(0o000).unwrap();
         if std::fs::read(dir.join("secret.txt")).is_ok() {
             // Run as root, nothing is unreadable and there is nothing to test.
@@ -1441,8 +1405,7 @@ mod tests {
         );
 
         let listed = load_working(&dir, &Cancel::default()).unwrap();
-        let rows: Vec<(&str, Group)> =
-            listed.files.iter().map(|f| (f.path.as_str(), f.group)).collect();
+        let rows: Vec<(&str, Group)> = listed.files.iter().map(|f| (f.path.as_str(), f.group)).collect();
         assert_eq!(rows, vec![("f.txt", Group::Conflicted)]);
     }
 

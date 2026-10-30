@@ -21,9 +21,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 /// Where fixtures live: under `target/`, which is ignored, on disk, and gone
 /// with the next `cargo clean`.
 pub fn base() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("test-fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("test-fixtures")
 }
 
 /// Cut the test off from the real machine: a fake home, fake XDG directories,
@@ -114,11 +112,7 @@ pub fn try_git(dir: &Path, args: &[&str]) -> (bool, String) {
         .expect("git runs");
     (
         out.status.success(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ),
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
     )
 }
 

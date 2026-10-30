@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gtk::gdk;
 use adw::prelude::*;
+use gtk::gdk;
 
 use crate::ui;
 
@@ -28,9 +28,7 @@ impl Ui {
     /// by it emptied the grid.
     pub(super) fn grid_tags(&self) -> Vec<(String, usize)> {
         let repos = self.repos.borrow();
-        self.meta
-            .borrow()
-            .tags_among(repos.iter().map(|repo| repo.path.as_path()))
+        self.meta.borrow().tags_among(repos.iter().map(|repo| repo.path.as_path()))
     }
 
     /// Keep the tag chrome in step with the tags that exist and the filter in
@@ -40,11 +38,8 @@ impl Ui {
     pub(super) fn sync_tag_controls(self: &Rc<Self>) {
         let tags = self.grid_tags();
         let quick = !tags.is_empty() && tags.len() <= QUICK_TAGS;
-        let signature = tags
-            .iter()
-            .map(|(tag, count)| format!("{tag}\u{1f}{count}"))
-            .collect::<Vec<_>>()
-            .join("\u{1e}");
+        let signature =
+            tags.iter().map(|(tag, count)| format!("{tag}\u{1f}{count}")).collect::<Vec<_>>().join("\u{1e}");
 
         if signature != *self.tag_signature.borrow() {
             *self.tag_signature.borrow_mut() = signature;
@@ -74,12 +69,11 @@ impl Ui {
             (false, false, 0) => "Tags".to_string(),
             (false, false, n) => format!("Tags ({n})"),
         });
-        self.tags_button
-            .set_tooltip_text(Some(if buttons {
-                "Tag the selected repos, or filter by untagged"
-            } else {
-                "Filter by tag, or tag the selected repos"
-            }));
+        self.tags_button.set_tooltip_text(Some(if buttons {
+            "Tag the selected repos, or filter by untagged"
+        } else {
+            "Filter by tag, or tag the selected repos"
+        }));
     }
 
     /// Whether the header has a button for each tag at the moment: there are
@@ -147,21 +141,15 @@ impl Ui {
                 if ui.tag_syncing.get() {
                     return;
                 }
-                let (chosen, untagged) = after_tag_click(
-                    &ui.tag_filter.borrow(),
-                    ui.untagged_only.get(),
-                    &key,
-                    ctrl_held(button),
-                );
+                let (chosen, untagged) =
+                    after_tag_click(&ui.tag_filter.borrow(), ui.untagged_only.get(), &key, ctrl_held(button));
                 *ui.tag_filter.borrow_mut() = chosen;
                 ui.untagged_only.set(untagged);
                 ui.rebuild();
             });
 
             self.tag_quick.append(&button);
-            self.tag_quick_buttons
-                .borrow_mut()
-                .push((tag.clone(), button));
+            self.tag_quick_buttons.borrow_mut().push((tag.clone(), button));
         }
     }
 
@@ -177,10 +165,8 @@ impl Ui {
             // here would be two controls for one setting. Only while they
             // are showing, though: on a window too narrow for them this
             // menu was all there was, and it did not list a single tag.
-            let untagged = gtk::CheckButton::builder()
-                .label("Untagged only")
-                .active(self.untagged_only.get())
-                .build();
+            let untagged =
+                gtk::CheckButton::builder().label("Untagged only").active(self.untagged_only.get()).build();
             let ui = Rc::clone(self);
             untagged.connect_toggled(move |check| {
                 ui.untagged_only.set(check.is_active());
@@ -224,10 +210,8 @@ impl Ui {
                 .build();
             body.append(&scroller);
 
-            let untagged = gtk::CheckButton::builder()
-                .label("Untagged only")
-                .active(self.untagged_only.get())
-                .build();
+            let untagged =
+                gtk::CheckButton::builder().label("Untagged only").active(self.untagged_only.get()).build();
             let ui = Rc::clone(self);
             untagged.connect_toggled(move |check| {
                 ui.untagged_only.set(check.is_active());

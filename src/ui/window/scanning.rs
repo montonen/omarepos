@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use gtk::glib;
 use adw::prelude::*;
+use gtk::glib;
 
 use crate::git::RepoInfo;
 use crate::scan::{self, Event};
@@ -178,10 +178,9 @@ impl Ui {
                                 .map_or(0, |since| since.as_secs() as i64);
                             crate::snapshot::save(scope, taken, ui.repos.borrow().clone());
                         }
-                        if seeded_any
-                            && let Err(err) = ui.meta.borrow().save() {
-                                ui::complain(&ui.toasts, &format!("The tags this scan gave were {err}"));
-                            }
+                        if seeded_any && let Err(err) = ui.meta.borrow().save() {
+                            ui::complain(&ui.toasts, &format!("The tags this scan gave were {err}"));
+                        }
                         ui.scanning.set(false);
                         ui.spinner.stop();
                         ui.spinner.set_visible(false);
@@ -197,10 +196,9 @@ impl Ui {
                         // to be real before it can take anything.
                         {
                             let ui = Rc::clone(&ui);
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(120),
-                                move || ui.focus_grid(false),
-                            );
+                            glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+                                ui.focus_grid(false)
+                            });
                         }
                         ui.refresh_if_overdue();
                         break;

@@ -9,8 +9,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gtk::glib;
 use adw::prelude::*;
+use gtk::glib;
 
 use crate::refresh::{self, Summary};
 use crate::ui;
@@ -23,9 +23,7 @@ impl Ui {
     pub(super) fn schedule_refresh(self: &Rc<Self>) {
         let settings = self.cfg.borrow().refresh.clone();
         let armed = self.refresh_armed.get();
-        if settings.every_minutes == armed
-            && (armed == 0 || self.refresh_source.borrow().is_some())
-        {
+        if settings.every_minutes == armed && (armed == 0 || self.refresh_source.borrow().is_some()) {
             // Same interval, so leave the running countdown where it is.
             self.update_status();
             return;
@@ -55,10 +53,7 @@ impl Ui {
     /// Whether the user has seen this repository. Everything counts as seen
     /// until the first scan has recorded what was already on the grid.
     pub(super) fn is_known(&self, path: &Path) -> bool {
-        self.known
-            .borrow()
-            .as_ref()
-            .is_none_or(|known| known.contains(&path.display().to_string()))
+        self.known.borrow().as_ref().is_none_or(|known| known.contains(&path.display().to_string()))
     }
 
     /// The user has opened this repository, or asked for it to be fetched.
@@ -95,12 +90,8 @@ impl Ui {
         let mut known = self.known.borrow_mut();
         match known.as_mut() {
             None => {
-                let found: BTreeSet<String> = self
-                    .repos
-                    .borrow()
-                    .iter()
-                    .map(|repo| repo.path.display().to_string())
-                    .collect();
+                let found: BTreeSet<String> =
+                    self.repos.borrow().iter().map(|repo| repo.path.display().to_string()).collect();
                 crate::config::save_known_repos(&found);
                 *known = Some(found);
             }
@@ -187,10 +178,7 @@ impl Ui {
             .filter(|repo| repo.error.is_none())
             .filter(|repo| {
                 wanted.is_empty()
-                    || meta
-                        .tags_for(&repo.path)
-                        .iter()
-                        .any(|tag| wanted.contains(&tag.to_lowercase()))
+                    || meta.tags_for(&repo.path).iter().any(|tag| wanted.contains(&tag.to_lowercase()))
             })
             .map(|repo| repo.path.clone())
             .collect()
@@ -211,9 +199,7 @@ impl Ui {
         let due = match self.last_refresh.get() {
             // Saturating: the stamp is read from a file, and a file can say
             // anything.
-            Some(last) => {
-                now_seconds().saturating_sub(last) >= settings.interval().as_secs() as i64
-            }
+            Some(last) => now_seconds().saturating_sub(last) >= settings.interval().as_secs() as i64,
             None => true,
         };
         if due {
@@ -226,8 +212,7 @@ impl Ui {
     pub(super) fn run_refresh(self: &Rc<Self>, manual: bool) {
         if self.refreshing.get() || self.scanning.get() {
             if manual {
-                self.toasts
-                    .add_toast(ui::toast("Already busy — try again in a moment"));
+                self.toasts.add_toast(ui::toast("Already busy — try again in a moment"));
             }
             return;
         }
@@ -240,8 +225,7 @@ impl Ui {
         }
 
         // A pass across the fleet enters only repositories the user has seen.
-        let (repos, unseen) =
-            crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref());
+        let (repos, unseen) = crate::config::only_known(self.refresh_scope(), self.known.borrow().as_ref());
         if repos.is_empty() {
             if manual {
                 let only = settings
@@ -276,9 +260,7 @@ impl Ui {
             repos
                 .into_iter()
                 .filter(|path| {
-                    !errors
-                        .get(&path.display().to_string())
-                        .is_some_and(|err| refused_by_remote(err))
+                    !errors.get(&path.display().to_string()).is_some_and(|err| refused_by_remote(err))
                 })
                 .collect()
         };
@@ -351,16 +333,13 @@ impl Ui {
                         // A graph page open on this repository draws what the
                         // pass has just moved: the remote's branches, and how
                         // far behind them HEAD is.
-                        if report.fetched && !matches!(report.outcome, refresh::Outcome::UpToDate)
-                        {
+                        if report.fetched && !matches!(report.outcome, refresh::Outcome::UpToDate) {
                             ui.reload_graph_pages(&report.path);
                         }
                         match &report.outcome {
-                            refresh::Outcome::Failed(err) => note!(
-                                "omarepos: {} failed: {err} ({})",
-                                report.name,
-                                report.path.display()
-                            ),
+                            refresh::Outcome::Failed(err) => {
+                                note!("omarepos: {} failed: {err} ({})", report.name, report.path.display())
+                            }
                             refresh::Outcome::Skipped(skip) => note!(
                                 "omarepos: {} left alone: {} ({})",
                                 report.name,
@@ -420,8 +399,7 @@ impl Ui {
         done: Option<Rc<dyn Fn(bool)>>,
     ) {
         if self.refreshing.get() || self.scanning.get() {
-            self.toasts
-                .add_toast(ui::toast("Already busy: a scan or a fetch is under way"));
+            self.toasts.add_toast(ui::toast("Already busy: a scan or a fetch is under way"));
             if let Some(done) = done {
                 done(false);
             }

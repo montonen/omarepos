@@ -64,9 +64,8 @@ pub struct Meta {
 }
 
 pub fn path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"));
+    let base =
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".config"));
     base.join("omarepos/repos.toml")
 }
 
@@ -101,11 +100,7 @@ pub fn normalize(tags: impl IntoIterator<Item = String>) -> Vec<String> {
 
 /// Split a comma- or space-separated list as typed into a tag editor.
 pub fn parse_list(raw: &str) -> Vec<String> {
-    normalize(
-        raw.split([',', '\n'])
-            .flat_map(|part| part.split_whitespace())
-            .map(str::to_string),
-    )
+    normalize(raw.split([',', '\n']).flat_map(|part| part.split_whitespace()).map(str::to_string))
 }
 
 /// Split what a tag editor holds when it is saved. As `parse_list`, except
@@ -145,9 +140,10 @@ pub fn is_one_tag(tag: &str) -> bool {
 fn spellings(dir: &Path) -> Vec<PathBuf> {
     let mut both = vec![dir.to_path_buf()];
     if let Ok(real) = dir.canonicalize()
-        && real != dir {
-            both.push(real);
-        }
+        && real != dir
+    {
+        both.push(real);
+    }
     both
 }
 
@@ -222,10 +218,7 @@ impl Meta {
     }
 
     pub fn tags_for(&self, repo: &Path) -> &[String] {
-        self.repos
-            .get(&Self::key(repo))
-            .map(|m| m.tags.as_slice())
-            .unwrap_or(&[])
+        self.repos.get(&Self::key(repo)).map(|m| m.tags.as_slice()).unwrap_or(&[])
     }
 
     pub fn set_tags(&mut self, repo: &Path, tags: Vec<String>) {
@@ -295,11 +288,7 @@ impl Meta {
     pub fn apply_root_tag(&mut self, repo: &Path, root: &str, tag: Option<&str>) -> bool {
         let tag = tag.map(str::trim).filter(|t| !t.is_empty());
         let key = Self::key(repo);
-        let previous = self
-            .repos
-            .get(&key)
-            .and_then(|meta| meta.seeded_by.get(root))
-            .cloned();
+        let previous = self.repos.get(&key).and_then(|meta| meta.seeded_by.get(root)).cloned();
 
         match (&previous, tag) {
             // Already carries this root's current tag.
@@ -314,18 +303,16 @@ impl Meta {
         // renames work, but do not re-add a tag the user has since deleted.
         let offered_before = previous.is_none()
             && tag.is_some_and(|t| {
-                self.repos.get(&key).is_some_and(|meta| {
-                    meta.seeded_legacy.iter().any(|seen| seen.eq_ignore_ascii_case(t))
-                })
+                self.repos
+                    .get(&key)
+                    .is_some_and(|meta| meta.seeded_legacy.iter().any(|seen| seen.eq_ignore_ascii_case(t)))
             });
 
         // Renaming a root's tag renames it in place. If the old tag is already
         // gone the user deleted it, and there is nothing to rename — handing
         // them the new name would resurrect a tag they rejected.
         let had_old = previous.as_ref().is_some_and(|before| {
-            self.repos.get(&key).is_some_and(|meta| {
-                meta.tags.iter().any(|t| t.eq_ignore_ascii_case(before))
-            })
+            self.repos.get(&key).is_some_and(|meta| meta.tags.iter().any(|t| t.eq_ignore_ascii_case(before)))
         });
         let should_add = !offered_before && (previous.is_none() || had_old);
 
@@ -335,9 +322,7 @@ impl Meta {
             let also_recorded_by: Vec<String> = entry
                 .seeded_by
                 .iter()
-                .filter(|(other, theirs)| {
-                    other.as_str() != root && theirs.eq_ignore_ascii_case(before)
-                })
+                .filter(|(other, theirs)| other.as_str() != root && theirs.eq_ignore_ascii_case(before))
                 .map(|(other, _)| other.clone())
                 .collect();
             if adopted {
@@ -365,10 +350,7 @@ impl Meta {
                 let present = entry.tags.iter().any(|t| t.eq_ignore_ascii_case(tag));
                 // Put there by a root: the flat record says one seeded it, or
                 // another root holds it as its own.
-                let from_a_root = entry
-                    .seeded_legacy
-                    .iter()
-                    .any(|seen| seen.eq_ignore_ascii_case(tag))
+                let from_a_root = entry.seeded_legacy.iter().any(|seen| seen.eq_ignore_ascii_case(tag))
                     || entry.seeded_by.iter().any(|(other, theirs)| {
                         other.as_str() != root
                             && theirs.eq_ignore_ascii_case(tag)
@@ -415,9 +397,9 @@ impl Meta {
             }
             match path.parent() {
                 // A directory that cannot be listed proves nothing either way.
-                Some(parent) => std::fs::read_dir(parent)
-                    .map(|mut entries| entries.next().is_none())
-                    .unwrap_or(true),
+                Some(parent) => {
+                    std::fs::read_dir(parent).map(|mut entries| entries.next().is_none()).unwrap_or(true)
+                }
                 None => true,
             }
         });
@@ -432,16 +414,11 @@ impl Meta {
     /// is away. Counted over the store, a tag none of whose repositories was
     /// still scanned stayed in the header with its old count, counted towards
     /// the three-tag limit, and filtered to an empty grid.
-    pub fn tags_among<'a>(
-        &self,
-        repos: impl IntoIterator<Item = &'a Path>,
-    ) -> Vec<(String, usize)> {
+    pub fn tags_among<'a>(&self, repos: impl IntoIterator<Item = &'a Path>) -> Vec<(String, usize)> {
         let mut counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
         for repo in repos {
             for tag in self.tags_for(repo) {
-                let entry = counts
-                    .entry(tag.to_lowercase())
-                    .or_insert_with(|| (tag.clone(), 0));
+                let entry = counts.entry(tag.to_lowercase()).or_insert_with(|| (tag.clone(), 0));
                 entry.1 += 1;
             }
         }
@@ -463,8 +440,7 @@ impl Meta {
         let mut reached = Vec::new();
         for (key, meta) in &self.repos {
             let path = Path::new(key);
-            let theirs = gone.iter().any(|dir| path.starts_with(dir))
-                || meta.seeded_by.contains_key(&root);
+            let theirs = gone.iter().any(|dir| path.starts_with(dir)) || meta.seeded_by.contains_key(&root);
             if !theirs {
                 continue;
             }
@@ -481,10 +457,7 @@ impl Meta {
     /// for asking before it does.
     pub fn tagged_only_under(&self, gone: &Path, kept: &[PathBuf]) -> usize {
         let (orphaned, _) = self.left_behind(gone, kept);
-        orphaned
-            .iter()
-            .filter(|key| self.repos.get(*key).is_some_and(|meta| !meta.tags.is_empty()))
-            .count()
+        orphaned.iter().filter(|key| self.repos.get(*key).is_some_and(|meta| !meta.tags.is_empty())).count()
     }
 
     /// Forget what a scan root, or an individually listed repository, brought
@@ -527,8 +500,7 @@ impl Meta {
             )));
         }
         let file = File { repos: self.repos.clone() };
-        let body = toml::to_string_pretty(&file)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let body = toml::to_string_pretty(&file).map_err(|e| std::io::Error::other(e.to_string()))?;
         let text = format!("# omarepos repository metadata — written by the app.\n\n{body}");
         crate::config::replace_file(&path, &text)?;
         *self.on_disk.borrow_mut() = Some(text);

@@ -1,0 +1,5 @@
+# The width the code was already written to, and short constructs kept on one
+# line: of the settings tried, the one that changed the least when rustfmt was
+# first run over code that had never seen it.
+max_width = 110
+use_small_heuristics = "Max"

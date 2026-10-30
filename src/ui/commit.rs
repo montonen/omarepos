@@ -40,10 +40,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
     subject.add_css_class("om-name");
     header.append(&subject);
 
-    let meta = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let meta = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     meta.add_css_class("om-meta");
     header.append(&meta);
 
@@ -109,11 +106,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
     // backgrounds are mixed from the theme's own colours: here, so that the
     // tags exist, and again each time a diff is drawn.
     Tints::of(&crate::theme::Palette::load()).apply(&buffer);
-    let diff_scroller = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .child(&diff_view)
-        .build();
+    let diff_scroller = gtk::ScrolledWindow::builder().hexpand(true).vexpand(true).child(&diff_view).build();
     diff_scroller.add_css_class("om-grid");
 
     // Side by side within the pane: the pane is as wide as the window even
@@ -127,10 +120,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
         .position(380)
         .build();
 
-    let totals = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let totals = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     totals.add_css_class("om-statusbar");
 
     inner.set_start_child(Some(&scroller));
@@ -276,11 +266,8 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
                     scroller.vadjustment().set_value(0.0);
                 }
 
-                *viewer.listed.borrow_mut() = Some(Listed {
-                    repo: repo.clone(),
-                    target: target.clone(),
-                    result: result.clone(),
-                });
+                *viewer.listed.borrow_mut() =
+                    Some(Listed { repo: repo.clone(), target: target.clone(), result: result.clone() });
                 rebuilding.set(true);
                 rebuilds.set(rebuilds.get() + 1);
                 let built = rebuilds.get();
@@ -326,12 +313,8 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
                             Group::Unstaged,
                             Group::Untracked,
                         ] {
-                            let in_group: Vec<_> = detail
-                                .files
-                                .iter()
-                                .filter(|f| f.group == group)
-                                .cloned()
-                                .collect();
+                            let in_group: Vec<_> =
+                                detail.files.iter().filter(|f| f.group == group).cloned().collect();
                             // How many there are, as against how many are
                             // listed: the list is capped, the count is not.
                             let total = if group == Group::Committed {
@@ -377,8 +360,7 @@ pub fn pane() -> (gtk::Widget, Rc<dyn Fn(PathBuf, Target)>, Rc<dyn Fn()>) {
                             if group != Group::Committed {
                                 // Inserted above its rows once they exist, so
                                 // the heading has something to hide.
-                                let heading =
-                                    group_heading(group, in_group.len(), total, members, &folds);
+                                let heading = group_heading(group, in_group.len(), total, members, &folds);
                                 files.insert(&heading, position);
                                 added += 1;
                             }
@@ -564,15 +546,9 @@ fn group_heading(
     // group the user had opened shut again. Once
     // drawn, a group stays as it is until the user says otherwise: it does not
     // fold itself either, when an eleventh untracked file turns up.
-    let open = *folds
-        .borrow_mut()
-        .entry(group)
-        .or_insert(group != Group::Untracked || count <= FOLD_UNTRACKED_PAST);
-    let chevron = gtk::Image::from_icon_name(if open {
-        "pan-down-symbolic"
-    } else {
-        "pan-end-symbolic"
-    });
+    let open =
+        *folds.borrow_mut().entry(group).or_insert(group != Group::Untracked || count <= FOLD_UNTRACKED_PAST);
+    let chevron = gtk::Image::from_icon_name(if open { "pan-down-symbolic" } else { "pan-end-symbolic" });
     line.append(&chevron);
 
     let title = gtk::Label::builder()
@@ -600,18 +576,16 @@ fn group_heading(
         let now = !shown.get();
         shown.set(now);
         folds.borrow_mut().insert(group, now);
-        chevron.set_icon_name(Some(if now {
-            "pan-down-symbolic"
-        } else {
-            "pan-end-symbolic"
-        }));
+        chevron.set_icon_name(Some(if now { "pan-down-symbolic" } else { "pan-end-symbolic" }));
         for member in &members {
             // A row folded away does not stay selected. It would go on being
             // the file the diff is of, and the one Tab comes back to.
-            if !now && member.is_selected()
-                && let Some(list) = member.parent().and_downcast::<gtk::ListBox>() {
-                    list.select_row(gtk::ListBoxRow::NONE);
-                }
+            if !now
+                && member.is_selected()
+                && let Some(list) = member.parent().and_downcast::<gtk::ListBox>()
+            {
+                list.select_row(gtk::ListBoxRow::NONE);
+            }
             member.set_visible(now);
         }
     });
@@ -746,14 +720,13 @@ struct Place {
 impl Place {
     fn of(files: &gtk::ListBox) -> Self {
         let selected = files.selected_row();
-        let focused = focus_inside(files).and_then(|widget| {
-            // The row itself, or the heading's button inside it.
-            widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
-                widget
-                    .ancestor(gtk::ListBoxRow::static_type())
-                    .and_downcast::<gtk::ListBoxRow>()
-            })
-        });
+        let focused =
+            focus_inside(files).and_then(|widget| {
+                // The row itself, or the heading's button inside it.
+                widget.clone().downcast::<gtk::ListBoxRow>().ok().or_else(|| {
+                    widget.ancestor(gtk::ListBoxRow::static_type()).and_downcast::<gtk::ListBoxRow>()
+                })
+            });
         let mut place = Place { names: Vec::new(), selected: None, focused: None, had_a_file: false };
         for (name, row) in named_rows(files) {
             place.had_a_file |= is_shown_file(&row);
@@ -909,10 +882,7 @@ fn describe(detail: &Detail) -> String {
 
 fn summary(detail: &Detail) -> String {
     let files = detail.total_files;
-    let mut parts = vec![format!(
-        "{files} {} changed",
-        if files == 1 { "file" } else { "files" }
-    )];
+    let mut parts = vec![format!("{files} {} changed", if files == 1 { "file" } else { "files" })];
     parts.push(format!("+{} −{}", detail.insertions, detail.deletions));
     if detail.unreadable > 0 {
         // The counts are of what could be read. Without this they are a
@@ -930,9 +900,7 @@ fn summary(detail: &Detail) -> String {
     }
     if detail.boundary {
         // git marks such a commit "grafted" and shows the same numbers.
-        parts.push(
-            "its parent is outside this shallow clone, so every file reads as added".to_string(),
-        );
+        parts.push("its parent is outside this shallow clone, so every file reads as added".to_string());
     }
     parts.join("  ·  ")
 }
@@ -940,10 +908,8 @@ fn summary(detail: &Detail) -> String {
 /// The syntax and theme sets, loaded once. Both are sizeable and parsing them
 /// per diff would be the slowest thing the pane does.
 fn highlighter() -> &'static (syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet) {
-    static ONCE: std::sync::OnceLock<(
-        syntect::parsing::SyntaxSet,
-        syntect::highlighting::ThemeSet,
-    )> = std::sync::OnceLock::new();
+    static ONCE: std::sync::OnceLock<(syntect::parsing::SyntaxSet, syntect::highlighting::ThemeSet)> =
+        std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         (
             syntect::parsing::SyntaxSet::load_defaults_newlines(),
@@ -1032,12 +998,7 @@ impl Tints {
     /// A syntax theme's colour for a token, as it is drawn here.
     fn token(&self, colour: syntect::highlighting::Color) -> Rgb {
         let channel = |value: u8| f64::from(value) / 255.0;
-        legible(
-            (channel(colour.r), channel(colour.g), channel(colour.b)),
-            &self.surfaces,
-            self.fg,
-            LEGIBLE,
-        )
+        legible((channel(colour.r), channel(colour.g), channel(colour.b)), &self.surfaces, self.fg, LEGIBLE)
     }
 }
 
@@ -1071,9 +1032,8 @@ fn contrast(a: Rgb, b: Rgb) -> f64 {
 /// that was clearer than that is not made worse.
 fn legible(colour: Rgb, surfaces: &[Rgb], fg: Rgb, floor: f64) -> Rgb {
     const STEPS: u32 = 16;
-    let least = |colour: Rgb| {
-        surfaces.iter().map(|surface| contrast(colour, *surface)).fold(f64::INFINITY, f64::min)
-    };
+    let least =
+        |colour: Rgb| surfaces.iter().map(|surface| contrast(colour, *surface)).fold(f64::INFINITY, f64::min);
     (0..STEPS)
         .map(|step| mix(colour, fg, f64::from(step) / f64::from(STEPS)))
         .find(|mixed| least(*mixed) >= floor)
@@ -1106,11 +1066,7 @@ fn syntax_for<'a>(
     syntaxes: &'a syntect::parsing::SyntaxSet,
     path: &str,
 ) -> &'a syntect::parsing::SyntaxReference {
-    let extension = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let extension = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let stand_in = match extension.as_str() {
         "ts" | "tsx" | "mts" | "cts" | "jsx" => Some("JavaScript"),
         // Bicep is braces, strings and `//` comments once you look past the
@@ -1162,9 +1118,7 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
     // A diff skips between hunks, so highlighting state cannot carry across
     // one. Restarting per hunk is approximate at the top of each — the honest
     // alternative would be to read the whole file.
-    let mut highlighter = theme.map(|theme| {
-        syntect::easy::HighlightLines::new(syntax, theme)
-    });
+    let mut highlighter = theme.map(|theme| syntect::easy::HighlightLines::new(syntax, theme));
     let mut highlighted = 0usize;
     // Set when a line went in without the highlighter seeing it. Its idea of
     // where it is in the syntax is then out of date, the same as after a hunk
@@ -1177,11 +1131,7 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
         if line.origin == '@' {
             let mut end = buffer.end_iter();
             buffer.insert(&mut end, &format!("{}\n", line.text));
-            buffer.apply_tag_by_name(
-                "hunk",
-                &buffer.iter_at_offset(start),
-                &buffer.end_iter(),
-            );
+            buffer.apply_tag_by_name("hunk", &buffer.iter_at_offset(start), &buffer.end_iter());
             if let Some(theme) = theme {
                 highlighter = Some(syntect::easy::HighlightLines::new(syntax, theme));
             }
@@ -1196,11 +1146,7 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
         if matches!(line.origin, '=' | '>' | '<') {
             let mut end = buffer.end_iter();
             buffer.insert(&mut end, &format!("{}\n", line.text.trim_start_matches('\n')));
-            buffer.apply_tag_by_name(
-                "hunk",
-                &buffer.iter_at_offset(start),
-                &buffer.end_iter(),
-            );
+            buffer.apply_tag_by_name("hunk", &buffer.iter_at_offset(start), &buffer.end_iter());
             continue;
         }
 
@@ -1235,10 +1181,7 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
                 // The pieces borrow from `owned`, which does not outlive this
                 // block; keep them as text of their own.
                 .map(|spans| {
-                    spans
-                        .into_iter()
-                        .map(|(style, piece)| (style, piece.to_string()))
-                        .collect::<Vec<_>>()
+                    spans.into_iter().map(|(style, piece)| (style, piece.to_string())).collect::<Vec<_>>()
                 })
         };
         match spans {
@@ -1265,11 +1208,7 @@ fn render_diff(buffer: &gtk::TextBuffer, diff: &commit::FileDiff, path: &str, ti
                     let tag = tags
                         .entry((colour.r, colour.g, colour.b))
                         .or_insert_with(|| colour_tag(buffer, tints.token(colour)));
-                    buffer.apply_tag(
-                        &*tag,
-                        &buffer.iter_at_offset(at),
-                        &buffer.end_iter(),
-                    );
+                    buffer.apply_tag(&*tag, &buffer.iter_at_offset(at), &buffer.end_iter());
                 }
             }
             None => {
@@ -1450,7 +1389,8 @@ mod tests {
     /// went, so that the same key puts it back and touches nothing else.
     #[test]
     fn the_only_file_of_a_group_is_followed_into_the_group_it_went_to() {
-        let before = ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
+        let before =
+            ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
         let after = ["group:s", "file:s:done.rs", "file:s:only.rs", "group:n", "file:n:notes.txt"];
         assert_eq!(back(&before, "file:u:only.rs", &after).as_deref(), Some("file:s:only.rs"));
 
@@ -1464,7 +1404,8 @@ mod tests {
     /// nearest, below first.
     #[test]
     fn a_file_that_is_gone_gives_way_to_its_nearest_neighbour() {
-        let before = ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
+        let before =
+            ["group:s", "file:s:done.rs", "group:u", "file:u:only.rs", "group:n", "file:n:notes.txt"];
         let after = ["group:s", "file:s:done.rs", "group:n", "file:n:notes.txt"];
         assert_eq!(back(&before, "file:u:only.rs", &after).as_deref(), Some("file:n:notes.txt"));
         let after = ["group:s", "file:s:done.rs"];
@@ -1537,8 +1478,16 @@ mod tests {
     #[test]
     fn a_comment_can_be_read_on_every_line_of_a_diff() {
         let cases = [
-            ("a muted dark theme", palette(true, "#2e3440", "#d8dee9", "#a3be8c", "#bf616a"), COMMENT_ON_DARK),
-            ("a pale light theme", palette(false, "#eff1f5", "#4c4f69", "#40a02b", "#d20f39"), COMMENT_ON_LIGHT),
+            (
+                "a muted dark theme",
+                palette(true, "#2e3440", "#d8dee9", "#a3be8c", "#bf616a"),
+                COMMENT_ON_DARK,
+            ),
+            (
+                "a pale light theme",
+                palette(false, "#eff1f5", "#4c4f69", "#40a02b", "#d20f39"),
+                COMMENT_ON_LIGHT,
+            ),
         ];
         for (name, palette, comment) in cases {
             let tints = Tints::of(&palette);

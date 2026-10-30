@@ -175,9 +175,10 @@ fn spawn_within(
                             return;
                         }
                         if let Some(why) = stopped
-                            && tx.send_blocking(Event::Stopped(why)).is_err() {
-                                return;
-                            }
+                            && tx.send_blocking(Event::Stopped(why)).is_err()
+                        {
+                            return;
+                        }
                         if tx.send_blocking(Event::Progress(finished, total)).is_err() {
                             return;
                         }
@@ -221,9 +222,10 @@ fn search_one(
                 continue;
             }
             if let Ok(commit) = reference.peel_to_commit()
-                && walk.push(commit.id()).is_ok() {
-                    pushed += 1;
-                }
+                && walk.push(commit.id()).is_ok()
+            {
+                pushed += 1;
+            }
         }
     }
     if pushed == 0 && walk.push_head().is_err() {
@@ -269,9 +271,7 @@ fn search_one(
             Some(Match::Summary)
         } else if message.to_lowercase().contains(needle) {
             Some(Match::Body)
-        } else if author_name.to_lowercase().contains(needle)
-            || email.to_lowercase().contains(needle)
-        {
+        } else if author_name.to_lowercase().contains(needle) || email.to_lowercase().contains(needle) {
             Some(Match::Author)
         } else if id.starts_with(needle) {
             Some(Match::Sha)
@@ -419,10 +419,7 @@ mod tests {
             hits.sort_by_key(|hit| std::cmp::Reverse(hit.when));
             hits.iter().take(rows).map(|hit| hit.summary.clone()).collect()
         };
-        assert_eq!(
-            newest(Limits { commits: 1000, hits: rows }),
-            ["hotfix b5", "hotfix b4", "hotfix b3"]
-        );
+        assert_eq!(newest(Limits { commits: 1000, hits: rows }), ["hotfix b5", "hotfix b4", "hotfix b3"]);
         assert_eq!(
             newest(Limits { commits: 1000, hits: rows - 1 }),
             ["hotfix b5", "hotfix b4", "hotfix q3"],

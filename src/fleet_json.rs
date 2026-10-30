@@ -292,9 +292,8 @@ fn take(roots: Vec<String>, depth: Option<usize>) -> Result<Fleet, String> {
     // parse, and says so in a banner. There is no banner here, and a snapshot
     // of `~/Work` where the file names other roots, or of every repository
     // without its tags, would be a wrong answer given as if it were right.
-    let cfg = Config::try_load()
-        .map_err(|why| unusable(&Config::path(), &why))?
-        .with_command_line(roots, depth);
+    let cfg =
+        Config::try_load().map_err(|why| unusable(&Config::path(), &why))?.with_command_line(roots, depth);
     let mut meta = Meta::try_load().map_err(|why| unusable(&crate::meta::path(), &why))?;
     // State, and not what the user wrote: the snapshot is taken without it,
     // and says that it was.
@@ -511,8 +510,14 @@ mod tests {
         assert_eq!(work["path"], key(&f.work));
         assert_eq!(work["needs_attention"], true);
         assert_eq!((&work["head"], &work["upstream"]), (&json!("main"), &json!("origin/main")));
-        assert_eq!((&work["detached"], &work["unborn"], &work["bare"]), (&json!(false), &json!(false), &json!(false)));
-        assert_eq!(work["working_tree"], json!({ "staged": 0, "unstaged": 1, "untracked": 1, "conflicted": 0 }));
+        assert_eq!(
+            (&work["detached"], &work["unborn"], &work["bare"]),
+            (&json!(false), &json!(false), &json!(false))
+        );
+        assert_eq!(
+            work["working_tree"],
+            json!({ "staged": 0, "unstaged": 1, "untracked": 1, "conflicted": 0 })
+        );
         assert_eq!(
             [&work["ahead"], &work["behind"], &work["unpushed"], &work["stray_branches"], &work["stashes"]],
             [&json!(1), &json!(2), &json!(1), &json!(0), &json!(0)]
@@ -528,7 +533,10 @@ mod tests {
 
         let seed = repo(&printed, "seed");
         assert_eq!(seed["needs_attention"], false);
-        assert_eq!(seed["working_tree"], json!({ "staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0 }));
+        assert_eq!(
+            seed["working_tree"],
+            json!({ "staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0 })
+        );
         assert_eq!([&seed["ahead"], &seed["behind"], &seed["unpushed"]], [&json!(0), &json!(0), &json!(0)]);
         assert_eq!(seed["tags"], json!(["acme", "mine"]), "its own tag, and the root's beside it");
 
@@ -539,7 +547,9 @@ mod tests {
         let fresh = repo(&printed, "fresh");
         assert_eq!((&fresh["head"], &fresh["unborn"]), (&json!("main"), &json!(true)));
         assert_eq!(fresh["needs_attention"], false);
-        for nothing in ["last_commit", "upstream", "remote", "unpushed", "stray_branches", "fetch_failed", "error"] {
+        for nothing in
+            ["last_commit", "upstream", "remote", "unpushed", "stray_branches", "fetch_failed", "error"]
+        {
             assert!(fresh[nothing].is_null(), "{nothing}: {fresh:#}");
         }
 
@@ -575,7 +585,9 @@ mod tests {
                 "https://jm:p@SECRET@github.com/acme/widgets.git",
                 "github.com/acme/widgets",
                 Some("https://github.com/acme/widgets"),
-                Some("fatal: unable to access 'https://SECRET@github.com/acme/widgets.git/': URL rejected: Bad hostname"),
+                Some(
+                    "fatal: unable to access 'https://SECRET@github.com/acme/widgets.git/': URL rejected: Bad hostname",
+                ),
             ),
             ("scp", "oauth2:glpat-SECRET@gitlab.com:group/repo.git", "gitlab.com/group/repo", None, None),
             (
@@ -791,12 +803,18 @@ mod tests {
         let top = quoted(&key(&base.join("elsewhere/top")));
         write(
             &crate::meta::path(),
-            &format!("[repos.{top}]\ntags = [\"old\"]\n\n[repos.{top}.seeded_by]\n{} = \"old\"\n", quoted(&elsewhere)),
+            &format!(
+                "[repos.{top}]\ntags = [\"old\"]\n\n[repos.{top}.seeded_by]\n{} = \"old\"\n",
+                quoted(&elsewhere)
+            ),
         );
 
         let printed = snapshot(vec![elsewhere.clone()], Some(1));
         assert_eq!(names(&printed), ["top"], "one level down, and not the configured root");
-        assert_eq!(printed["roots"], json!([{ "path": key(&base.join("elsewhere")), "found": 1, "problem": null }]));
+        assert_eq!(
+            printed["roots"],
+            json!([{ "path": key(&base.join("elsewhere")), "found": 1, "problem": null }])
+        );
         assert_eq!(repo(&printed, "top")["tags"], json!(["old"]));
 
         assert_eq!(names(&snapshot(vec![elsewhere], None)), ["deep", "top"], "the configured depth");
@@ -853,7 +871,10 @@ mod tests {
         assert!(lost["history_unreadable"].is_string(), "{lost:#}");
         assert_eq!(lost["needs_attention"], true);
         null(lost, &["ahead", "behind", "unpushed", "stray_branches", "error"]);
-        assert_eq!(lost["working_tree"], json!({ "staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0 }));
+        assert_eq!(
+            lost["working_tree"],
+            json!({ "staged": 0, "unstaged": 0, "untracked": 0, "conflicted": 0 })
+        );
         assert_eq!(lost["last_commit"]["summary"], "c");
 
         let split = repo(&printed, "split");

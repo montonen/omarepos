@@ -165,14 +165,8 @@ pub enum Pass {
 /// This is a list of the known ways, not a proof that there are no others: a
 /// repository's own config can name commands in more places than a list of
 /// overrides can cover.
-const UNATTENDED: [&str; 6] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "protocol.ext.allow=never",
-];
+const UNATTENDED: [&str; 6] =
+    ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"];
 
 /// Set to abandon a pass that is under way. Repositories not yet started are
 /// left alone, and one that has been fetched is not then fast-forwarded. A
@@ -250,12 +244,7 @@ const FETCH_PATIENCE: Duration = Duration::from_secs(60 * 60);
 /// to, which the documentation says does not happen, and it made the submodule's
 /// remote this repository's problem: one that had moved away failed the fetch
 /// of a repository that had itself fetched fine.
-const FETCH: [&str; 4] = [
-    "fetch",
-    "--progress",
-    "--no-write-fetch-head",
-    "--no-recurse-submodules",
-];
+const FETCH: [&str; 4] = ["fetch", "--progress", "--no-write-fetch-head", "--no-recurse-submodules"];
 
 /// How long a fast-forward may take. The checkout runs the user's filters, and
 /// git-lfs among them fetches as it checks out: a large update over a slow
@@ -358,10 +347,7 @@ pub fn spawn(repos: Vec<PathBuf>, options: Options) -> async_channel::Receiver<E
     let (tx, rx) = async_channel::unbounded();
 
     std::thread::spawn(move || {
-        let workers = options
-            .max_parallel
-            .clamp(1, 8)
-            .min(repos.len().max(1));
+        let workers = options.max_parallel.clamp(1, 8).min(repos.len().max(1));
         let queue = Arc::new(Mutex::new(repos.into_iter()));
         let mut handles = Vec::with_capacity(workers);
 
@@ -407,12 +393,8 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string());
     let fetched = std::cell::Cell::new(false);
-    let report = |outcome| Report {
-        name: name.clone(),
-        path: path.to_path_buf(),
-        outcome,
-        fetched: fetched.get(),
-    };
+    let report =
+        |outcome| Report { name: name.clone(), path: path.to_path_buf(), outcome, fetched: fetched.get() };
     // The timer never updates anything, whatever it is handed.
     let updating = options.fast_forward && options.pass == Pass::One;
 
@@ -523,9 +505,7 @@ fn refresh_one(path: &Path, options: &Options) -> Report {
         // fail after writing some of the files, and then the tree has to be
         // looked at, because git's message only names the one it tripped on.
         Err(err) => {
-            let left = Repository::open(path)
-                .map(|repo| half_applied(&repo, &at))
-                .unwrap_or_default();
+            let left = Repository::open(path).map(|repo| half_applied(&repo, &at)).unwrap_or_default();
             report(Outcome::Refused(if left.is_empty() {
                 err
             } else {
@@ -563,12 +543,13 @@ fn remote_urls(repo: &Repository) -> Vec<String> {
         }
     }
     if let Ok(config) = repo.config().and_then(|mut config| config.snapshot())
-        && let Ok(mut entries) = config.entries(Some("^remote\\..*\\.url$")) {
-            while let Some(entry) = entries.next() {
-                let Ok(entry) = entry else { continue };
-                urls.extend(entry.value().ok().map(str::to_string));
-            }
+        && let Ok(mut entries) = config.entries(Some("^remote\\..*\\.url$"))
+    {
+        while let Some(entry) = entries.next() {
+            let Ok(entry) = entry else { continue };
+            urls.extend(entry.value().ok().map(str::to_string));
         }
+    }
     urls
 }
 
@@ -590,10 +571,8 @@ fn gate(repo: &Repository) -> Arc<Mutex<()>> {
     static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let common = repo.commondir();
     let key = common.canonicalize().unwrap_or_else(|_| common.to_path_buf());
-    let mut gates = GATES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut gates =
+        GATES.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Nobody is holding or waiting on a gate that only this map refers to.
     gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     Arc::clone(gates.entry(key).or_default())
@@ -634,15 +613,11 @@ fn tracking(repo: &Repository) -> Result<Tracking, Skip> {
         return Err(Skip::Detached);
     }
     let branch_name = head.shorthand().map_err(|_| Skip::Detached)?.to_string();
-    let branch = repo
-        .find_branch(&branch_name, BranchType::Local)
-        .map_err(|_| Skip::NoUpstream)?;
+    let branch = repo.find_branch(&branch_name, BranchType::Local).map_err(|_| Skip::NoUpstream)?;
     let upstream = branch.upstream().map_err(|_| Skip::NoUpstream)?;
     let local = branch.get().target().ok_or(Skip::NoUpstream)?;
     let remote = upstream.get().target().ok_or(Skip::NoUpstream)?;
-    let (ahead, behind) = repo
-        .graph_ahead_behind(local, remote)
-        .map_err(|_| Skip::NoUpstream)?;
+    let (ahead, behind) = repo.graph_ahead_behind(local, remote).map_err(|_| Skip::NoUpstream)?;
     Ok(Tracking { branch: branch_name, local, upstream: remote, ahead, behind })
 }
 
@@ -681,9 +656,7 @@ fn landed(path: &Path, meant: git2::Oid) -> Result<(), String> {
 /// told to, which is what `--no-overwrite-ignore` in [`FAST_FORWARD`] is for.
 fn is_dirty(repo: &Repository) -> bool {
     let mut opts = StatusOptions::new();
-    opts.include_untracked(false)
-        .include_ignored(false)
-        .exclude_submodules(true);
+    opts.include_untracked(false).include_ignored(false).exclude_submodules(true);
     match repo.statuses(Some(&mut opts)) {
         Ok(statuses) => statuses.iter().any(|entry| {
             entry.status().intersects(
@@ -791,11 +764,7 @@ fn half_applied(repo: &Repository, at: &Tracking) -> Vec<String> {
         .flatten()
         .map(Path::to_path_buf)
         .collect();
-    changed
-        .iter()
-        .filter(|path| !pending.contains(*path))
-        .map(|path| path.display().to_string())
-        .collect()
+    changed.iter().filter(|path| !pending.contains(*path)).map(|path| path.display().to_string()).collect()
 }
 
 /// What to say about a tree [`half_applied`] found something in. The same
@@ -1410,9 +1379,8 @@ mod tests {
                 let Ok(mut stream) = stream else { continue };
                 let mut request = [0u8; 4096];
                 let _ = stream.read(&mut request);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             }
         });
         let f = fleet("rf-not-found");
@@ -1468,7 +1436,8 @@ mod tests {
         let url = "https://user:it's/SECRET@example.invalid/x.git";
         git(&f.work, &["remote", "set-url", "origin", url]);
         let key = f.work.display().to_string();
-        let record = BTreeMap::from([(key.clone(), format!("fatal: unable to access '{url}/': URL rejected"))]);
+        let record =
+            BTreeMap::from([(key.clone(), format!("fatal: unable to access '{url}/': URL rejected"))]);
 
         let shown = shown_failures(record);
         assert_eq!(shown[&key], "fatal: unable to access 'https://•••@example.invalid/x.git/': URL rejected");
@@ -1669,8 +1638,6 @@ mod tests {
         assert_eq!(f.head(), f.remote_ref("refs/heads/main"));
     }
 
-
-
     #[test]
     fn an_unstaged_edit_holds_the_repository_back_and_survives() {
         let _guard = isolate();
@@ -1766,7 +1733,6 @@ mod tests {
         assert_eq!(f.head(), before);
     }
 
-
     // ---- ignored files: git overwrites them unless told not to ------------
 
     #[test]
@@ -1835,7 +1801,6 @@ mod tests {
         assert_eq!(read(&f.work.join(".env")), "KEY=mine\n");
     }
 
-
     // ---- an update lands in the repository's own directory or nowhere ------
 
     #[test]
@@ -1858,7 +1823,6 @@ mod tests {
         assert_eq!(read(&elsewhere.join("README.md")), "the other directory's own file\n");
         assert!(!elsewhere.join(".config").exists(), "files were written outside the repository");
     }
-
 
     // ---- a fast-forward is not stopped half-way ---------------------------
 
@@ -1887,7 +1851,6 @@ mod tests {
         assert_eq!(git(&f.work, &["status", "--porcelain"]), "", "a half-updated tree");
     }
 
-
     // ---- an update the user asked for runs what their own pull would ------
 
     /// A clone whose hooks live in the tree, and an upstream commit that adds
@@ -1905,8 +1868,6 @@ mod tests {
         (f, marker)
     }
 
-
-
     #[test]
     fn a_hook_runs_when_the_user_asks_for_the_update() {
         let _guard = isolate();
@@ -1915,7 +1876,6 @@ mod tests {
         assert!(matches!(got, Outcome::FastForwarded(1)), "{got:?}");
         assert!(marker.exists(), "their own pull would have run it, so this does too");
     }
-
 
     // ---- a fast-forward is one, whatever the merge settings say -----------
 
@@ -2043,7 +2003,6 @@ mod tests {
         git(&f.work, &["merge", "-q", "--ff-only", "@{u}"]);
         assert_eq!(landed(&f.work, upstream), Ok(()));
     }
-
 
     // ---- an update that stops part-way -----------------------------------
 
@@ -2225,7 +2184,6 @@ mod tests {
         let got = update(&f);
         assert!(matches!(got, Outcome::Skipped(Skip::Dirty)), "{got:?}");
     }
-
 
     /// `git merge` moves a submodule's pointer and leaves its checkout where
     /// it was. The pass said "updated", the card said "clean", `git status`

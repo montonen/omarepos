@@ -166,10 +166,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
         .description("This repository has no history yet.")
         .build();
 
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let status = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     status.add_css_class("om-statusbar");
 
     // The page reads itself again when its repository has been fetched, and
@@ -327,10 +324,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
     view.add_top_bar(&header);
     view.set_content(Some(&body));
 
-    let page = adw::NavigationPage::builder()
-        .title(name)
-        .child(&view)
-        .build();
+    let page = adw::NavigationPage::builder().title(name).child(&view).build();
 
     {
         let detail = detail.clone();
@@ -410,10 +404,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // The working-tree row has no sha to copy.
             let Some(Target::Commit(id)) = target else { return };
             row.clipboard().set_text(&id);
-            toasts.add_toast(crate::ui::toast(&format!(
-                "Copied {}",
-                &id[..7.min(id.len())]
-            )));
+            toasts.add_toast(crate::ui::toast(&format!("Copied {}", &id[..7.min(id.len())])));
         });
     }
 
@@ -465,10 +456,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // any. A repository with files and no commits yet is not that. It
             // used to get this page too, which hid the one row its first
             // commit is made from.
-            if graph.rows.is_empty()
-                && graph.working_changes == 0
-                && graph.working_unreadable.is_none()
-            {
+            if graph.rows.is_empty() && graph.working_changes == 0 && graph.working_unreadable.is_none() {
                 empty.set_title("No commits");
                 empty.set_description(Some("This repository has no history yet."));
                 stack.set_visible_child_name("empty");
@@ -482,9 +470,10 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                     &watcher,
                     Rc::new(move |glance: Glance| {
                         if (glance.changes > 0 || glance.unreadable.is_some() || glance.tip.is_some())
-                            && let Some(reload) = reload.borrow().clone() {
-                                reload();
-                            }
+                            && let Some(reload) = reload.borrow().clone()
+                        {
+                            reload();
+                        }
                     }),
                 );
                 return;
@@ -496,10 +485,9 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // the lane state of every row is self-contained, so a slice
             // draws correctly on its own.
             let (from, to) = match graph.target {
-                Some(index) => (
-                    index.saturating_sub(WINDOW_BEFORE),
-                    (index + WINDOW_AFTER).min(graph.rows.len()),
-                ),
+                Some(index) => {
+                    (index.saturating_sub(WINDOW_BEFORE), (index + WINDOW_AFTER).min(graph.rows.len()))
+                }
                 None => (0, graph.rows.len().min(COMMIT_LIMIT)),
             };
             let slice = &graph.rows[from..to];
@@ -529,10 +517,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // first row is the newest commit of any branch, the remote's
             // included: in a repository that is behind, the tail hung the
             // uncommitted work on a commit it is not based on.
-            let tail = slice
-                .first()
-                .filter(|row| row.refs.iter().any(|label| label.current))
-                .map(|row| row.lane);
+            let tail =
+                slice.first().filter(|row| row.refs.iter().any(|label| label.current)).map(|row| row.lane);
             let (working, working_count) = working_row(graph.working_changes, width, tail);
             if let Some(why) = &graph.working_unreadable {
                 say_unreadable(&working_count, why);
@@ -550,10 +536,9 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // selection was, when that commit is still in the list. A fetch
             // should not throw the reader back to the top.
             let stayed = match (&kept, arriving) {
-                (Some(Target::Commit(id)), false) => slice
-                    .iter()
-                    .position(|row| row.id.to_string() == *id)
-                    .map(|index| index + offset),
+                (Some(Target::Commit(id)), false) => {
+                    slice.iter().position(|row| row.id.to_string() == *id).map(|index| index + offset)
+                }
                 (Some(Target::Working), false) if has_working => Some(0),
                 _ => None,
             };
@@ -576,22 +561,18 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // did nothing until Down had been pressed once. Not when the
             // keyboard is at work in the pane below, though. A reload
             // must not pull it out of the list of changed files.
-            if !in_pane
-                && let Some(row) = landing {
-                    // Once the list has been laid out, focusing the row
-                    // brings it into view; doing it immediately would
-                    // scroll against a height the list does not have yet.
-                    glib::timeout_add_local_once(
-                        std::time::Duration::from_millis(50),
-                        move || {
-                            // Not into a page that another one is covering:
-                            // the window's refresh reloads those too.
-                            if row.is_mapped() {
-                                row.grab_focus();
-                            }
-                        },
-                    );
-                }
+            if !in_pane && let Some(row) = landing {
+                // Once the list has been laid out, focusing the row
+                // brings it into view; doing it immediately would
+                // scroll against a height the list does not have yet.
+                glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                    // Not into a page that another one is covering:
+                    // the window's refresh reloads those too.
+                    if row.is_mapped() {
+                        row.grab_focus();
+                    }
+                });
+            }
 
             {
                 // `shown` is where HEAD was when the page was read: its name
@@ -626,10 +607,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                                 working_count.set_tooltip_text(None);
                             }
                         }
-                        let on_working = rows
-                            .selected_row()
-                            .map(|row| row.index() == 0)
-                            .unwrap_or(false);
+                        let on_working = rows.selected_row().map(|row| row.index() == 0).unwrap_or(false);
                         if !on_working {
                             // A commit cannot have changed under us.
                             return;
@@ -707,8 +685,7 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             });
         }
         group.add_action(&reload);
-        let reload_for =
-            gtk::gio::SimpleAction::new("reload-for", Some(glib::VariantTy::STRING));
+        let reload_for = gtk::gio::SimpleAction::new("reload-for", Some(glib::VariantTy::STRING));
         {
             let slot = Rc::clone(&reload_page);
             let mine = load_path.display().to_string();
@@ -788,9 +765,10 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
 
 fn stop_watching(watcher: &Watcher) {
     if let Some((window, id)) = watcher.borrow_mut().take()
-        && let Some(window) = window.upgrade() {
-            window.disconnect(id);
-        }
+        && let Some(window) = window.upgrade()
+    {
+        window.disconnect(id);
+    }
 }
 
 /// Look at the repository again whenever the window regains focus. It changes
@@ -839,18 +817,11 @@ fn entries(changes: usize) -> String {
 /// commit it would become a child of, when that commit is the row beneath: the
 /// dashed line is then drawn down to it, so the graph reads as continuing into
 /// the working tree. Without one the hollow dot stands alone.
-fn working_row(
-    changes: usize,
-    graph_width: i32,
-    tail: Option<usize>,
-) -> (gtk::ListBoxRow, gtk::Label) {
+fn working_row(changes: usize, graph_width: i32, tail: Option<usize>) -> (gtk::ListBoxRow, gtk::Label) {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     line.set_height_request(ROW_H);
 
-    let area = gtk::DrawingArea::builder()
-        .content_width(graph_width)
-        .content_height(ROW_H)
-        .build();
+    let area = gtk::DrawingArea::builder().content_width(graph_width).content_height(ROW_H).build();
     let lane = tail.unwrap_or(0).min(MAX_LANES - 1);
     area.set_draw_func(move |_, cr, _, height| {
         let mid = height as f64 / 2.0;
@@ -870,11 +841,7 @@ fn working_row(
     });
     line.append(&area);
 
-    let label = gtk::Label::builder()
-        .label("Local changes")
-        .xalign(0.0)
-        .hexpand(true)
-        .build();
+    let label = gtk::Label::builder().label("Local changes").xalign(0.0).hexpand(true).build();
     label.add_css_class("om-summary");
     line.append(&label);
 
@@ -915,11 +882,7 @@ fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
 
     line.append(&graph_cell(row, graph_width));
 
-    let sha = gtk::Label::builder()
-        .label(&row.short_id)
-        .xalign(0.0)
-        .width_chars(7)
-        .build();
+    let sha = gtk::Label::builder().label(&row.short_id).xalign(0.0).width_chars(7).build();
     sha.add_css_class("om-sha");
     line.append(&sha);
 
@@ -934,12 +897,7 @@ fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
     }
     if let Some(rest) = row.refs.get(MAX_PILLS..).filter(|rest| !rest.is_empty()) {
         let names: Vec<&str> = rest.iter().map(|label| label.name.as_str()).collect();
-        line.append(&ref_pill(
-            &format!("+{}", rest.len()),
-            &names.join("\n"),
-            kind(rest[0].kind),
-            false,
-        ));
+        line.append(&ref_pill(&format!("+{}", rest.len()), &names.join("\n"), kind(rest[0].kind), false));
     }
 
     let summary = gtk::Label::builder()
@@ -961,11 +919,7 @@ fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
     author.add_css_class("om-meta");
     line.append(&author);
 
-    let when = gtk::Label::builder()
-        .label(relative_time(row.when))
-        .xalign(1.0)
-        .width_chars(13)
-        .build();
+    let when = gtk::Label::builder().label(relative_time(row.when)).xalign(1.0).width_chars(13).build();
     when.add_css_class("om-meta");
     line.append(&when);
 
@@ -988,10 +942,7 @@ fn row_widget(row: &Row, graph_width: i32) -> gtk::ListBoxRow {
 /// bottom half what leaves towards the row below, so neighbouring rows meet at
 /// the boundary without either knowing about the other.
 fn graph_cell(row: &Row, width: i32) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_width(width)
-        .content_height(ROW_H)
-        .build();
+    let area = gtk::DrawingArea::builder().content_width(width).content_height(ROW_H).build();
 
     let row = row.clone();
     area.set_draw_func(move |_, cr, _, height| {

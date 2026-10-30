@@ -57,6 +57,12 @@ jobs:
         run: pacman -Syu --noconfirm --needed gtk4 libadwaita libgit2 git rust base-devel
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      # Layout and lints first: quick, and a pull request from somebody else
+      # hears about both before a ten-minute walk.
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build
         run: cargo build --locked
       - name: Test

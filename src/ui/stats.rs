@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
 use gtk::pango;
+use gtk::{gdk, gio, glib};
 
 use crate::stats::{self, Author, Branches, Contributions, RepoCommits};
 use crate::ui::arcade::{self, Arcade};
@@ -96,10 +96,7 @@ pub fn page(
         .build();
     scroller.add_css_class("om-grid");
 
-    let empty = adw::StatusPage::builder()
-        .icon_name("system-users-symbolic")
-        .title("No commits")
-        .build();
+    let empty = adw::StatusPage::builder().icon_name("system-users-symbolic").title("No commits").build();
 
     let stack = gtk::Stack::new();
     stack.add_named(&loading, Some("loading"));
@@ -107,10 +104,7 @@ pub fn page(
     stack.add_named(&empty, Some("empty"));
     stack.set_vexpand(true);
 
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let status = gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     status.add_css_class("om-statusbar");
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -121,10 +115,7 @@ pub fn page(
     frame.add_top_bar(&header);
     frame.set_content(Some(&body));
 
-    let page = adw::NavigationPage::builder()
-        .title("Contributions")
-        .child(&frame)
-        .build();
+    let page = adw::NavigationPage::builder().title("Contributions").child(&frame).build();
 
     // A generation counter so a slow run that the user has already moved on
     // from cannot overwrite the results of the one they are waiting for.
@@ -160,9 +151,8 @@ pub fn page(
             let span = crate::ui::periods()
                 .get(range.selected() as usize)
                 .map_or(crate::ui::Span::Days(7), |(_, span)| *span);
-            let branches = VIEWS
-                .get(view.selected() as usize)
-                .map_or(Branches::CheckedOut, |(_, branches)| *branches);
+            let branches =
+                VIEWS.get(view.selected() as usize).map_or(Branches::CheckedOut, |(_, branches)| *branches);
             let (says, means) = counted(branches, repos.len());
             title.set_subtitle(&format!("{scope} · {says}"));
             title.set_tooltip_text(Some(means));
@@ -276,9 +266,8 @@ pub fn page(
     {
         let (repos, aside, view, range) = (Rc::clone(&repos), Rc::clone(&aside), view.clone(), range.clone());
         run_race.connect_activate(move |_, _| {
-            let branches = VIEWS
-                .get(view.selected() as usize)
-                .map_or(Branches::CheckedOut, |(_, branches)| *branches);
+            let branches =
+                VIEWS.get(view.selected() as usize).map_or(Branches::CheckedOut, |(_, branches)| *branches);
             on_race(crate::ui::race::Field {
                 repos: (*repos).clone(),
                 scope: race_scope.clone(),
@@ -500,7 +489,13 @@ pub(crate) fn set_aside_in(authors: &[Author], aside: &BTreeSet<String>) -> impl
 
 /// The page, from what was read: the overview of everybody not set aside,
 /// their rows, and under a gap whoever is.
-fn fill(content: &gtk::Box, result: &Contributions, aside: &BTreeSet<String>, on_open: &OnOpen, rows: &Rc<Rows>) {
+fn fill(
+    content: &gtk::Box,
+    result: &Contributions,
+    aside: &BTreeSet<String>,
+    on_open: &OnOpen,
+    rows: &Rc<Rows>,
+) {
     while let Some(child) = content.first_child() {
         content.remove(&child);
     }
@@ -592,21 +587,13 @@ fn status_line(result: &Contributions, aside: &BTreeSet<String>) -> String {
         format!("{} commits", thousands(result.total_commits)),
         // Authors, not people: the count is of names commits are signed with,
         // and a robot has one and a person may have two.
-        format!(
-            "{} {}",
-            result.authors.len(),
-            plural(result.authors.len(), "author", "authors")
-        ),
+        format!("{} {}", result.authors.len(), plural(result.authors.len(), "author", "authors")),
         format!("{}/{} repos active", result.repos_active, result.repos_scanned),
     ]);
     if result.lines_pending {
         parts.push("counting lines…".to_string());
     } else {
-        parts.push(format!(
-            "+{} −{}",
-            thousands(result.total_insertions),
-            thousands(result.total_deletions)
-        ));
+        parts.push(format!("+{} −{}", thousands(result.total_insertions), thousands(result.total_deletions)));
         if result.uncounted > 0 {
             parts.push(format!("{} without line counts", thousands(result.uncounted)));
         }
@@ -651,10 +638,7 @@ fn empty_state(result: &Contributions) -> (&'static str, String) {
         ));
     }
     if unread > 0 {
-        description.push_str(&format!(
-            "\n\n{unread} more could not be read:\n{}",
-            result.errors.join("\n")
-        ));
+        description.push_str(&format!("\n\n{unread} more could not be read:\n{}", result.errors.join("\n")));
     }
     ("No commits", description)
 }
@@ -729,18 +713,9 @@ fn overview(figures: &Figures, drawn: &Drawn, lines_pending: bool) -> gtk::Widge
     };
 
     let numbers = gtk::Box::new(gtk::Orientation::Horizontal, 26);
-    numbers.append(&big_number(
-        &thousands(figures.commits),
-        plural(figures.commits, "commit", "commits"),
-    ));
-    numbers.append(&big_number(
-        &figures.authors.to_string(),
-        plural(figures.authors, "author", "authors"),
-    ));
-    numbers.append(&big_number(
-        &figures.repos_active.to_string(),
-        "active repos",
-    ));
+    numbers.append(&big_number(&thousands(figures.commits), plural(figures.commits, "commit", "commits")));
+    numbers.append(&big_number(&figures.authors.to_string(), plural(figures.authors, "author", "authors")));
+    numbers.append(&big_number(&figures.repos_active.to_string(), "active repos"));
     numbers.append(&big_number(&lines("+", figures.insertions), "insertions"));
     numbers.append(&big_number(&lines("−", figures.deletions), "deletions"));
     card.append(&numbers);
@@ -828,20 +803,14 @@ fn author_row(
 
     let who = gtk::Box::new(gtk::Orientation::Vertical, 2);
     who.set_hexpand(true);
-    let name = gtk::Label::builder()
-        .label(&author.name)
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let name =
+        gtk::Label::builder().label(&author.name).xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     name.add_css_class("om-name");
     who.append(&name);
 
     let mut repos: Vec<(&PathBuf, &RepoCommits)> = author.repos.iter().collect();
     repos.sort_by(|a, b| {
-        b.1.total
-            .cmp(&a.1.total)
-            .then_with(|| a.1.name.cmp(&b.1.name))
-            .then_with(|| a.0.cmp(b.0))
+        b.1.total.cmp(&a.1.total).then_with(|| a.1.name.cmp(&b.1.name)).then_with(|| a.0.cmp(b.0))
     });
     let repo_line = repos
         .iter()
@@ -850,27 +819,14 @@ fn author_row(
         .collect::<Vec<_>>()
         .join("  ·  ");
     let extra = repos.len().saturating_sub(4);
-    let mut line = if extra > 0 {
-        format!("{repo_line}  ·  +{extra} more")
-    } else {
-        repo_line
-    };
+    let mut line = if extra > 0 { format!("{repo_line}  ·  +{extra} more") } else { repo_line };
     // Authors are keyed by e-mail, so the same display name can appear twice.
     // When it does, say which address each row is.
-    let ambiguous = result
-        .authors
-        .iter()
-        .filter(|a| a.name.eq_ignore_ascii_case(&author.name))
-        .count()
-        > 1;
+    let ambiguous = result.authors.iter().filter(|a| a.name.eq_ignore_ascii_case(&author.name)).count() > 1;
     if ambiguous && !author.email.is_empty() {
         line = format!("{}  ·  {line}", author.email);
     }
-    let detail = gtk::Label::builder()
-        .label(line)
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
+    let detail = gtk::Label::builder().label(line).xalign(0.0).ellipsize(pango::EllipsizeMode::End).build();
     detail.add_css_class("om-meta");
     who.append(&detail);
     head.append(&who);
@@ -878,21 +834,13 @@ fn author_row(
     let counts = gtk::Box::new(gtk::Orientation::Vertical, 2);
     counts.set_halign(gtk::Align::End);
     let commits = gtk::Label::builder()
-        .label(format!(
-            "{} {}",
-            author.commits,
-            plural(author.commits, "commit", "commits")
-        ))
+        .label(format!("{} {}", author.commits, plural(author.commits, "commit", "commits")))
         .xalign(1.0)
         .build();
     commits.add_css_class("om-summary");
     counts.append(&commits);
 
-    let mut lines = format!(
-        "+{} −{}",
-        thousands(author.insertions),
-        thousands(author.deletions)
-    );
+    let mut lines = format!("+{} −{}", thousands(author.insertions), thousands(author.deletions));
     // Somebody whose commits could not be diffed is not somebody who changed
     // nothing, which is what a bare +0 −0 said of them. Nor is somebody whose
     // commits have not been diffed yet.
@@ -974,10 +922,7 @@ fn tooltip(author: &Author, lines_pending: bool) -> String {
         author.commits
     );
     if author.merges > 0 {
-        tip.push_str(&format!(
-            "\n{} of them merges (not counted in lines)",
-            author.merges
-        ));
+        tip.push_str(&format!("\n{} of them merges (not counted in lines)", author.merges));
     }
     if lines_pending {
         tip.push_str("\nTheir lines are still being counted");
@@ -1052,11 +997,7 @@ fn commit_list(
         for commit in &commits {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
-            let sha = gtk::Label::builder()
-                .label(&commit.short_id)
-                .xalign(0.0)
-                .width_chars(7)
-                .build();
+            let sha = gtk::Label::builder().label(&commit.short_id).xalign(0.0).width_chars(7).build();
             sha.add_css_class("om-sha");
             row.append(&sha);
 
@@ -1086,11 +1027,8 @@ fn commit_list(
             churn.add_css_class("om-meta");
             row.append(&churn);
 
-            let when = gtk::Label::builder()
-                .label(relative_time(commit.when))
-                .xalign(1.0)
-                .width_chars(13)
-                .build();
+            let when =
+                gtk::Label::builder().label(relative_time(commit.when)).xalign(1.0).width_chars(13).build();
             when.add_css_class("om-meta");
             row.append(&when);
 
@@ -1178,11 +1116,8 @@ fn commit_list(
 }
 
 fn swatch(color: &'static str) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_width(10)
-        .content_height(10)
-        .valign(gtk::Align::Center)
-        .build();
+    let area =
+        gtk::DrawingArea::builder().content_width(10).content_height(10).valign(gtk::Align::Center).build();
     area.set_draw_func(move |_, cr, width, height| {
         let (r, g, b) = crate::theme::Palette::rgb(color);
         cr.set_source_rgb(r, g, b);
@@ -1343,7 +1278,8 @@ mod tests {
         let commit = |dir: &std::path::Path, who: &str, file: &str, body: &str| {
             write(&dir.join(file), body);
             git(dir, &["add", "--", file]);
-            let (name, email) = (format!("user.name={who}"), format!("user.email={}@example.invalid", who.to_lowercase()));
+            let (name, email) =
+                (format!("user.name={who}"), format!("user.email={}@example.invalid", who.to_lowercase()));
             git(dir, &["-c", &name, "-c", &email, "commit", "-q", "-m", file]);
         };
         commit(&one, "Me", "a.txt", "1\n2\n3\n");
@@ -1369,9 +1305,13 @@ mod tests {
         assert_eq!(all, counted);
 
         let me: BTreeSet<String> = ["me@example.invalid".to_string()].into();
-        let others: Vec<&Author> = result.authors.iter().filter(|author| !me.contains(&author.key())).collect();
+        let others: Vec<&Author> =
+            result.authors.iter().filter(|author| !me.contains(&author.key())).collect();
         let without = Figures::of(&result, &others);
-        assert_eq!((without.commits, without.authors, without.repos_active, without.insertions), (1, 1, 1, 1));
+        assert_eq!(
+            (without.commits, without.authors, without.repos_active, without.insertions),
+            (1, 1, 1, 1)
+        );
         assert_eq!(without.per_day.iter().sum::<usize>(), 1);
         assert!(status_line(&result, &me).ends_with("  ·  1 set aside"), "{}", status_line(&result, &me));
     }
@@ -1393,7 +1333,11 @@ mod tests {
             repos: Default::default(),
             last_seen: 0,
         };
-        let authors = vec![author("Ada Lind", "ada@work.invalid"), author("ada lind", "ada@home.invalid"), author("Bo", "bo@work.invalid")];
+        let authors = vec![
+            author("Ada Lind", "ada@work.invalid"),
+            author("ada lind", "ada@home.invalid"),
+            author("Bo", "bo@work.invalid"),
+        ];
         let aside: BTreeSet<String> = ["ada@work.invalid".to_string()].into();
         let is_aside = set_aside_in(&authors, &aside);
         assert_eq!(authors.iter().map(is_aside).collect::<Vec<_>>(), [true, true, false]);

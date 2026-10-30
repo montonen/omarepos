@@ -50,12 +50,7 @@ pub fn spawn(
         let mut paths = survey.found;
         let known: std::collections::HashSet<PathBuf> = paths
             .iter()
-            .map(|found| {
-                found
-                    .path
-                    .canonicalize()
-                    .unwrap_or_else(|_| found.path.clone())
-            })
+            .map(|found| found.path.canonicalize().unwrap_or_else(|_| found.path.clone()))
             .collect();
         for extra in extras {
             let canonical = extra.canonicalize().unwrap_or_else(|_| extra.clone());
@@ -89,10 +84,7 @@ pub fn spawn(
                         guard.next()
                     };
                     let Some(found) = next else { return };
-                    let event = Event::Repo {
-                        info: git::inspect(&found.path),
-                        seed: found.seed,
-                    };
+                    let event = Event::Repo { info: git::inspect(&found.path), seed: found.seed };
                     if tx.send_blocking(event).is_err() {
                         return;
                     }

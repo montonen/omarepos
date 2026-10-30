@@ -486,7 +486,8 @@ impl Arcade {
         foot.set_justify(gtk::Justification::Center);
 
         let table = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        let parts = [top.upcast_ref::<gtk::Widget>(), title.upcast_ref(), range.upcast_ref(), body.upcast_ref()];
+        let parts =
+            [top.upcast_ref::<gtk::Widget>(), title.upcast_ref(), range.upcast_ref(), body.upcast_ref()];
         for part in parts {
             table.append(part);
         }
@@ -983,11 +984,23 @@ mod tests {
         let mut konami = Konami::default();
         assert!(typed(&mut konami, &KONAMI));
         // A key too many at the start is forgiven, as on the machines.
-        let one_too_many = [K::Up, K::Up, K::Up, K::Down, K::Down, K::Left, K::Right, K::Left, K::Right, K::b, K::a];
+        let one_too_many =
+            [K::Up, K::Up, K::Up, K::Down, K::Down, K::Left, K::Right, K::Left, K::Right, K::b, K::a];
         assert!(typed(&mut konami, &one_too_many));
         // Capitals, the keypad, and Shift pressed on the way to them.
-        let shifted =
-            [K::KP_Up, K::Up, K::Down, K::KP_Down, K::Left, K::Right, K::Left, K::Right, K::Shift_L, K::B, K::A];
+        let shifted = [
+            K::KP_Up,
+            K::Up,
+            K::Down,
+            K::KP_Down,
+            K::Left,
+            K::Right,
+            K::Left,
+            K::Right,
+            K::Shift_L,
+            K::B,
+            K::A,
+        ];
         assert!(typed(&mut konami, &shifted));
         // One wrong key and it starts again.
         let wrong = [K::Up, K::Up, K::Down, K::Down, K::Left, K::Right, K::Left, K::x, K::Right, K::b, K::a];

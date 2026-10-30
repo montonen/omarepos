@@ -11,13 +11,8 @@ use crate::git::RepoInfo;
 
 use super::Ui;
 
-pub(super) const SORT_LABELS: &[&str] = &[
-    "Recent activity",
-    "Name",
-    "Dirty first",
-    "Unpushed first",
-    "Tracked files",
-];
+pub(super) const SORT_LABELS: &[&str] =
+    &["Recent activity", "Name", "Dirty first", "Unpushed first", "Tracked files"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Sort {
@@ -60,11 +55,7 @@ impl Ui {
             .iter()
             .filter(|r| !dirty_only || self.needs_attention(r))
             .filter(|r| {
-                let tags: Vec<String> = meta
-                    .tags_for(&r.path)
-                    .iter()
-                    .map(|t| t.to_lowercase())
-                    .collect();
+                let tags: Vec<String> = meta.tags_for(&r.path).iter().map(|t| t.to_lowercase()).collect();
                 // `tag:` in the search box is an AND; the popover is an OR.
                 if !query.tags.iter().all(|wanted| tags.iter().any(|t| t == wanted)) {
                     return false;
@@ -72,8 +63,7 @@ impl Ui {
                 if tag_filter.is_empty() && !untagged_only {
                     return true;
                 }
-                (untagged_only && tags.is_empty())
-                    || tags.iter().any(|t| tag_filter.contains(t))
+                (untagged_only && tags.is_empty()) || tags.iter().any(|t| tag_filter.contains(t))
             })
             .filter(|r| query.langs.iter().all(|lang| r.speaks(lang)))
             .filter(|r| query.words.is_empty() || query.matches(&r.haystack()))
@@ -82,36 +72,24 @@ impl Ui {
         drop(meta);
 
         match Sort::from_index(self.sort.selected()) {
-            Sort::Activity => repos.sort_by(|a, b| {
-                b.last_active()
-                    .cmp(&a.last_active())
-                    .then_with(|| a.name.cmp(&b.name))
-            }),
+            Sort::Activity => {
+                repos.sort_by(|a, b| b.last_active().cmp(&a.last_active()).then_with(|| a.name.cmp(&b.name)))
+            }
             Sort::Name => repos.sort_by(|a, b| {
-                a.name
-                    .to_lowercase()
-                    .cmp(&b.name.to_lowercase())
-                    .then_with(|| a.path.cmp(&b.path))
+                a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.path.cmp(&b.path))
             }),
             Sort::Dirty => repos.sort_by(|a, b| {
-                b.tree
-                    .total()
-                    .cmp(&a.tree.total())
-                    .then_with(|| b.last_active().cmp(&a.last_active()))
+                b.tree.total().cmp(&a.tree.total()).then_with(|| b.last_active().cmp(&a.last_active()))
             }),
             Sort::Unpushed => repos.sort_by(|a, b| {
                 // Work that is nowhere else comes first, then what is merely
                 // out of step with its upstream.
                 let key = |r: &RepoInfo| (r.unpushed.max(r.ahead), r.ahead + r.behind);
-                key(b)
-                    .cmp(&key(a))
-                    .then_with(|| b.last_active().cmp(&a.last_active()))
+                key(b).cmp(&key(a)).then_with(|| b.last_active().cmp(&a.last_active()))
             }),
-            Sort::Files => repos.sort_by(|a, b| {
-                b.tracked_files
-                    .cmp(&a.tracked_files)
-                    .then_with(|| a.name.cmp(&b.name))
-            }),
+            Sort::Files => {
+                repos.sort_by(|a, b| b.tracked_files.cmp(&a.tracked_files).then_with(|| a.name.cmp(&b.name)))
+            }
         }
         repos
     }

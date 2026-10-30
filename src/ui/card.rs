@@ -62,10 +62,7 @@ pub fn build(
 ) -> gtk::Widget {
     let Context { tags, selected, fetch_failed, unseen, top_hit } = *ctx;
     let now = now();
-    let card = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .width_request(320)
-        .build();
+    let card = gtk::Box::builder().orientation(gtk::Orientation::Vertical).width_request(320).build();
     card.add_css_class("om-card");
     if let Some(edge) = edge(info) {
         card.add_css_class(edge.class());
@@ -258,17 +255,13 @@ pub fn build(
     card.upcast()
 }
 
-
 fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk::MenuButton {
     let popover = gtk::Popover::builder().has_arrow(false).build();
     let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
 
     // Offered only where there is a page to open, and saying where it is:
     // the site by name, the address itself in the tooltip.
-    let on_the_web = info
-        .web
-        .as_deref()
-        .map(|page| format!("Open on {}", crate::remote_url::web_site(page)));
+    let on_the_web = info.web.as_deref().map(|page| format!("Open on {}", crate::remote_url::web_site(page)));
     let mut items = vec![
         ("Commit graph", Action::CommitGraph),
         ("Contributions", Action::Contributions),
@@ -282,10 +275,7 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
     }
     items.push(("Copy path", Action::CopyPath));
     for (label, action) in items {
-        let button = gtk::Button::builder()
-            .label(label)
-            .has_frame(false)
-            .build();
+        let button = gtk::Button::builder().label(label).has_frame(false).build();
         if let Some(child) = button.child().and_downcast::<gtk::Label>() {
             child.set_xalign(0.0);
         }
@@ -315,7 +305,6 @@ fn action_menu(info: &RepoInfo, on_action: Rc<dyn Fn(Action, &RepoInfo)>) -> gtk
     button.add_css_class("flat");
     button
 }
-
 
 /// Between the gutter and the words, and between the parts of a row.
 const GAP: i32 = 8;
@@ -372,11 +361,8 @@ const ROOM: i32 = 32;
 /// that do not have been given theirs. Never less than a few characters:
 /// then the card is simply wider than it asked to be.
 fn room_beside(fixed: &[&str]) -> i32 {
-    let taken: usize = fixed
-        .iter()
-        .filter(|part| !part.is_empty())
-        .map(|part| part.chars().count() + 1)
-        .sum();
+    let taken: usize =
+        fixed.iter().filter(|part| !part.is_empty()).map(|part| part.chars().count() + 1).sum();
     (ROOM - taken as i32).max(8)
 }
 
@@ -388,12 +374,8 @@ fn room_beside(fixed: &[&str]) -> i32 {
 /// uncapped is one card to a row. A label that may grow is given the room
 /// that is left over when the card is wider than it asked.
 fn text(says: &str, class: &str, ellipsize: pango::EllipsizeMode, chars: i32) -> gtk::Label {
-    let label = gtk::Label::builder()
-        .label(says)
-        .xalign(0.0)
-        .single_line_mode(true)
-        .ellipsize(ellipsize)
-        .build();
+    let label =
+        gtk::Label::builder().label(says).xalign(0.0).single_line_mode(true).ellipsize(ellipsize).build();
     if chars > 0 {
         label.set_max_width_chars(chars);
     }
@@ -464,9 +446,7 @@ fn whereabouts(info: &RepoInfo) -> String {
                 "\nBut git may record someone else: {doubt}. \
                  `git var GIT_AUTHOR_IDENT` there says who."
             )),
-            None => tip.push_str(
-                "\n(user.name and user.email, read without running git.)",
-            ),
+            None => tip.push_str("\n(user.name and user.email, read without running git.)"),
         }
     }
     // The bar of languages went from the card. What it said is still worth
@@ -562,10 +542,7 @@ fn tree_slot(info: &RepoInfo) -> Vec<(String, &'static str, Option<String>)> {
             parts.push((
                 counts,
                 "work",
-                Some(format!(
-                    "{} staged · {} modified · {} untracked",
-                    t.staged, t.unstaged, t.untracked
-                )),
+                Some(format!("{} staged · {} modified · {} untracked", t.staged, t.unstaged, t.untracked)),
             ));
         }
         if t.conflicted > 0 {
@@ -613,10 +590,7 @@ fn conflicts(n: usize) -> (String, String) {
     if n == 1 {
         ("1 conflict".into(), "1 file is in conflict: a merge or a rebase is under way.".into())
     } else {
-        (
-            format!("{n} conflicts"),
-            format!("{n} files are in conflict: a merge or a rebase is under way."),
-        )
+        (format!("{n} conflicts"), format!("{n} files are in conflict: a merge or a rebase is under way."))
     }
 }
 
@@ -643,10 +617,7 @@ fn outgoing(info: &RepoInfo) -> Option<(String, String)> {
         };
         if info.remote.is_none() {
             says.push("no remote".to_string());
-            why.push(
-                "This repository has no remote. None of its commits exist anywhere else."
-                    .to_string(),
-            );
+            why.push("This repository has no remote. None of its commits exist anywhere else.".to_string());
         } else if info.detached {
             says.push(format!("{count} unpublished"));
             why.push(format!("HEAD is detached, and {count} commits behind it are on no remote."));
@@ -786,13 +757,8 @@ fn spell(seconds: i64) -> String {
 /// fresh the remote's newest commit is.
 fn caption(info: &RepoInfo, now: i64) -> (String, String) {
     let activity = &info.activity;
-    let newest = info
-        .last_commit
-        .as_ref()
-        .map(|commit| commit.when)
-        .into_iter()
-        .chain(info.upstream_when)
-        .max();
+    let newest =
+        info.last_commit.as_ref().map(|commit| commit.when).into_iter().chain(info.upstream_when).max();
     let says = if activity.week > 0 {
         match activity.people {
             0 | 1 => format!("{} this week", activity.week),
@@ -829,12 +795,9 @@ fn history(info: &RepoInfo) -> String {
         tip.push_str("What has been committed lately is not known.");
         return tip;
     }
-    let column = |index: usize| {
-        activity.days.iter().map(|day| day[index].to_string()).collect::<Vec<_>>().join(" ")
-    };
-    tip.push_str(&format!(
-        "Commits a day over the last {ACTIVITY_DAYS} days, today last.\n"
-    ));
+    let column =
+        |index: usize| activity.days.iter().map(|day| day[index].to_string()).collect::<Vec<_>>().join(" ");
+    tip.push_str(&format!("Commits a day over the last {ACTIVITY_DAYS} days, today last.\n"));
     if activity.split {
         tip.push_str(&format!("yours   {}\nothers  {}", column(0), column(1)));
     } else {
@@ -862,10 +825,7 @@ const FULL_DAY: u32 = 6;
 /// asked for when it draws. A change of theme reloads the stylesheet, and the
 /// drawing is then in the new theme's colours with nothing here to tell.
 fn pulse(activity: &Activity) -> gtk::DrawingArea {
-    let area = gtk::DrawingArea::builder()
-        .content_height(PULSE_HEIGHT)
-        .hexpand(true)
-        .build();
+    let area = gtk::DrawingArea::builder().content_height(PULSE_HEIGHT).hexpand(true).build();
     area.add_css_class("om-pulse");
     let days = activity.days.clone();
     let reached = activity.reached;
@@ -1136,10 +1096,7 @@ mod tests {
     fn the_name_is_said_once_and_not_again_in_the_address() {
         let _guard = isolate();
         let mut info = repo();
-        assert_eq!(
-            address(&info),
-            ("~/work/acme/".to_string(), Some("git.example.org/acme/".to_string()))
-        );
+        assert_eq!(address(&info), ("~/work/acme/".to_string(), Some("git.example.org/acme/".to_string())));
 
         // A remote called something else is the thing to see, so it is whole.
         info.remote = Some("git.example.org/acme/invoicing".into());
@@ -1217,10 +1174,7 @@ mod tests {
         // measured from whichever is newer.
         info.behind = 12;
         info.upstream_when = Some(now - 3 * HOUR);
-        assert_eq!(
-            caption(&info, now),
-            ("quiet for 1 day".to_string(), "remote tip 3h ago".to_string())
-        );
+        assert_eq!(caption(&info, now), ("quiet for 1 day".to_string(), "remote tip 3h ago".to_string()));
 
         // History that was not read is not said to be quiet.
         info.activity.days.clear();

@@ -54,19 +54,10 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+R  or  F5", "Read this repository again"),
         ],
     ),
-    (
-        "Changed files",
-        &[
-            ("↑ ↓", "Move; the diff follows"),
-        ],
-    ),
+    ("Changed files", &[("↑ ↓", "Move; the diff follows")]),
     (
         "The race",
-        &[
-            ("Space", "Play or pause"),
-            ("← →", "A day back or on"),
-            ("Home  End", "The start, the end"),
-        ],
+        &[("Space", "Play or pause"), ("← →", "A day back or on"), ("Home  End", "The start, the end")],
     ),
     (
         "Across repositories",
@@ -96,11 +87,7 @@ pub fn dialog() -> adw::Dialog {
 
         let grid = gtk::Grid::builder().column_spacing(18).row_spacing(4).build();
         for (index, (keys, what)) in rows.iter().enumerate() {
-            let key = gtk::Label::builder()
-                .label(*keys)
-                .xalign(1.0)
-                .width_chars(18)
-                .build();
+            let key = gtk::Label::builder().label(*keys).xalign(1.0).width_chars(18).build();
             key.add_css_class("om-sha");
             grid.attach(&key, 0, index as i32, 1, 1);
 
@@ -128,10 +115,5 @@ pub fn dialog() -> adw::Dialog {
     view.add_top_bar(&adw::HeaderBar::new());
     view.set_content(Some(&scroller));
 
-    adw::Dialog::builder()
-        .title("Keyboard")
-        .content_width(560)
-        .content_height(680)
-        .child(&view)
-        .build()
+    adw::Dialog::builder().title("Keyboard").content_width(560).content_height(680).child(&view).build()
 }

@@ -35,11 +35,8 @@ pub fn settings(
 ) {
     let reports = Rc::new(reports);
     let on_change = on_sources;
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Settings")
-        .content_width(540)
-        .content_height(680)
-        .build();
+    let dialog =
+        adw::PreferencesDialog::builder().title("Settings").content_width(540).content_height(680).build();
     // Where a refused save is said. Every switch in here writes the file, and
     // a write that is refused (the file was edited elsewhere, or could not be
     // read) used to go to stderr, with the switch left showing what was not
@@ -78,8 +75,7 @@ pub fn settings(
 
     // Both lists are rebuilt wholesale after each edit; they are short, and it
     // keeps add and remove from needing to agree about row identity.
-    let listed: Rc<RefCell<Vec<(adw::PreferencesGroup, gtk::Widget)>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    let listed: Rc<RefCell<Vec<(adw::PreferencesGroup, gtk::Widget)>>> = Rc::new(RefCell::new(Vec::new()));
     // The row builders need to call themselves after an edit.
     let rebuild: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
@@ -107,9 +103,10 @@ pub fn settings(
                         let kept = sources(&cfg.borrow());
                         let mut meta = meta.borrow_mut();
                         if meta.forget_source(source.path(), &kept) > 0
-                            && let Err(err) = meta.save() {
-                                complain(&format!("Its tags are still in the tag file: {err}"));
-                            }
+                            && let Err(err) = meta.save()
+                        {
+                            complain(&format!("Its tags are still in the tag file: {err}"));
+                        }
                     }
                     if let Some(f) = rebuild.borrow().clone() {
                         f();
@@ -245,10 +242,7 @@ pub fn settings(
         });
     }
 
-    let terminal = adw::EntryRow::builder()
-        .title("Terminal")
-        .show_apply_button(true)
-        .build();
+    let terminal = adw::EntryRow::builder().title("Terminal").show_apply_button(true).build();
     terminal.set_text(cfg.borrow().terminal.as_deref().unwrap_or(""));
     terminal.set_tooltip_text(Some(&format!(
         "Blank follows $TERMINAL. Currently: {}",
@@ -256,18 +250,13 @@ pub fn settings(
     )));
     tools_group.add(&terminal);
 
-    let runs = adw::EntryRow::builder()
-        .title("Run in the terminal")
-        .show_apply_button(true)
-        .build();
+    let runs = adw::EntryRow::builder().title("Run in the terminal").show_apply_button(true).build();
     runs.set_text(cfg.borrow().terminal_runs.as_deref().unwrap_or(""));
     runs.set_tooltip_text(Some(&format!(
         "Started in the repository by “Open in terminal”; the shell is left \
          behind when it exits. Blank follows lazygit when installed, \
          “none” for a plain shell. Currently: {}",
-        cfg.borrow()
-            .terminal_runs_command()
-            .unwrap_or_else(|| "a plain shell".into())
+        cfg.borrow().terminal_runs_command().unwrap_or_else(|| "a plain shell".into())
     )));
     tools_group.add(&runs);
     {
@@ -283,10 +272,7 @@ pub fn settings(
         });
     }
 
-    let editor = adw::EntryRow::builder()
-        .title("Editor")
-        .show_apply_button(true)
-        .build();
+    let editor = adw::EntryRow::builder().title("Editor").show_apply_button(true).build();
     editor.set_text(cfg.borrow().editor.as_deref().unwrap_or(""));
     editor.set_tooltip_text(Some(&format!(
         "Blank follows $EDITOR. Currently: {}",
@@ -324,10 +310,7 @@ pub fn settings(
         .build();
     refresh_group.add(&fetch);
 
-    let scope = adw::EntryRow::builder()
-        .title("Only repos tagged")
-        .show_apply_button(true)
-        .build();
+    let scope = adw::EntryRow::builder().title("Only repos tagged").show_apply_button(true).build();
     scope.set_text(&cfg.borrow().refresh.only_tags.join(", "));
     scope.set_tooltip_text(Some("Comma separated. Blank means every repository."));
     refresh_group.add(&scope);
@@ -417,10 +400,8 @@ pub fn settings(
         });
     }
 
-    let config_path = adw::ActionRow::builder()
-        .title("Config file")
-        .subtitle(tildify(&Config::path()))
-        .build();
+    let config_path =
+        adw::ActionRow::builder().title("Config file").subtitle(tildify(&Config::path())).build();
     config_path.add_css_class("property");
     look_group.add(&config_path);
 
@@ -496,12 +477,7 @@ fn set_scope(refresh: &mut Refresh, typed: &str) -> bool {
 
 fn add_button(label: &str) -> gtk::Button {
     gtk::Button::builder()
-        .child(
-            &adw::ButtonContent::builder()
-                .icon_name("list-add-symbolic")
-                .label(label)
-                .build(),
-        )
+        .child(&adw::ButtonContent::builder().icon_name("list-add-symbolic").label(label).build())
         .build()
 }
 
@@ -519,11 +495,8 @@ fn root_row(
     let path = resolved.path.clone();
 
     let row = adw::ExpanderRow::builder()
-
         // A path is not markup, and one with an ampersand in it used to
-
         // leave its row blank.
-
         .use_markup(false)
         .title(spec.path_str())
         .subtitle(root_summary(&resolved, report))
@@ -543,10 +516,7 @@ fn root_row(
         .subtitle("Follow the clones this folder's own repository ignores")
         .active(resolved.nested)
         .build();
-    let tag = adw::EntryRow::builder()
-        .title("Tag what is found here")
-        .show_apply_button(true)
-        .build();
+    let tag = adw::EntryRow::builder().title("Tag what is found here").show_apply_button(true).build();
     tag.set_text(resolved.tag.as_deref().unwrap_or(""));
     let include_self = adw::SwitchRow::builder()
         .title("Show the containing repository")
@@ -682,21 +652,13 @@ fn root_summary(root: &crate::config::Root, report: Option<&crate::git::RootRepo
 
 fn refresh_summary(cfg: &Rc<RefCell<Config>>, path: &std::path::Path, row: &adw::ExpanderRow) {
     let cfg = cfg.borrow();
-    if let Some(spec) = cfg
-        .roots
-        .iter()
-        .find(|spec| crate::config::expand(spec.path_str()) == path)
-    {
+    if let Some(spec) = cfg.roots.iter().find(|spec| crate::config::expand(spec.path_str()) == path) {
         // The report was for the root as it was scanned, before this change.
         row.set_subtitle(&root_summary(&spec.resolve(), None));
     }
 }
 
-fn removable_row(
-    entry: &str,
-    tooltip: &str,
-    on_remove: impl Fn() + 'static,
-) -> adw::ActionRow {
+fn removable_row(entry: &str, tooltip: &str, on_remove: impl Fn() + 'static) -> adw::ActionRow {
     let expanded = crate::config::expand(entry);
     let row = adw::ActionRow::builder()
         .use_markup(false)
@@ -714,17 +676,14 @@ fn removable_row(
     row
 }
 
-fn pick_folder(
-    parent: Option<&gtk::Window>,
-    title: &str,
-    on_pick: impl Fn(PathBuf) + 'static,
-) {
+fn pick_folder(parent: Option<&gtk::Window>, title: &str, on_pick: impl Fn(PathBuf) + 'static) {
     let dialog = gtk::FileDialog::builder().title(title).modal(true).build();
     dialog.select_folder(parent, gio::Cancellable::NONE, move |result| {
         if let Ok(file) = result
-            && let Some(path) = file.path() {
-                on_pick(path);
-            }
+            && let Some(path) = file.path()
+        {
+            on_pick(path);
+        }
     });
 }
 
@@ -783,11 +742,7 @@ impl Source {
 /// Everywhere the configuration has repositories come from: the roots as
 /// configured, not as a command line may have overridden them for this run.
 fn sources(cfg: &Config) -> Vec<PathBuf> {
-    cfg.roots
-        .iter()
-        .map(|spec| crate::config::expand(spec.path_str()))
-        .chain(cfg.extra_repos())
-        .collect()
+    cfg.roots.iter().map(|spec| crate::config::expand(spec.path_str())).chain(cfg.extra_repos()).collect()
 }
 
 fn toast(widget: &impl IsA<gtk::Widget>, text: &str) {
@@ -833,10 +788,7 @@ pub fn edit_tags(
     // Enter in the field presses Save. An entry row keeps Enter to itself
     // unless told otherwise, so a tag typed and entered went nowhere, under a
     // Save button drawn as the default.
-    let entry = adw::EntryRow::builder()
-        .title("Tags")
-        .activates_default(true)
-        .build();
+    let entry = adw::EntryRow::builder().title("Tags").activates_default(true).build();
     entry.set_text(&shared.join(", "));
 
     let group = adw::PreferencesGroup::new();
@@ -847,18 +799,10 @@ pub fn edit_tags(
 
     // Existing tags as one-click chips, so spelling stays consistent. One the
     // entry could not hold is not offered.
-    let known: Vec<(String, usize)> = known
-        .into_iter()
-        .filter(|(tag, _)| meta::editable(tag))
-        .collect();
+    let known: Vec<(String, usize)> = known.into_iter().filter(|(tag, _)| meta::editable(tag)).collect();
     // What the entry may be holding as a single tag: see `parse_edited`.
-    let whole: Rc<Vec<String>> = Rc::new(
-        shared
-            .iter()
-            .cloned()
-            .chain(known.iter().map(|(tag, _)| tag.clone()))
-            .collect(),
-    );
+    let whole: Rc<Vec<String>> =
+        Rc::new(shared.iter().cloned().chain(known.iter().map(|(tag, _)| tag.clone())).collect());
     if !known.is_empty() {
         let flow = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -867,9 +811,7 @@ pub fn edit_tags(
             .row_spacing(6)
             .build();
         for (tag, count) in known {
-            let button = gtk::Button::builder()
-                .label(format!("{tag} ({count})"))
-                .build();
+            let button = gtk::Button::builder().label(format!("{tag} ({count})")).build();
             button.add_css_class("om-tag-chip");
             let entry = entry.clone();
             let whole = Rc::clone(&whole);

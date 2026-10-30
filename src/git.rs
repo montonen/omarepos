@@ -242,9 +242,7 @@ impl RepoInfo {
     /// Does any language in the mix match `needle`? Anchored at the start of
     /// the name, so `script` does not find JavaScript but `java` does.
     pub fn speaks(&self, needle: &str) -> bool {
-        self.langs
-            .iter()
-            .any(|lang| lang.name.to_lowercase().starts_with(needle))
+        self.langs.iter().any(|lang| lang.name.to_lowercase().starts_with(needle))
     }
 
     /// Whether this is something to look at: what the window's warning
@@ -393,11 +391,7 @@ pub const UNPUSHED_CAP: usize = 1000;
 /// A walk that fails is an error and not a count. It used to be a count both
 /// ways: a walk that could not start was zero, and one that broke off at a
 /// commit it could not read counted the failure itself as a commit.
-fn on_no_remote(
-    repo: &Repository,
-    from: git2::Oid,
-    cap: usize,
-) -> Result<Vec<git2::Oid>, git2::Error> {
+fn on_no_remote(repo: &Repository, from: git2::Oid, cap: usize) -> Result<Vec<git2::Oid>, git2::Error> {
     let mut walk = repo.revwalk()?;
     walk.push(from)?;
     // No remote-tracking refs at all is not an error: then nothing is hidden,
@@ -517,10 +511,8 @@ pub fn survey(roots: &[Root], max_depth: usize) -> Survey {
     let mut seen = HashSet::new();
     let mut reports: Vec<RootReport> = roots.iter().map(RootReport::new).collect();
 
-    let bases: Vec<PathBuf> = roots
-        .iter()
-        .map(|root| root.path.canonicalize().unwrap_or_else(|_| root.path.clone()))
-        .collect();
+    let bases: Vec<PathBuf> =
+        roots.iter().map(|root| root.path.canonicalize().unwrap_or_else(|_| root.path.clone())).collect();
     // Deepest first. Two roots that hold the same repository lie on one line
     // of ancestors, so the one with more components is the narrower; the sort
     // is stable, so roots that do not overlap keep the order they were given.
@@ -602,10 +594,7 @@ impl Search<'_> {
     fn record(&mut self, path: PathBuf) {
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
         if self.seen.insert(key) {
-            let seed = Seed {
-                root: self.root.path.display().to_string(),
-                tag: self.root.tag.clone(),
-            };
+            let seed = Seed { root: self.root.path.display().to_string(), tag: self.root.tag.clone() };
             self.found.push(Found { path, seed: Some(seed) });
             self.report.found += 1;
         } else {
@@ -738,9 +727,8 @@ fn ignores(repo: &Repository, base: &Path, child: &Path) -> Result<bool, git2::E
 /// neither could be read.
 fn submodule_paths(repo: &Repository) -> Result<HashSet<PathBuf>, git2::Error> {
     const GITLINK: u32 = 0o160000;
-    let listed = repo
-        .submodules()
-        .map(|modules| modules.iter().map(|m| m.path().to_path_buf()).collect::<Vec<_>>());
+    let listed =
+        repo.submodules().map(|modules| modules.iter().map(|m| m.path().to_path_buf()).collect::<Vec<_>>());
     let linked = repo.index().map(|index| {
         index
             .iter()
@@ -750,11 +738,7 @@ fn submodule_paths(repo: &Repository) -> Result<HashSet<PathBuf>, git2::Error> {
     });
     match (listed, linked) {
         (Err(err), Err(_)) => Err(err),
-        (listed, linked) => Ok(listed
-            .into_iter()
-            .flatten()
-            .chain(linked.into_iter().flatten())
-            .collect()),
+        (listed, linked) => Ok(listed.into_iter().flatten().chain(linked.into_iter().flatten()).collect()),
     }
 }
 
@@ -834,10 +818,7 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         Ok(head) => {
             if repo.head_detached().unwrap_or(false) {
                 info.detached = true;
-                info.head = head
-                    .target()
-                    .map(|oid| short(&oid))
-                    .unwrap_or_else(|| "detached".into());
+                info.head = head.target().map(|oid| short(&oid)).unwrap_or_else(|| "detached".into());
             } else {
                 info.head = head.shorthand().unwrap_or("HEAD").to_string();
             }
@@ -862,7 +843,12 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
             info.head = repo
                 .find_reference("HEAD")
                 .ok()
-                .and_then(|r| r.symbolic_target().ok().flatten().map(|t| t.trim_start_matches("refs/heads/").to_string()))
+                .and_then(|r| {
+                    r.symbolic_target()
+                        .ok()
+                        .flatten()
+                        .map(|t| t.trim_start_matches("refs/heads/").to_string())
+                })
                 .unwrap_or_else(|| "main".into());
         }
         Err(err) => {
@@ -871,28 +857,26 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         }
     }
 
-    if !info.detached && !info.unborn
+    if !info.detached
+        && !info.unborn
         && let Ok(branch) = repo.find_branch(&info.head, BranchType::Local)
-            && let Ok(upstream) = branch.upstream() {
-                info.upstream = upstream.name().ok().flatten().map(|s| s.to_string());
-                info.upstream_when = upstream
-                    .get()
-                    .peel_to_commit()
-                    .ok()
-                    .map(|commit| commit.time().seconds());
-                let local = branch.get().target();
-                let remote = upstream.get().target();
-                upstream_commit = remote;
-                if let (Some(local), Some(remote)) = (local, remote) {
-                    match repo.graph_ahead_behind(local, remote) {
-                        Ok((ahead, behind)) => {
-                            info.ahead = ahead;
-                            info.behind = behind;
-                        }
-                        Err(err) => info.history_unreadable = Some(err.message().to_string()),
-                    }
+        && let Ok(upstream) = branch.upstream()
+    {
+        info.upstream = upstream.name().ok().flatten().map(|s| s.to_string());
+        info.upstream_when = upstream.get().peel_to_commit().ok().map(|commit| commit.time().seconds());
+        let local = branch.get().target();
+        let remote = upstream.get().target();
+        upstream_commit = remote;
+        if let (Some(local), Some(remote)) = (local, remote) {
+            match repo.graph_ahead_behind(local, remote) {
+                Ok((ahead, behind)) => {
+                    info.ahead = ahead;
+                    info.behind = behind;
                 }
+                Err(err) => info.history_unreadable = Some(err.message().to_string()),
             }
+        }
+    }
 
     if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
         info.local_branches = branches.count();
@@ -932,11 +916,8 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
 
     // One remote for both: the page `o` opens is the page of the remote the
     // card names. Origin, or the first there is when nothing is called that.
-    let configured = repo
-        .find_remote("origin")
-        .ok()
-        .and_then(|r| r.url().ok().map(str::to_string))
-        .or_else(|| {
+    let configured =
+        repo.find_remote("origin").ok().and_then(|r| r.url().ok().map(str::to_string)).or_else(|| {
             repo.remotes().ok().and_then(|names| {
                 names
                     .iter()
@@ -1078,10 +1059,7 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         if total > 0 {
             let mut shares: Vec<LangShare> = counts
                 .into_iter()
-                .map(|(name, count)| LangShare {
-                    name: name.to_string(),
-                    share: count as f32 / total as f32,
-                })
+                .map(|(name, count)| LangShare { name: name.to_string(), share: count as f32 / total as f32 })
                 .collect();
             shares.sort_by(|a, b| {
                 b.share
@@ -1286,15 +1264,11 @@ fn identity_doubt(config: &git2::Config, in_environment: &dyn Fn(&str) -> bool) 
     while let Some(entry) = entries.next() {
         let Ok(entry) = entry else { continue };
         let Ok(name) = entry.name() else { continue };
-        let Some(condition) = name
-            .strip_prefix("includeif.")
-            .and_then(|rest| rest.strip_suffix(".path"))
+        let Some(condition) = name.strip_prefix("includeif.").and_then(|rest| rest.strip_suffix(".path"))
         else {
             continue;
         };
-        let followed = ["gitdir:", "gitdir/i:", "onbranch:"]
-            .iter()
-            .any(|kind| condition.starts_with(kind));
+        let followed = ["gitdir:", "gitdir/i:", "onbranch:"].iter().any(|kind| condition.starts_with(kind));
         if !followed {
             let kind = condition.split(':').next().unwrap_or(condition);
             return Some(format!(
@@ -1502,10 +1476,8 @@ mod tests {
 
         let found = discover(&roots, 3);
         assert_eq!(below(&found, &code), ["app", "clients/api", "clients/web"]);
-        let tags: Vec<Option<&str>> = found
-            .iter()
-            .map(|found| found.seed.as_ref().and_then(|seed| seed.tag.as_deref()))
-            .collect();
+        let tags: Vec<Option<&str>> =
+            found.iter().map(|found| found.seed.as_ref().and_then(|seed| seed.tag.as_deref())).collect();
         assert_eq!(tags, [None, Some("acme"), Some("acme")]);
 
         // Each root is told apart by what it put on the grid, and the wider
@@ -1946,10 +1918,7 @@ mod tests {
     /// has always shown is the first of the ones it names.
     fn scan(path: &Path, now: i64) -> RepoInfo {
         let info = inspect_at(path, now);
-        assert_eq!(
-            format!("{:?}", info.last_commit.as_ref()),
-            format!("{:?}", info.activity.recent.first())
-        );
+        assert_eq!(format!("{:?}", info.last_commit.as_ref()), format!("{:?}", info.activity.recent.first()));
         info
     }
 
@@ -1970,11 +1939,7 @@ mod tests {
 
     /// The same, with whether each is on no remote.
     fn marked(info: &RepoInfo) -> Vec<(&str, bool)> {
-        info.activity
-            .recent
-            .iter()
-            .map(|commit| (commit.summary.as_str(), commit.unpushed))
-            .collect()
+        info.activity.recent.iter().map(|commit| (commit.summary.as_str(), commit.unpushed)).collect()
     }
 
     #[test]
@@ -2011,10 +1976,7 @@ mod tests {
         }
 
         let activity = scan(&dir, now).activity;
-        assert_eq!(
-            activity.days,
-            days(&[(27, [2, 0]), (26, [1, 0]), (2, [1, 0]), (1, [2, 0]), (0, [5, 0])])
-        );
+        assert_eq!(activity.days, days(&[(27, [2, 0]), (26, [1, 0]), (2, [1, 0]), (1, [2, 0]), (0, [5, 0])]));
         assert_eq!(activity.reached, ACTIVITY_DAYS);
         assert_eq!((activity.week, activity.people), (8, 1));
 
@@ -2040,8 +2002,7 @@ mod tests {
         for (i, written) in [40 * DAY, 10 * DAY, 2 * DAY].into_iter().enumerate() {
             let date = format!("@{} +0000", now - written);
             let message = format!("written {} days ago", written / DAY);
-            let commit =
-                ["commit", "-q", "--allow-empty", "--author", &ann, "--date", &date, "-m", &message];
+            let commit = ["commit", "-q", "--allow-empty", "--author", &ann, "--date", &date, "-m", &message];
             git_at(&dir, now - 3600 + i as i64, &commit);
         }
 
@@ -2053,10 +2014,7 @@ mod tests {
         // of the week's two people.
         assert_eq!(info.activity.days, days(&[(10, [0, 1]), (3, [1, 0]), (2, [0, 1])]));
         assert_eq!((info.activity.week, info.activity.people), (2, 2));
-        assert_eq!(
-            named(&info),
-            ["written 2 days ago", "written 10 days ago", "written 40 days ago"]
-        );
+        assert_eq!(named(&info), ["written 2 days ago", "written 10 days ago", "written 40 days ago"]);
         // The name on a card has always been the author's, and how old the
         // card says a commit is has always gone by when it was committed.
         // Neither has changed.
@@ -2083,16 +2041,9 @@ mod tests {
         assert_eq!(info.identity_doubt, None);
         assert!(info.activity.split);
         assert_eq!(info.activity.days, days(&[(2, [2, 1]), (1, [0, 1]), (0, [1, 0])]));
-        let whose: Vec<(&str, bool)> = info
-            .activity
-            .recent
-            .iter()
-            .map(|commit| (commit.summary.as_str(), commit.mine))
-            .collect();
-        assert_eq!(
-            whose,
-            [("mine, just now", true), ("ben, yesterday", false), ("mine, in capitals", true)]
-        );
+        let whose: Vec<(&str, bool)> =
+            info.activity.recent.iter().map(|commit| (commit.summary.as_str(), commit.mine)).collect();
+        assert_eq!(whose, [("mine, just now", true), ("ben, yesterday", false), ("mine, in capitals", true)]);
         assert!(info.last_commit.is_some_and(|commit| commit.mine));
     }
 
@@ -2209,10 +2160,7 @@ mod tests {
         commit_as(&f.work, ME, now - 3600, "mine, an hour ago");
         let info = scan(&f.work, now);
         assert_eq!((info.ahead, info.behind), (1, 2));
-        assert_eq!(
-            info.activity.days,
-            days(&[(5, [0, 1]), (2, [0, 1]), (1, [0, 1]), (0, [1, 0])])
-        );
+        assert_eq!(info.activity.days, days(&[(5, [0, 1]), (2, [0, 1]), (1, [0, 1]), (0, [1, 0])]));
         assert_eq!(named(&info), ["mine, an hour ago", "shared", "first"]);
 
         // On no branch there is no upstream to be behind.
@@ -2403,10 +2351,7 @@ mod tests {
         assert_eq!((info.remote.as_deref(), info.unpushed), (None, 4));
         assert_eq!(marked(&info), [("1d ago", true), ("2d ago", true), ("3d ago", true)]);
         // Nothing else about it needs a remote.
-        assert_eq!(
-            info.activity.days,
-            days(&[(4, [1, 0]), (3, [1, 0]), (2, [1, 0]), (1, [1, 0])])
-        );
+        assert_eq!(info.activity.days, days(&[(4, [1, 0]), (3, [1, 0]), (2, [1, 0]), (1, [1, 0])]));
         assert_eq!(info.activity.reached, ACTIVITY_DAYS);
 
         // More of them than are counted. The count stops at its cap, and the

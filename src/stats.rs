@@ -323,10 +323,7 @@ fn in_parallel<T: Send>(
     each: impl Fn(usize) -> T + Sync,
     mut done: impl FnMut(usize) -> bool,
 ) -> Option<Vec<T>> {
-    let workers = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 8)
-        .min(count.max(1));
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(count.max(1));
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let mut out: Vec<Option<T>> = (0..count).map(|_| None).collect();
@@ -665,8 +662,7 @@ fn collect(path: &Path, window: &Window, branches: Branches) -> Result<Found, St
             walk.push(head).map_err(said)?;
             if let Some(upstream) = upstream_tip(&repo).map_err(said)? {
                 walk.push(upstream).map_err(said)?;
-                rewritten =
-                    rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
+                rewritten = rewritten_upstream(&repo, head, upstream, window.since()).map_err(said)?;
             }
         }
         // `git log HEAD --branches --remotes`. HEAD besides the branches,
@@ -743,13 +739,7 @@ fn collect(path: &Path, window: &Window, branches: Branches) -> Result<Found, St
             name: author.name().unwrap_or("unknown").to_string(),
             co_authors: co_authors(&commit, mailmap.as_ref(), &email),
             email,
-            summary: commit
-                .summary()
-                .ok()
-                .flatten()
-                .unwrap_or("(no message)")
-                .trim()
-                .to_string(),
+            summary: commit.summary().ok().flatten().unwrap_or("(no message)").trim().to_string(),
             when,
             committed,
             day,
@@ -901,12 +891,7 @@ fn rewritten_upstream(
 /// The commits reachable from `tip` and not from `other`, newest first, back to
 /// the start of the window. A copy is committed after what it copies, so
 /// nothing committed before the window can be a copy of anything inside it.
-fn only_on(
-    repo: &Repository,
-    tip: Oid,
-    other: Oid,
-    since: i64,
-) -> Result<Vec<(Oid, Mark)>, git2::Error> {
+fn only_on(repo: &Repository, tip: Oid, other: Oid, since: i64) -> Result<Vec<(Oid, Mark)>, git2::Error> {
     let mut walk = repo.revwalk()?;
     walk.set_sorting(Sort::TIME)?;
     walk.push(tip)?;
@@ -967,9 +952,7 @@ fn diff_stats(repo: &Repository, commit: &git2::Commit<'_>) -> Option<(usize, us
             }
         }
     }
-    let mut diff = repo
-        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
-        .ok()?;
+    let mut diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts)).ok()?;
     find_renames(&mut diff).ok()?;
     let stats = diff.stats().ok()?;
     Some((stats.insertions(), stats.deletions(), stats.files_changed()))
@@ -1786,11 +1769,8 @@ mod tests {
 
     #[test]
     fn the_window_ends_with_its_last_day() {
-        let window = Window {
-            day_starts: vec![0, DAY, 2 * DAY],
-            day_labels: Vec::new(),
-            day_titles: Vec::new(),
-        };
+        let window =
+            Window { day_starts: vec![0, DAY, 2 * DAY], day_labels: Vec::new(), day_titles: Vec::new() };
         assert_eq!(window.index_of(-1), None);
         assert_eq!(window.index_of(0), Some(0));
         assert_eq!(window.index_of(DAY - 1), Some(0));

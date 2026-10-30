@@ -91,11 +91,7 @@ type Rgb = (f64, f64, f64);
 /// drawing `to` at an alpha or an opacity of `by` over `from` comes to: GTK
 /// blends the encoded values, not linear light.
 fn mix(from: Rgb, to: Rgb, by: f64) -> Rgb {
-    (
-        from.0 + (to.0 - from.0) * by,
-        from.1 + (to.1 - from.1) * by,
-        from.2 + (to.2 - from.2) * by,
-    )
+    (from.0 + (to.0 - from.0) * by, from.1 + (to.1 - from.1) * by, from.2 + (to.2 - from.2) * by)
 }
 
 /// GTK's `shade()`: the colour taken to hue, lightness and saturation, the
@@ -107,8 +103,7 @@ fn shade((r, g, b): Rgb, factor: f64) -> Rgb {
         (0.0, 0.0)
     } else {
         let spread = max - min;
-        let saturation =
-            if lightness > 0.5 { spread / (2.0 - max - min) } else { spread / (max + min) };
+        let saturation = if lightness > 0.5 { spread / (2.0 - max - min) } else { spread / (max + min) };
         let sixth = if max == r {
             (g - b) / spread + if g < b { 6.0 } else { 0.0 }
         } else if max == g {
@@ -145,8 +140,7 @@ fn shade((r, g, b): Rgb, factor: f64) -> Rgb {
 /// for black on white.
 fn contrast(a: Rgb, b: Rgb) -> f64 {
     let luminance = |(r, g, b): Rgb| {
-        let linear =
-            |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        let linear = |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
         0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
     };
     let (a, b) = (luminance(a), luminance(b));
@@ -288,21 +282,14 @@ impl Palette {
     /// a duplicate-field error, and the error into no palette at all.
     fn resolve(text: &str, marked_light: bool) -> Self {
         let table: toml::Table = text.parse().unwrap_or_default();
-        let word = |name: &str| {
-            table.get(name).and_then(|value| value.as_str()).map(str::trim)
-        };
+        let word = |name: &str| table.get(name).and_then(|value| value.as_str()).map(str::trim);
         let colour = |names: &[&str]| -> Option<String> {
-            names
-                .iter()
-                .filter_map(|name| word(name))
-                .find(|value| is_hex(value))
-                .map(str::to_string)
+            names.iter().filter_map(|name| word(name)).find(|value| is_hex(value)).map(str::to_string)
         };
         let fb = Self::fallback();
 
         let background = colour(&["background", "bg", "color0"]);
-        let declared =
-            ["mode", "theme_type"].into_iter().filter_map(word).find(|mode| !mode.is_empty());
+        let declared = ["mode", "theme_type"].into_iter().filter_map(word).find(|mode| !mode.is_empty());
         let dark = match (background.as_deref(), declared) {
             // Nothing of the theme's is behind the text, then: the window
             // gets the built-in background, which is dark whatever the theme
@@ -338,8 +325,7 @@ impl Palette {
             fg_dim: hex(mix(Self::rgb(&bg), Self::rgb(&fg), MUTED)),
             bg,
             fg,
-            border: colour(&["muted", "color8", "selection", "selection_background"])
-                .unwrap_or(fb.border),
+            border: colour(&["muted", "color8", "selection", "selection_background"]).unwrap_or(fb.border),
             accent: colour(&["accent"]).unwrap_or(fb.accent),
             red: colour(&["red", "color1"]).unwrap_or(fb.red),
             yellow: colour(&["yellow", "color3", "orange"]).unwrap_or(fb.yellow),
@@ -420,17 +406,13 @@ impl Palette {
         // A status letter has no fill. It is drawn straight on the row, and
         // has to be read on each background a row can have.
         let rows = [page, mix(page, fg, ROW_LIT), mix(page, fg, ROW_SELECTED)];
-        let letters = [
-            ("added", &p.green),
-            ("deleted", &p.red),
-            ("renamed", &p.cyan),
-            ("modified", &p.yellow),
-        ]
-        .map(|(class, hue)| {
-            let text = p.ink(hue, |ink| rows.iter().all(|&row| contrast(ink, row) >= LEGIBLE));
-            format!(".om-status.{class} {{\n  color: {text};\n}}")
-        })
-        .join("\n\n");
+        let letters =
+            [("added", &p.green), ("deleted", &p.red), ("renamed", &p.cyan), ("modified", &p.yellow)]
+                .map(|(class, hue)| {
+                    let text = p.ink(hue, |ink| rows.iter().all(|&row| contrast(ink, row) >= LEGIBLE));
+                    format!(".om-status.{class} {{\n  color: {text};\n}}")
+                })
+                .join("\n\n");
         // What a card writes in a hue has no fill either: yellow for work
         // that is not committed, the accent for commits that are nowhere
         // else, red for trouble. It has to be read on each colour a card
@@ -1324,64 +1306,64 @@ mod tests {
             "retro-82",
             true,
             [
-                "#05182e", "#0a2540", "#020c17", "#f6dcac", "#a7c9c6", "#2a6b78", "#faa968",
-                "#f85525", "#e97b3c", "#028391", "#3f8f8a", "#8cbfb8", "#3f8f8a",
+                "#05182e", "#0a2540", "#020c17", "#f6dcac", "#a7c9c6", "#2a6b78", "#faa968", "#f85525",
+                "#e97b3c", "#028391", "#3f8f8a", "#8cbfb8", "#3f8f8a",
             ],
         ),
         (
             "tokyo-night",
             true,
             [
-                "#1a1b26", "#24283b", "#0e0e14", "#a9b1d6", "#b4bee6", "#414868", "#7aa2f7",
-                "#f7768e", "#e0af68", "#9ece6a", "#7aa2f7", "#449dab", "#ad8ee6",
+                "#1a1b26", "#24283b", "#0e0e14", "#a9b1d6", "#b4bee6", "#414868", "#7aa2f7", "#f7768e",
+                "#e0af68", "#9ece6a", "#7aa2f7", "#449dab", "#ad8ee6",
             ],
         ),
         (
             "everforest",
             true,
             [
-                "#2d353b", "#343f44", "#181d20", "#d3c6aa", "#9da9a0", "#475258", "#7fbbb3",
-                "#e67e80", "#dbbc7f", "#a7c080", "#7fbbb3", "#83c092", "#d699b6",
+                "#2d353b", "#343f44", "#181d20", "#d3c6aa", "#9da9a0", "#475258", "#7fbbb3", "#e67e80",
+                "#dbbc7f", "#a7c080", "#7fbbb3", "#83c092", "#d699b6",
             ],
         ),
         (
             "miasma",
             true,
             [
-                "#222222", "#2c2c2c", "#121212", "#c2c2b0", "#8a8a7e", "#666666", "#78824b",
-                "#685742", "#b36d43", "#5f875f", "#78824b", "#c9a554", "#bb7744",
+                "#222222", "#2c2c2c", "#121212", "#c2c2b0", "#8a8a7e", "#666666", "#78824b", "#685742",
+                "#b36d43", "#5f875f", "#78824b", "#c9a554", "#bb7744",
             ],
         ),
         (
             "kanagawa",
             true,
             [
-                "#1f1f28", "#223249", "#111116", "#dcd7ba", "#c8c093", "#54546d", "#dcd7ba",
-                "#c34043", "#c0a36e", "#76946a", "#7e9cd8", "#6a9589", "#957fb8",
+                "#1f1f28", "#223249", "#111116", "#dcd7ba", "#c8c093", "#54546d", "#dcd7ba", "#c34043",
+                "#c0a36e", "#76946a", "#7e9cd8", "#6a9589", "#957fb8",
             ],
         ),
         (
             "catppuccin-latte",
             false,
             [
-                "#eff1f5", "#dce0e8", "#d7d8dc", "#4c4f69", "#5c5f77", "#acb0be", "#1e66f5",
-                "#d20f39", "#df8e1d", "#40a02b", "#1e66f5", "#179299", "#ea76cb",
+                "#eff1f5", "#dce0e8", "#d7d8dc", "#4c4f69", "#5c5f77", "#acb0be", "#1e66f5", "#d20f39",
+                "#df8e1d", "#40a02b", "#1e66f5", "#179299", "#ea76cb",
             ],
         ),
         (
             "rose-pine",
             false,
             [
-                "#faf4ed", "#f2e9e1", "#e1dbd5", "#575279", "#6e6a86", "#cecacd", "#56949f",
-                "#b4637a", "#ea9d34", "#286983", "#56949f", "#d7827e", "#907aa9",
+                "#faf4ed", "#f2e9e1", "#e1dbd5", "#575279", "#6e6a86", "#cecacd", "#56949f", "#b4637a",
+                "#ea9d34", "#286983", "#56949f", "#d7827e", "#907aa9",
             ],
         ),
         (
             "flexoki-light",
             false,
             [
-                "#fffcf0", "#e6e4d9", "#e5e2d8", "#100f0f", "#403e3c", "#b7b5ac", "#205ea6",
-                "#d14d41", "#d0a215", "#879a39", "#205ea6", "#3aa99f", "#ce5d97",
+                "#fffcf0", "#e6e4d9", "#e5e2d8", "#100f0f", "#403e3c", "#b7b5ac", "#205ea6", "#d14d41",
+                "#d0a215", "#879a39", "#205ea6", "#3aa99f", "#ce5d97",
             ],
         ),
     ];
@@ -1587,11 +1569,7 @@ mod tests {
     /// One colour drawn over another. GTK blends the encoded values, not
     /// linear light, unless it is asked to with a debug flag.
     fn over((r, g, b, alpha): Rgba, under: Solid) -> Solid {
-        (
-            under.0 + (r - under.0) * alpha,
-            under.1 + (g - under.1) * alpha,
-            under.2 + (b - under.2) * alpha,
-        )
+        (under.0 + (r - under.0) * alpha, under.1 + (g - under.1) * alpha, under.2 + (b - under.2) * alpha)
     }
 
     /// A colour inside a widget drawn at `opacity`, with `backdrop` behind
@@ -1603,8 +1581,7 @@ mod tests {
     /// The WCAG 2 contrast ratio.
     fn ratio(a: Solid, b: Solid) -> f64 {
         let luminance = |(r, g, b): Solid| {
-            let linear =
-                |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            let linear = |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
             0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
         };
         let (a, b) = (luminance(a), luminance(b));
@@ -1661,14 +1638,8 @@ mod tests {
         ("with the focus", "flowbox.om-flow > flowboxchild:focus-visible .om-card"),
         ("ticked", ".om-card.om-selected"),
         ("ticked, under the pointer", ".om-card.om-selected:hover"),
-        (
-            "ticked, under an idle pointer",
-            "flowbox.om-flow.om-keyboard .om-card.om-selected:hover",
-        ),
-        (
-            "ticked, with the focus",
-            "flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected",
-        ),
+        ("ticked, under an idle pointer", "flowbox.om-flow.om-keyboard .om-card.om-selected:hover"),
+        ("ticked, with the focus", "flowbox.om-flow > flowboxchild:focus-visible .om-card.om-selected"),
     ];
 
     /// The rule that steps a card back once another is ticked.
@@ -1713,13 +1684,28 @@ mod tests {
 
     /// What a card writes or draws in the foreground or in a hue.
     const WRITTEN: [&str; 11] = [
-        ".om-branch", ".om-tree", ".om-tree.work", ".om-tree.bad", ".om-out", ".om-in",
-        ".om-bad", ".om-arrow.out", ".om-arrow.bad", ".om-subject", ".om-pulse",
+        ".om-branch",
+        ".om-tree",
+        ".om-tree.work",
+        ".om-tree.bad",
+        ".om-out",
+        ".om-in",
+        ".om-bad",
+        ".om-arrow.out",
+        ".om-arrow.bad",
+        ".om-subject",
+        ".om-pulse",
     ];
     /// And in the theme's dim.
     const MUTED: [&str; 8] = [
-        ".om-where", ".om-tree.word", ".om-arrow", ".om-age", ".om-who", ".om-caption",
-        ".om-key", ".om-glyph",
+        ".om-where",
+        ".om-tree.word",
+        ".om-arrow",
+        ".om-age",
+        ".om-who",
+        ".om-caption",
+        ".om-key",
+        ".om-glyph",
     ];
     const REFS: [&str; 5] = ["local", "current", "remote", "tag", "head"];
     const LETTERS: [&str; 4] = ["added", "deleted", "renamed", "modified"];
@@ -1844,14 +1830,8 @@ color15 = "#bcc0cc"
 
         let palette = Palette::load();
         assert!(!palette.dark, "a background of #eff1f5 is a light theme");
-        assert_eq!(
-            [&palette.red, &palette.green, &palette.yellow],
-            ["#d20f39", "#40a02b", "#df8e1d"]
-        );
-        assert_eq!(
-            [&palette.blue, &palette.magenta, &palette.cyan],
-            ["#1e66f5", "#ea76cb", "#179299"]
-        );
+        assert_eq!([&palette.red, &palette.green, &palette.yellow], ["#d20f39", "#40a02b", "#df8e1d"]);
+        assert_eq!([&palette.blue, &palette.magenta, &palette.cyan], ["#1e66f5", "#ea76cb", "#179299"]);
         assert_eq!(palette.border, "#acb0be", "color8, not the selection's salmon");
         assert_eq!((palette.bg.as_str(), palette.fg.as_str()), ("#eff1f5", "#4c4f69"));
 
@@ -1886,13 +1866,11 @@ color15 = "#bcc0cc"
             "theme_type outranks the file"
         );
         assert!(
-            !Palette::resolve(&format!("mode = \"light\"\ntheme_type = \"dark\"\n{night}"), false)
-                .dark,
+            !Palette::resolve(&format!("mode = \"light\"\ntheme_type = \"dark\"\n{night}"), false).dark,
             "mode outranks theme_type"
         );
         assert!(
-            !Palette::resolve(&format!("mode = \"\"\ntheme_type = \"light\"\n{night}"), false)
-                .dark,
+            !Palette::resolve(&format!("mode = \"\"\ntheme_type = \"light\"\n{night}"), false).dark,
             "an empty mode is no answer"
         );
     }
@@ -1951,8 +1929,7 @@ color15 = "#bcc0cc"
 
         // A value that is not a colour passes the turn to the next name, and
         // one that is not text does not cost the theme the rest of its file.
-        let palette =
-            Palette::resolve("red = \"crimson\"\ncolor1 = \"#bb0000\"\ncolor2 = 2\n", false);
+        let palette = Palette::resolve("red = \"crimson\"\ncolor1 = \"#bb0000\"\ncolor2 = 2\n", false);
         assert_eq!(palette.red, "#bb0000");
         assert_eq!(palette.green, Palette::fallback().green);
     }
@@ -1988,20 +1965,11 @@ brown = "#743d1e"
 "##;
         let palette = Palette::resolve(retro, false);
         assert!(palette.dark);
-        assert_eq!(
-            [&palette.bg, &palette.bg_raised, &palette.bg_sunken],
-            ["#05182e", "#0a2540", "#020c17"]
-        );
+        assert_eq!([&palette.bg, &palette.bg_raised, &palette.bg_sunken], ["#05182e", "#0a2540", "#020c17"]);
         assert_eq!([&palette.fg, &palette.fg_dim], ["#f6dcac", "#aea186"]);
         assert_eq!([&palette.border, &palette.accent], ["#2a6b78", "#faa968"]);
-        assert_eq!(
-            [&palette.red, &palette.yellow, &palette.green],
-            ["#f85525", "#e97b3c", "#028391"]
-        );
-        assert_eq!(
-            [&palette.blue, &palette.cyan, &palette.magenta],
-            ["#3f8f8a", "#8cbfb8", "#3f8f8a"]
-        );
+        assert_eq!([&palette.red, &palette.yellow, &palette.green], ["#f85525", "#e97b3c", "#028391"]);
+        assert_eq!([&palette.blue, &palette.cyan, &palette.magenta], ["#3f8f8a", "#8cbfb8", "#3f8f8a"]);
     }
 
     /// A ticked card had the accent mixed in under its text: 22% of it, and
@@ -2055,8 +2023,7 @@ brown = "#743d1e"
             for rule in &forward {
                 assert_eq!(sheet.number(rule, "opacity"), 1.0, "{rule}");
             }
-            let idle =
-                "flowbox.om-flow.om-keyboard.om-has-selection .om-card:not(.om-selected):hover";
+            let idle = "flowbox.om-flow.om-keyboard.om-has-selection .om-card:not(.om-selected):hover";
             assert_eq!(sheet.number(idle, "opacity"), opacity);
         }
         names.check();
@@ -2071,9 +2038,24 @@ brown = "#743d1e"
     #[test]
     fn every_element_a_selector_names_is_one_gtk_has() {
         const NODES: [&str; 18] = [
-            "window", "headerbar", "button", "entry", "dropdown", "popover", "contents",
-            "flowbox", "flowboxchild", "scrolledwindow", "checkbutton", "check", "list", "row",
-            "textview", "text", "paned", "separator",
+            "window",
+            "headerbar",
+            "button",
+            "entry",
+            "dropdown",
+            "popover",
+            "contents",
+            "flowbox",
+            "flowboxchild",
+            "scrolledwindow",
+            "checkbutton",
+            "check",
+            "list",
+            "row",
+            "textview",
+            "text",
+            "paned",
+            "separator",
         ];
         let sheet = Sheet::of(&Palette::fallback());
         for (selector, _, _) in &sheet.rules {
@@ -2086,10 +2068,7 @@ brown = "#743d1e"
         // for whatever in them has no colour of its own: Adwaita's rule for
         // `list` sets both.
         assert_eq!(sheet.colour("list.om-results", "background-color").3, 0.0);
-        assert_eq!(
-            sheet.solid("list.om-results", "color"),
-            sheet.solid("window.omarepos", "color")
-        );
+        assert_eq!(sheet.solid("list.om-results", "color"), sheet.solid("window.omarepos", "color"));
 
         // The rules for a row of these lists outrank `.om-row`, which is on
         // the row itself in the graph and the search results and gives it
@@ -2250,19 +2229,20 @@ brown = "#743d1e"
             let layer = [".om-less", ".om-more", ".om-keys", ".om-enter"]
                 .into_iter()
                 .find(|layer| selector.ends_with(layer));
-            if property == "opacity" && selector.contains(":hover")
-                && let Some(layer) = layer {
-                    let asked = selector.contains(".om-pointer");
-                    assert!(asked, "`{selector}` changes a card that is only lying under the pointer");
-                    assert!(under_the_pointer.contains(&layer), "`{selector}` shows keys under the pointer");
-                }
+            if property == "opacity"
+                && selector.contains(":hover")
+                && let Some(layer) = layer
+            {
+                let asked = selector.contains(".om-pointer");
+                assert!(asked, "`{selector}` changes a card that is only lying under the pointer");
+                assert!(under_the_pointer.contains(&layer), "`{selector}` shows keys under the pointer");
+            }
         }
 
         // `border-color` is all four sides. A rule that sets it on a card has
         // to lose to the card's edge, or be written again with the edge's
         // class on the card, which then outweighs it: the focus rule is.
-        let edges =
-            [("trouble", &palette.red), ("work", &palette.yellow), ("out", &palette.accent)];
+        let edges = [("trouble", &palette.red), ("work", &palette.yellow), ("out", &palette.accent)];
         for (state, hue) in edges {
             let edge = format!(".om-card.om-edge-{state}");
             assert_eq!(sheet.value(&edge, "border-left"), format!("4px solid {hue}"));
@@ -2272,8 +2252,7 @@ brown = "#743d1e"
                 let card = rule.rsplit(' ').next().unwrap_or_default();
                 if property == "border-color" && card.contains(".om-card") {
                     let again = rule.replacen(".om-card", &edge, 1);
-                    let kept =
-                        sheet.rules.iter().any(|(s, p, _)| *s == again && p == "border-left");
+                    let kept = sheet.rules.iter().any(|(s, p, _)| *s == again && p == "border-left");
                     assert!(kept || rank(rule) < rank(&edge), "`{rule}` recolours `{edge}`");
                 }
             }
@@ -2377,8 +2356,7 @@ brown = "#743d1e"
     #[test]
     fn text_sizes_follow_the_desktops_font() {
         let sheet = Sheet::of(&Palette::fallback());
-        let sizes: Vec<_> =
-            sheet.rules.iter().filter(|(_, property, _)| property == "font-size").collect();
+        let sizes: Vec<_> = sheet.rules.iter().filter(|(_, property, _)| property == "font-size").collect();
         assert!(!sizes.is_empty());
         for (selector, _, size) in sizes {
             let rems = size.strip_suffix("rem").and_then(|number| number.parse::<f64>().ok());

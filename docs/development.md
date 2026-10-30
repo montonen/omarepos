@@ -26,7 +26,9 @@ runs the program itself, as `omarepos --json`, in a home of its own under
 reaches the caller: standard output, standard error and the exit status. Every push and
 pull request is built and tested on GitHub
 (`.github/workflows/ci.yml`), in an Arch container with the packages above,
-and walked there as well ([In CI](#in-ci), below).
+and walked there as well ([In CI](#in-ci), below). CI checks the layout and the
+lints first: `cargo fmt --check`, with the settings in `rustfmt.toml`, and
+`cargo clippy --all-targets -- -D warnings`. Run both before pushing.
 
 A panic inside a GTK callback ends the program, and most of what a window
 does cannot be reached by a unit test. So there is a second kind of test, a

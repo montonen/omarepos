@@ -143,8 +143,7 @@ pub fn install(window: &adw::ApplicationWindow) {
         while let Some(widget) = at {
             let controllers = widget.observe_controllers();
             for index in 0..controllers.n_items() {
-                let Some(keys) = controllers.item(index).and_downcast::<gtk::EventControllerKey>()
-                else {
+                let Some(keys) = controllers.item(index).and_downcast::<gtk::EventControllerKey>() else {
                     continue;
                 };
                 let taken = keys.emit_by_name::<bool>(
@@ -165,11 +164,14 @@ pub fn install(window: &adw::ApplicationWindow) {
                 .as_ref()
                 .and_then(|focus| focus.ancestor(gtk::ListBox::static_type()))
                 .and_downcast::<gtk::ListBox>()
-            {
-                let count: i32 = if name == "Up" { -1 } else { 1 };
-                list.emit_by_name::<()>("move-cursor", &[&gtk::MovementStep::DisplayLines, &count, &false, &false]);
-                return;
-            }
+        {
+            let count: i32 = if name == "Up" { -1 } else { 1 };
+            list.emit_by_name::<()>(
+                "move-cursor",
+                &[&gtk::MovementStep::DisplayLines, &count, &false, &false],
+            );
+            return;
+        }
         // Enter, where no handler of ours wanted it, is what GTK would make
         // of it: the widget's own activation (a card, an entry, a button).
         if matches!(name, "Return" | "KP_Enter") {
@@ -343,11 +345,8 @@ pub fn install(window: &adw::ApplicationWindow) {
             return;
         };
         let display = gtk::prelude::WidgetExt::display(&window);
-        let screen = display
-            .monitors()
-            .item(0)
-            .and_downcast::<gtk::gdk::Monitor>()
-            .map(|monitor| monitor.geometry());
+        let screen =
+            display.monitors().item(0).and_downcast::<gtk::gdk::Monitor>().map(|monitor| monitor.geometry());
         match screen {
             Some(screen) if width > screen.width() || height > screen.height() => {
                 window.set_size_request(width.max(least.0), height.max(least.1));
@@ -427,7 +426,8 @@ pub fn install(window: &adw::ApplicationWindow) {
         // by anything in it.
         #[allow(deprecated)]
         if let Some(background) = window.style_context().lookup_color("om_bg") {
-            snapshot.append_color(&background, &gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32));
+            snapshot
+                .append_color(&background, &gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32));
         }
         let mut child = window.first_child();
         while let Some(current) = child {
@@ -509,10 +509,9 @@ pub fn install(window: &adw::ApplicationWindow) {
         // has never been laid out is nowhere: such cards are told apart by
         // their numbers, which is all the handler needs of a place.
         let (x, y) = match child.compute_bounds(&flow) {
-            Some(bounds) if bounds.width() > 0.0 => (
-                f64::from(bounds.x() + bounds.width() / 2.0),
-                f64::from(bounds.y() + bounds.height() / 2.0),
-            ),
+            Some(bounds) if bounds.width() > 0.0 => {
+                (f64::from(bounds.x() + bounds.width() / 2.0), f64::from(bounds.y() + bounds.height() / 2.0))
+            }
             _ => (f64::from(child.index()) * 40.0 + 20.0, 20.0),
         };
         let controllers = flow.observe_controllers();
@@ -638,9 +637,10 @@ fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everythin
 
 fn find_row(widget: &gtk::Widget, title: &str) -> Option<adw::PreferencesRow> {
     if let Some(row) = widget.downcast_ref::<adw::PreferencesRow>()
-        && row.title().contains(title) {
-            return Some(row.clone());
-        }
+        && row.title().contains(title)
+    {
+        return Some(row.clone());
+    }
     let mut child = widget.first_child();
     while let Some(current) = child {
         if let Some(found) = find_row(&current, title) {
@@ -727,9 +727,10 @@ fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
         return None;
     }
     if let Some(dropdown) = widget.downcast_ref::<gtk::DropDown>()
-        && dropdown.tooltip_text().unwrap_or_default().contains(says) {
-            return Some(dropdown.clone());
-        }
+        && dropdown.tooltip_text().unwrap_or_default().contains(says)
+    {
+        return Some(dropdown.clone());
+    }
     let mut child = widget.first_child();
     while let Some(current) = child {
         if let Some(found) = find_dropdown(&current, says) {
@@ -852,17 +853,20 @@ fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
         flags.push("insensitive".to_string());
     }
     if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>()
-        && row.is_selected() {
-            flags.push("selected".to_string());
-        }
+        && row.is_selected()
+    {
+        flags.push("selected".to_string());
+    }
     if let Some(toggle) = widget.downcast_ref::<gtk::ToggleButton>()
-        && toggle.is_active() {
-            flags.push("active".to_string());
-        }
+        && toggle.is_active()
+    {
+        flags.push("active".to_string());
+    }
     if let Some(check) = widget.downcast_ref::<gtk::CheckButton>()
-        && check.is_active() {
-            flags.push("active".to_string());
-        }
+        && check.is_active()
+    {
+        flags.push("active".to_string());
+    }
     // The card the pointer is over, which says nothing of its own.
     if widget.has_css_class("om-card") && widget.state_flags().contains(gtk::StateFlags::PRELIGHT) {
         flags.push("pointer".to_string());
@@ -870,7 +874,11 @@ fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
     let classes: Vec<String> = widget
         .css_classes()
         .iter()
-        .filter(|class| class.starts_with("om-") || ["danger", "warn", "ok", "current", "work", "bad", "word", "out", "new", "detached"].contains(&class.as_str()))
+        .filter(|class| {
+            class.starts_with("om-")
+                || ["danger", "warn", "ok", "current", "work", "bad", "word", "out", "new", "detached"]
+                    .contains(&class.as_str())
+        })
         .map(|class| class.to_string())
         .collect();
     let tooltip = widget.tooltip_text().filter(|_| said.is_some() || !flags.is_empty());
@@ -928,11 +936,7 @@ fn say(widget: &gtk::Widget) -> Option<String> {
         return Some(format!("{} | {}", title.title(), title.subtitle()));
     }
     if let Some(page) = widget.downcast_ref::<adw::StatusPage>() {
-        return Some(format!(
-            "{} | {}",
-            page.title(),
-            page.description().unwrap_or_default()
-        ));
+        return Some(format!("{} | {}", page.title(), page.description().unwrap_or_default()));
     }
     if let Some(switch) = widget.downcast_ref::<adw::SwitchRow>() {
         return Some(format!(

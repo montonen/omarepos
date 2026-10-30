@@ -149,11 +149,11 @@ impl Race {
     /// with each other go by name, so that they do not trade places on every
     /// frame.
     pub fn standings(&self, t: f64) -> Vec<(usize, f64)> {
-        let mut standings: Vec<(usize, f64)> = (0..self.racers.len()).map(|racer| (racer, self.total(racer, t))).collect();
+        let mut standings: Vec<(usize, f64)> =
+            (0..self.racers.len()).map(|racer| (racer, self.total(racer, t))).collect();
         standings.sort_by(|a, b| {
-            b.1.total_cmp(&a.1).then_with(|| {
-                self.racers[a.0].name.to_lowercase().cmp(&self.racers[b.0].name.to_lowercase())
-            })
+            b.1.total_cmp(&a.1)
+                .then_with(|| self.racers[a.0].name.to_lowercase().cmp(&self.racers[b.0].name.to_lowercase()))
         });
         standings
     }
@@ -213,7 +213,11 @@ impl Track {
             .width_request(NAME)
             .build();
         name.add_css_class("om-race-name");
-        let bar = gtk::DrawingArea::builder().content_height(BAR).content_width(4).valign(gtk::Align::Center).build();
+        let bar = gtk::DrawingArea::builder()
+            .content_height(BAR)
+            .content_width(4)
+            .valign(gtk::Align::Center)
+            .build();
         let (r, g, b) = crate::theme::Palette::rgb(racer.color);
         bar.set_draw_func(move |_, cr, width, height| {
             let (w, h) = (width as f64, height as f64);
@@ -265,7 +269,11 @@ impl Track {
 
     fn set_playing(self: &Rc<Self>, playing: bool) {
         self.playing.set(playing);
-        let (icon, says) = if playing { ("media-playback-pause-symbolic", "Pause (Space)") } else { ("media-playback-start-symbolic", "Play (Space)") };
+        let (icon, says) = if playing {
+            ("media-playback-pause-symbolic", "Pause (Space)")
+        } else {
+            ("media-playback-start-symbolic", "Play (Space)")
+        };
         self.play.set_icon_name(icon);
         self.play.set_tooltip_text(Some(says));
         if playing {
@@ -644,15 +652,17 @@ pub fn page(field: Field) -> adw::NavigationPage {
     // repositories', whichever is asked for, without reading it again.
     let latest: Rc<RefCell<Option<Rc<Contributions>>>> = Rc::new(RefCell::new(None));
     let show: Rc<dyn Fn()> = {
-        let (racing, stack, status, latest) = (racing.clone(), stack.clone(), status.clone(), Rc::clone(&latest));
+        let (racing, stack, status, latest) =
+            (racing.clone(), stack.clone(), status.clone(), Rc::clone(&latest));
         let track = Rc::downgrade(&track);
         let aside = aside.clone();
         Rc::new(move || {
             let Some(result) = latest.borrow().clone() else { return };
-            let race = match RACING.get(racing.selected() as usize).map_or(Racing::Authors, |(_, racing)| *racing) {
-                Racing::Authors => Race::of(&result, &aside),
-                Racing::Repositories => Race::by_repository(&result, &aside),
-            };
+            let race =
+                match RACING.get(racing.selected() as usize).map_or(Racing::Authors, |(_, racing)| *racing) {
+                    Racing::Authors => Race::of(&result, &aside),
+                    Racing::Repositories => Race::by_repository(&result, &aside),
+                };
             status.set_label(&status_line(&result, &race, &aside));
             if race.racers.is_empty() {
                 stack.set_visible_child_name("empty");
@@ -668,7 +678,8 @@ pub fn page(field: Field) -> adw::NavigationPage {
     }
 
     let load: Rc<dyn Fn()> = {
-        let (period, stack, status, reading) = (period.clone(), stack.clone(), status.clone(), reading.clone());
+        let (period, stack, status, reading) =
+            (period.clone(), stack.clone(), status.clone(), reading.clone());
         let title = title.clone();
         Rc::new(move || {
             let periods = periods();
@@ -818,7 +829,9 @@ mod tests {
             &result(vec![author("Bo", &[3, 0, 0]), author("ada", &[0, 1, 5]), author("Cy", &[1, 2, 0])]),
             &BTreeSet::new(),
         );
-        let order = |t: f64| race.standings(t).iter().map(|(racer, _)| race.racers[*racer].name.clone()).collect::<Vec<_>>();
+        let order = |t: f64| {
+            race.standings(t).iter().map(|(racer, _)| race.racers[*racer].name.clone()).collect::<Vec<_>>()
+        };
         assert_eq!(order(1.0), ["Bo", "Cy", "ada"]);
         // Day two: Bo 3, Cy 3, ada 1. Level, and Bo before Cy by name.
         assert_eq!(order(2.0), ["Bo", "Cy", "ada"]);
