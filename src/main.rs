@@ -1,5 +1,9 @@
 //! omarepos — an Omarchy-styled overview of every git repo on your machine.
 
+// A window's callbacks are passed around as `Rc<dyn Fn(…)>`, and naming each
+// of their types would say no more than the signature does.
+#![allow(clippy::type_complexity)]
+
 /// Say something on stderr, and do not mind if nobody is there to hear it.
 /// `eprintln!` panics when the write fails, and stderr fails for dull reasons:
 /// the terminal the program was started from has been closed, or the pipe it

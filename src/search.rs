@@ -174,11 +174,10 @@ fn spawn_within(
                         if !hits.is_empty() && tx.send_blocking(Event::Hits(hits)).is_err() {
                             return;
                         }
-                        if let Some(why) = stopped {
-                            if tx.send_blocking(Event::Stopped(why)).is_err() {
+                        if let Some(why) = stopped
+                            && tx.send_blocking(Event::Stopped(why)).is_err() {
                                 return;
                             }
-                        }
                         if tx.send_blocking(Event::Progress(finished, total)).is_err() {
                             return;
                         }
@@ -221,11 +220,10 @@ fn search_one(
             if !full.starts_with("refs/heads/") && !full.starts_with("refs/remotes/") {
                 continue;
             }
-            if let Ok(commit) = reference.peel_to_commit() {
-                if walk.push(commit.id()).is_ok() {
+            if let Ok(commit) = reference.peel_to_commit()
+                && walk.push(commit.id()).is_ok() {
                     pushed += 1;
                 }
-            }
         }
     }
     if pushed == 0 && walk.push_head().is_err() {
@@ -418,7 +416,7 @@ mod tests {
 
         let newest = |limits: Limits| -> Vec<String> {
             let (_, mut hits) = run(&[&quiet, &busy], "hotfix", limits);
-            hits.sort_by(|a, b| b.when.cmp(&a.when));
+            hits.sort_by_key(|hit| std::cmp::Reverse(hit.when));
             hits.iter().take(rows).map(|hit| hit.summary.clone()).collect()
         };
         assert_eq!(

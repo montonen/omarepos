@@ -1347,12 +1347,11 @@ impl Ui {
             if focused.activate_action("arcade.game-over", None).is_ok() {
                 return;
             }
-            if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
-                if !editable.text().is_empty() {
+            if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>()
+                && !editable.text().is_empty() {
                     editable.set_text("");
                     return;
                 }
-            }
         }
 
         if !self.on_grid() {
@@ -1379,12 +1378,11 @@ impl Ui {
     /// filter box would otherwise stop selecting its text. When the focus is
     /// somewhere typable it keeps its usual meaning.
     fn select_all_shown(self: &Rc<Self>) {
-        if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window) {
-            if let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
+        if let Some(focused) = gtk::prelude::GtkWindowExt::focus(&self.window)
+            && let Ok(editable) = focused.dynamic_cast::<gtk::Editable>() {
                 editable.select_region(0, -1);
                 return;
             }
-        }
         if !self.on_grid() {
             return;
         }
@@ -1762,7 +1760,7 @@ fn below(width: f64) -> adw::BreakpointCondition {
 /// The selection checkbox of a card, found by walking down from its flow box
 /// child. Cheap: a card is three levels deep and a handful of widgets wide.
 fn find_check(widget: &gtk::Widget) -> Option<gtk::CheckButton> {
-    if let Some(check) = widget.clone().downcast::<gtk::CheckButton>().ok() {
+    if let Ok(check) = widget.clone().downcast::<gtk::CheckButton>() {
         return Some(check);
     }
     let mut child = widget.first_child();

@@ -608,11 +608,10 @@ fn group_heading(
         for member in &members {
             // A row folded away does not stay selected. It would go on being
             // the file the diff is of, and the one Tab comes back to.
-            if !now && member.is_selected() {
-                if let Some(list) = member.parent().and_downcast::<gtk::ListBox>() {
+            if !now && member.is_selected()
+                && let Some(list) = member.parent().and_downcast::<gtk::ListBox>() {
                     list.select_row(gtk::ListBoxRow::NONE);
                 }
-            }
             member.set_visible(now);
         }
     });

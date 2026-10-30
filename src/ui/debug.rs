@@ -160,8 +160,8 @@ pub fn install(window: &adw::ApplicationWindow) {
         // Up and Down in a list, where no handler of ours wanted them, move
         // its cursor as GTK's own binding for them does, and what the list
         // does at either end of itself is the page's.
-        if matches!(name, "Up" | "Down") {
-            if let Some(list) = focus
+        if matches!(name, "Up" | "Down")
+            && let Some(list) = focus
                 .as_ref()
                 .and_then(|focus| focus.ancestor(gtk::ListBox::static_type()))
                 .and_downcast::<gtk::ListBox>()
@@ -170,7 +170,6 @@ pub fn install(window: &adw::ApplicationWindow) {
                 list.emit_by_name::<()>("move-cursor", &[&gtk::MovementStep::DisplayLines, &count, &false, &false]);
                 return;
             }
-        }
         // Enter, where no handler of ours wanted it, is what GTK would make
         // of it: the widget's own activation (a card, an entry, a button).
         if matches!(name, "Return" | "KP_Enter") {
@@ -632,17 +631,16 @@ fn write_dump(window: &adw::ApplicationWindow, path: &std::ffi::OsStr, everythin
         out.push_str(&format!("width: {} (needs {least})\n", window.width()));
     }
     walk(window.upcast_ref(), 0, everything, &mut out);
-    if let Err(err) = std::fs::write(&path, out) {
+    if let Err(err) = std::fs::write(path, out) {
         note!("omarepos: could not write the dump: {err}");
     }
 }
 
 fn find_row(widget: &gtk::Widget, title: &str) -> Option<adw::PreferencesRow> {
-    if let Some(row) = widget.downcast_ref::<adw::PreferencesRow>() {
-        if row.title().contains(title) {
+    if let Some(row) = widget.downcast_ref::<adw::PreferencesRow>()
+        && row.title().contains(title) {
             return Some(row.clone());
         }
-    }
     let mut child = widget.first_child();
     while let Some(current) = child {
         if let Some(found) = find_row(&current, title) {
@@ -728,11 +726,10 @@ fn find_dropdown(widget: &gtk::Widget, says: &str) -> Option<gtk::DropDown> {
     if !widget.is_mapped() {
         return None;
     }
-    if let Some(dropdown) = widget.downcast_ref::<gtk::DropDown>() {
-        if dropdown.tooltip_text().unwrap_or_default().contains(says) {
+    if let Some(dropdown) = widget.downcast_ref::<gtk::DropDown>()
+        && dropdown.tooltip_text().unwrap_or_default().contains(says) {
             return Some(dropdown.clone());
         }
-    }
     let mut child = widget.first_child();
     while let Some(current) = child {
         if let Some(found) = find_dropdown(&current, says) {
@@ -854,21 +851,18 @@ fn walk(widget: &gtk::Widget, depth: usize, unseen: bool, out: &mut String) {
     if !widget.is_sensitive() {
         flags.push("insensitive".to_string());
     }
-    if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() {
-        if row.is_selected() {
+    if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>()
+        && row.is_selected() {
             flags.push("selected".to_string());
         }
-    }
-    if let Some(toggle) = widget.downcast_ref::<gtk::ToggleButton>() {
-        if toggle.is_active() {
+    if let Some(toggle) = widget.downcast_ref::<gtk::ToggleButton>()
+        && toggle.is_active() {
             flags.push("active".to_string());
         }
-    }
-    if let Some(check) = widget.downcast_ref::<gtk::CheckButton>() {
-        if check.is_active() {
+    if let Some(check) = widget.downcast_ref::<gtk::CheckButton>()
+        && check.is_active() {
             flags.push("active".to_string());
         }
-    }
     // The card the pointer is over, which says nothing of its own.
     if widget.has_css_class("om-card") && widget.state_flags().contains(gtk::StateFlags::PRELIGHT) {
         flags.push("pointer".to_string());

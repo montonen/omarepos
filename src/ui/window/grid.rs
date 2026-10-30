@@ -257,11 +257,10 @@ impl Ui {
                 set_class(&card, "om-top-hit", index == 0);
                 set_class(&card, "om-earlier", earlier);
             }
-            if let Some(check) = find_check(child.upcast_ref()) {
-                if check.is_active() != ticked {
+            if let Some(check) = find_check(child.upcast_ref())
+                && check.is_active() != ticked {
                     check.set_active(ticked);
                 }
-            }
         }
 
         self.update_selection_label();
@@ -314,10 +313,10 @@ impl Ui {
         // window at the end of the frame, by handing it to what the widget
         // was in, and a card put back in the box is still in the box: left
         // to that, the keyboard went to the box and not to the card.
-        if touched {
-            if let Some(path) = focused {
-                if let Some(index) = repos.iter().position(|repo| repo.path == path) {
-                    if let Some(child) = self.flow.child_at_index(index as i32) {
+        if touched
+            && let Some(path) = focused
+                && let Some(index) = repos.iter().position(|repo| repo.path == path)
+                    && let Some(child) = self.flow.child_at_index(index as i32) {
                         // Through the flow box's own focus path, not `grab_focus`.
                         // The box keeps a cursor of its own, which is where the
                         // arrow keys start from, and `grab_focus` on a card moves
@@ -330,9 +329,6 @@ impl Ui {
                         gtk::prelude::GtkWindowExt::set_focus(&self.window, gtk::Widget::NONE);
                         child.child_focus(gtk::DirectionType::Down);
                     }
-                }
-            }
-        }
 
         if offset > 0.0 {
             let adjustment = self.scroller.vadjustment();

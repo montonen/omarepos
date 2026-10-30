@@ -871,9 +871,9 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
         }
     }
 
-    if !info.detached && !info.unborn {
-        if let Ok(branch) = repo.find_branch(&info.head, BranchType::Local) {
-            if let Ok(upstream) = branch.upstream() {
+    if !info.detached && !info.unborn
+        && let Ok(branch) = repo.find_branch(&info.head, BranchType::Local)
+            && let Ok(upstream) = branch.upstream() {
                 info.upstream = upstream.name().ok().flatten().map(|s| s.to_string());
                 info.upstream_when = upstream
                     .get()
@@ -893,8 +893,6 @@ fn inspect_at(path: &Path, now: i64) -> RepoInfo {
                     }
                 }
             }
-        }
-    }
 
     if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
         info.local_branches = branches.count();

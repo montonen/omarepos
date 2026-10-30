@@ -144,11 +144,10 @@ pub fn is_one_tag(tag: &str) -> bool {
 /// user wrote it; the two differ when a root is reached through a symlink.
 fn spellings(dir: &Path) -> Vec<PathBuf> {
     let mut both = vec![dir.to_path_buf()];
-    if let Ok(real) = dir.canonicalize() {
-        if real != dir {
+    if let Ok(real) = dir.canonicalize()
+        && real != dir {
             both.push(real);
         }
-    }
     both
 }
 
@@ -787,16 +786,16 @@ mod tests {
         let before = meta.tags_for(&api).to_vec();
         assert_eq!(before, ["a,b", "open source", "rust"]);
 
-        edit(&mut meta, &[api.clone()], |shown| shown);
+        edit(&mut meta, std::slice::from_ref(&api), |shown| shown);
         assert_eq!(meta.tags_for(&api), before);
 
         // An edit made beside them leaves them whole as well...
-        edit(&mut meta, &[api.clone()], |shown| format!("{shown}, cli"));
+        edit(&mut meta, std::slice::from_ref(&api), |shown| format!("{shown}, cli"));
         assert_eq!(meta.tags_for(&api), ["a,b", "cli", "open source", "rust"]);
         assert!(!meta.apply_root_tag(&api, ROOT, Some("open source")));
 
         // ...and a tag of two words comes off the way any other does.
-        edit(&mut meta, &[api.clone()], |shown| shown.replace("open source", ""));
+        edit(&mut meta, std::slice::from_ref(&api), |shown| shown.replace("open source", ""));
         assert_eq!(meta.tags_for(&api), ["a,b", "cli", "rust"]);
     }
 

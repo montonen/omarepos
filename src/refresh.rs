@@ -562,14 +562,13 @@ fn remote_urls(repo: &Repository) -> Vec<String> {
             }
         }
     }
-    if let Ok(config) = repo.config().and_then(|mut config| config.snapshot()) {
-        if let Ok(mut entries) = config.entries(Some("^remote\\..*\\.url$")) {
+    if let Ok(config) = repo.config().and_then(|mut config| config.snapshot())
+        && let Ok(mut entries) = config.entries(Some("^remote\\..*\\.url$")) {
             while let Some(entry) = entries.next() {
                 let Ok(entry) = entry else { continue };
                 urls.extend(entry.value().ok().map(str::to_string));
             }
         }
-    }
     urls
 }
 
@@ -1851,7 +1850,8 @@ mod tests {
             write(&seed.join(".config/autostart/payload.desktop"), "[Desktop Entry]\n");
         });
 
-        for pass in [Pass::One] {
+        {
+            let pass = Pass::One;
             let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
             assert!(matches!(got, Outcome::Skipped(Skip::Elsewhere)), "{pass:?}: {got:?}");
         }
@@ -1933,7 +1933,8 @@ mod tests {
             ("squash", "branch.main.mergeoptions", "--squash"),
             ("twohead", "pull.twohead", "ours"),
         ] {
-            for pass in [Pass::One] {
+            {
+                let pass = Pass::One;
                 let f = fleet(&format!("rf-merge-config-{name}-{pass:?}"));
                 git(&f.work, &["config", key, value]);
                 f.remote_commits("an edit and a new file", |seed| {
@@ -2010,7 +2011,8 @@ mod tests {
         let before = f.head();
         f.remote_moves(1);
 
-        for pass in [Pass::One] {
+        {
+            let pass = Pass::One;
             let got = refresh_one(&f.work, &Options { fast_forward: true, ..options(pass) }).outcome;
             let Outcome::Refused(why) = &got else { panic!("{pass:?}: {got:?}") };
             assert!(why.contains("mergeoptions"), "{pass:?}: {why}");
@@ -2093,7 +2095,8 @@ mod tests {
         if as_root() {
             return;
         }
-        for pass in [Pass::One] {
+        {
+            let pass = Pass::One;
             let f = four_files_incoming(&format!("rf-part-way-{pass:?}"));
             let before = f.head();
             let locked = ReadOnly::new(f.work.join("docs"));
@@ -2230,7 +2233,8 @@ mod tests {
     #[test]
     fn an_update_that_moves_a_checked_out_submodule_is_left_to_the_user() {
         let _guard = isolate();
-        for pass in [Pass::One] {
+        {
+            let pass = Pass::One;
             let v = vendored(&format!("rf-submodule-update-{pass:?}"));
             let before = v.f.head();
             v.pointer_moves();

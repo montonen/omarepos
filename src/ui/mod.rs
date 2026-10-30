@@ -557,8 +557,8 @@ pub fn day_window(days: usize) -> crate::stats::Window {
     let mut day_labels = Vec::with_capacity(days);
     let mut day_titles = Vec::with_capacity(days);
 
-    if let Ok(now) = gtk::glib::DateTime::now_local() {
-        if let Ok(midnight) = gtk::glib::DateTime::from_local(
+    if let Ok(now) = gtk::glib::DateTime::now_local()
+        && let Ok(midnight) = gtk::glib::DateTime::from_local(
             now.year(),
             now.month(),
             now.day_of_month(),
@@ -581,7 +581,6 @@ pub fn day_window(days: usize) -> crate::stats::Window {
                 );
             }
         }
-    }
 
     if day_starts.is_empty() {
         // No local timezone to be had; fall back to rolling 24-hour buckets.
@@ -645,7 +644,7 @@ mod tests {
     fn any_date_at_all_has_an_age() {
         assert_eq!(relative_time(i64::MIN), relative_time(i64::MIN + 1));
         assert_eq!(relative_time(i64::MAX), "in the future");
-        assert_eq!(relative_time(0).split(' ').last(), Some("ago"));
+        assert_eq!(relative_time(0).split(' ').next_back(), Some("ago"));
     }
 
     #[test]

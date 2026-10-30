@@ -2250,13 +2250,12 @@ brown = "#743d1e"
             let layer = [".om-less", ".om-more", ".om-keys", ".om-enter"]
                 .into_iter()
                 .find(|layer| selector.ends_with(layer));
-            if property == "opacity" && selector.contains(":hover") {
-                if let Some(layer) = layer {
+            if property == "opacity" && selector.contains(":hover")
+                && let Some(layer) = layer {
                     let asked = selector.contains(".om-pointer");
                     assert!(asked, "`{selector}` changes a card that is only lying under the pointer");
                     assert!(under_the_pointer.contains(&layer), "`{selector}` shows keys under the pointer");
                 }
-            }
         }
 
         // `border-color` is all four sides. A rule that sets it on a card has

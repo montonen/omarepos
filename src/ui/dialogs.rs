@@ -106,11 +106,10 @@ pub fn settings(
                     if let (true, Some(meta)) = (persist(&cfg), &meta) {
                         let kept = sources(&cfg.borrow());
                         let mut meta = meta.borrow_mut();
-                        if meta.forget_source(source.path(), &kept) > 0 {
-                            if let Err(err) = meta.save() {
+                        if meta.forget_source(source.path(), &kept) > 0
+                            && let Err(err) = meta.save() {
                                 complain(&format!("Its tags are still in the tag file: {err}"));
                             }
-                        }
                     }
                     if let Some(f) = rebuild.borrow().clone() {
                         f();
@@ -722,11 +721,10 @@ fn pick_folder(
 ) {
     let dialog = gtk::FileDialog::builder().title(title).modal(true).build();
     dialog.select_folder(parent, gio::Cancellable::NONE, move |result| {
-        if let Ok(file) = result {
-            if let Some(path) = file.path() {
+        if let Ok(file) = result
+            && let Some(path) = file.path() {
                 on_pick(path);
             }
-        }
     });
 }
 

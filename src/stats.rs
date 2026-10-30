@@ -760,7 +760,7 @@ fn collect(path: &Path, window: &Window, branches: Branches) -> Result<Found, St
 
     // Newest first by the clock the page goes by: only the first hundred of
     // an author's commits are listed, and the rest are called older.
-    found.commits.sort_by(|a, b| b.when.cmp(&a.when));
+    found.commits.sort_by_key(|commit| std::cmp::Reverse(commit.when));
     Ok(found)
 }
 
@@ -1564,8 +1564,8 @@ mod tests {
             author.repos.keys().cloned().collect()
         };
         for _ in 0..5 {
-            assert_eq!(credited(&[&f.work, &copy]), [f.work.clone()]);
-            assert_eq!(credited(&[&copy, &f.work]), [copy.clone()]);
+            assert_eq!(credited(&[&f.work, &copy]), std::slice::from_ref(&f.work));
+            assert_eq!(credited(&[&copy, &f.work]), std::slice::from_ref(&copy));
         }
     }
 

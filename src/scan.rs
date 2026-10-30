@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use crate::config::Root;
 use crate::git::{self, Found, RepoInfo, RootReport, Seed};
 
+// One `Repo` is sent per repository, once: boxing it would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// Discovery finished: this many repositories are on their way.
     Discovered(usize),

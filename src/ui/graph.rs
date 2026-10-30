@@ -481,11 +481,10 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                     &load_path,
                     &watcher,
                     Rc::new(move |glance: Glance| {
-                        if glance.changes > 0 || glance.unreadable.is_some() || glance.tip.is_some() {
-                            if let Some(reload) = reload.borrow().clone() {
+                        if (glance.changes > 0 || glance.unreadable.is_some() || glance.tip.is_some())
+                            && let Some(reload) = reload.borrow().clone() {
                                 reload();
                             }
-                        }
                     }),
                 );
                 return;
@@ -577,8 +576,8 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
             // did nothing until Down had been pressed once. Not when the
             // keyboard is at work in the pane below, though. A reload
             // must not pull it out of the list of changed files.
-            if !in_pane {
-                if let Some(row) = landing {
+            if !in_pane
+                && let Some(row) = landing {
                     // Once the list has been laid out, focusing the row
                     // brings it into view; doing it immediately would
                     // scroll against a height the list does not have yet.
@@ -593,7 +592,6 @@ pub fn page(path: &Path, name: &str, target: Option<String>, host: Host) -> adw:
                         },
                     );
                 }
-            }
 
             {
                 // `shown` is where HEAD was when the page was read: its name
@@ -789,11 +787,10 @@ fn summary(graph: &Graph, from: usize, to: usize) -> String {
 }
 
 fn stop_watching(watcher: &Watcher) {
-    if let Some((window, id)) = watcher.borrow_mut().take() {
-        if let Some(window) = window.upgrade() {
+    if let Some((window, id)) = watcher.borrow_mut().take()
+        && let Some(window) = window.upgrade() {
             window.disconnect(id);
         }
-    }
 }
 
 /// Look at the repository again whenever the window regains focus. It changes

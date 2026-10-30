@@ -133,7 +133,7 @@ fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push('\u{202f}');
         }
         out.push(c);
@@ -362,7 +362,7 @@ pub fn page(
                     return;
                 }
 
-                hits.sort_by(|a, b| b.when.cmp(&a.when));
+                hits.sort_by_key(|hit| std::cmp::Reverse(hit.when));
                 tally.found = hits.len();
                 tally.repos_hit = {
                     // By path: two repositories can have the same name.

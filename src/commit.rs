@@ -15,6 +15,8 @@ use git2::{Diff, DiffFindOptions, DiffOptions, Oid, Patch, Repository};
 const MAX_FILES: usize = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `TypeChange` is git's own word for a file that became a link or the like.
+#[allow(clippy::enum_variant_names)]
 pub enum Change {
     Added,
     Modified,
@@ -299,9 +301,7 @@ fn load(path: &Path, id: &str, cancel: &Cancel) -> Result<Detail, String> {
         body: commit
             .message()
             .unwrap_or("")
-            .trim()
-            .splitn(2, '\n')
-            .nth(1)
+            .trim().split_once('\n').map(|x| x.1)
             .unwrap_or("")
             .trim()
             .to_string(),

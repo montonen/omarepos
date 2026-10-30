@@ -246,7 +246,7 @@ pub enum Reread {
 pub fn why_unusable(path: &Path, why: &str) -> String {
     let mut lines = why.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = lines.next().unwrap_or("could not be read");
-    let said = match lines.last() {
+    let said = match lines.next_back() {
         Some(last) => format!("{first}: {last}"),
         None => first.to_string(),
     };
@@ -592,7 +592,7 @@ impl Config {
             }
             Err(err) => return (Err(err.to_string()), None),
         };
-        let read = toml::from_str::<Config>(&text).map(Self::as_read).map_err(|err| err.to_string());
+        let read = toml::from_str::<Config>(&text).map(Self::filled_in).map_err(|err| err.to_string());
         (read, Some(text))
     }
 
@@ -609,7 +609,7 @@ impl Config {
     }
 
     /// What a file that parsed means, where it leaves something unsaid.
-    fn as_read(mut self) -> Self {
+    fn filled_in(mut self) -> Self {
         if self.roots.is_empty() {
             self.roots = Self::default().roots;
         }
@@ -623,10 +623,8 @@ impl Config {
         // NUL. TOML will carry one (`"x\u0000y"`); it is dropped here, where
         // both a first read and a re-read pass.
         let clean = |text: &mut String| text.retain(|c| c != '\0');
-        for text in [&mut self.terminal, &mut self.editor, &mut self.terminal_runs] {
-            if let Some(text) = text {
-                clean(text);
-            }
+        for text in [&mut self.terminal, &mut self.editor, &mut self.terminal_runs].into_iter().flatten() {
+            clean(text);
         }
         self.extra_repos.iter_mut().for_each(clean);
         self.refresh.only_tags.iter_mut().for_each(clean);
@@ -670,7 +668,7 @@ impl Config {
         };
         match parsed {
             Ok(fresh) => {
-                let mut fresh = fresh.as_read();
+                let mut fresh = fresh.filled_in();
                 fresh.roots_override = self.roots_override.take();
                 fresh.depth_override = self.depth_override;
                 fresh.on_disk = RefCell::new(disk);
@@ -751,11 +749,10 @@ impl Config {
             }
             let mut entry = spec.to_entry();
             mutate(&mut entry);
-            if let Some(tag) = &entry.tag {
-                if tag.trim().is_empty() {
+            if let Some(tag) = &entry.tag
+                && tag.trim().is_empty() {
                     entry.tag = None;
                 }
-            }
             *spec = if entry.is_plain() {
                 RootSpec::Simple(entry.path)
             } else {
@@ -860,11 +857,10 @@ impl Config {
         if let Some(term) = &self.terminal {
             return term.clone();
         }
-        if let Ok(term) = std::env::var("TERMINAL") {
-            if !term.trim().is_empty() {
+        if let Ok(term) = std::env::var("TERMINAL")
+            && !term.trim().is_empty() {
                 return term;
             }
-        }
         for candidate in [
             "alacritty",
             "ghostty",
@@ -907,6 +903,8 @@ fn which(bin: &str) -> bool {
 }
 
 #[cfg(test)]
+// The tests build a configuration a field at a time, the way the dialog changes one.
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use std::collections::BTreeMap;
 

@@ -1031,7 +1031,7 @@ fn commit_list(
         group.append(&heading);
 
         let mut commits = in_repo.commits.clone();
-        commits.sort_by(|a, b| b.when.cmp(&a.when));
+        commits.sort_by_key(|commit| std::cmp::Reverse(commit.when));
         // A list, so that a commit can be reached with the keyboard and
         // opened. These were plain boxes: the page could show that a commit
         // existed and offered no way to it, not even its whole sha.
@@ -1247,7 +1247,7 @@ pub(crate) fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push('\u{202f}');
         }
         out.push(c);
@@ -1396,7 +1396,7 @@ mod tests {
         let authors = vec![author("Ada Lind", "ada@work.invalid"), author("ada lind", "ada@home.invalid"), author("Bo", "bo@work.invalid")];
         let aside: BTreeSet<String> = ["ada@work.invalid".to_string()].into();
         let is_aside = set_aside_in(&authors, &aside);
-        assert_eq!(authors.iter().map(|author| is_aside(author)).collect::<Vec<_>>(), [true, true, false]);
-        assert!(set_aside_in(&authors, &BTreeSet::new())(&authors[1]) == false);
+        assert_eq!(authors.iter().map(is_aside).collect::<Vec<_>>(), [true, true, false]);
+        assert!(!set_aside_in(&authors, &BTreeSet::new())(&authors[1]));
     }
 }

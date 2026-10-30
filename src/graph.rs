@@ -252,11 +252,10 @@ pub fn build(
             down,
         });
 
-        if let Some(wanted) = target {
-            if found_at.is_none() && oid.to_string().starts_with(wanted) {
+        if let Some(wanted) = target
+            && found_at.is_none() && oid.to_string().starts_with(wanted) {
                 found_at = Some(rows.len() - 1);
             }
-        }
     }
 
     let lanes = rows
@@ -462,14 +461,13 @@ fn ref_labels(repo: &Repository) -> HashMap<Oid, Vec<RefLabel>> {
     }
 
     // A detached HEAD gets its own marker, since no branch names it.
-    if repo.head_detached().unwrap_or(false) {
-        if let Ok(commit) = repo.head().and_then(|h| h.peel_to_commit()) {
+    if repo.head_detached().unwrap_or(false)
+        && let Ok(commit) = repo.head().and_then(|h| h.peel_to_commit()) {
             map.entry(commit.id()).or_default().insert(
                 0,
                 RefLabel { name: "HEAD".into(), kind: RefKind::Head, current: true },
             );
         }
-    }
 
     for labels in map.values_mut() {
         labels.sort_by_key(|l| match l.kind {
