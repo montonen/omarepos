@@ -72,6 +72,14 @@ opens the top hit. With up to five tags, each has a button in the header: a
 click shows that tag alone, and Ctrl+click adds another. The warning triangle
 keeps only the repositories that need something.
 
+### The questions you ask every day
+
+One client's repositories, everything behind, everything with work in it: set
+the filter, the tags and the sort once and keep them as a view under a name.
+The ★ in the header saves and lists them, and `Ctrl+1` to `Ctrl+9` open the
+first nine. A view is a saved question and nothing more; it changes nothing
+about any repository. More in [Usage](docs/usage.md#saved-views).
+
 ### One repository
 
 ![The commit graph of a repository, with the files a commit changed and a diff below](docs/img/graph.png)
@@ -107,7 +115,7 @@ come first. `Enter` opens that repository's graph on that commit. More in
 
 ![Contributions over the last seven days, by author](docs/img/contributions.png)
 
-`Ctrl+G` adds up the last 7 days, or as much as the last 12 months, across the
+`Ctrl+G` adds up the last 24 hours, or as much as the last 12 months, across the
 grid or the repositories you ticked: commits and lines per author, and commits per day,
 with a mailmap honoured. A row opens to the commits themselves. A second view
 counts every branch and not only the checked-out ones, and `r` plays the
@@ -126,6 +134,20 @@ in the repository is uncommitted and the branch is only behind; anything else
 it leaves for you, and says why. The timer only ever fetches, runs no hooks and
 only enters repositories you have already seen. More in
 [Fetching](docs/refresh.md).
+
+### For scripts, too
+
+`omarepos --json` prints what the grid shows and exits: every repository, its
+branch, what is uncommitted, ahead and behind, the last commit, its tags, and
+whether it needs you, under a versioned schema. No window, no display, nothing
+written, nothing fetched, so a script, a status bar or an agent can ask what you
+would ask at a glance:
+
+```bash
+omarepos --json | jq -r '.repos[] | select(.needs_attention) | .name'
+```
+
+More in [Usage](docs/usage.md#the-fleet-as-json).
 
 ### Your theme
 

@@ -115,7 +115,12 @@ shot changes
 grid; X keys ctrl+shift+f; sleep 0.8; X type "theme switch"; sleep 3; still
 shot search
 # ---- who did what this week
-grid; X keys ctrl+g; sleep 5; still
+# The page goes up before its lines are counted, saying "counting lines…" in
+# the status bar until they are: wait for the figures and for that to go.
+until_read() { local i said; for i in $(seq 1 240); do said=$(X dump "om-statusbar")
+    case "$said" in *"counting lines"*) ;; *"commits  ·"*) return 0;; esac; sleep 0.5; done
+  echo "Contributions did not finish reading"; exit 1; }
+grid; X keys ctrl+g; until_read; still
 shot contributions
 
 # ---- the four cards with something to do, in other themes
